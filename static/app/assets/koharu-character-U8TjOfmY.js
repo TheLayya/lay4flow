@@ -1,0 +1,1 @@
+var e=`/static/app/assets/koharu-character-0CZLc_nB.webp`;export{e as t};

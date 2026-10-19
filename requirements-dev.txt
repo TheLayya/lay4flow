@@ -1,0 +1,4 @@
+-r requirements.txt
+Pillow>=10
+ruff==0.16.9
+openai==3.19.2

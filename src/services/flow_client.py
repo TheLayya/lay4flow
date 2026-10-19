@@ -1,0 +1,4395 @@
+"""Flow API Client for VideoFX (Veo)"""
+
+import asyncio
+import json
+import contextvars
+from contextlib import contextmanager
+from copy import deepcopy
+import time
+import uuid
+import random
+import base64
+import gzip
+import ssl
+import re
+from typing import Dict, Any, Optional, List, Union, Callable, Awaitable
+from urllib.parse import quote, urljoin, urlparse
+import urllib.error
+import urllib.request
+from curl_cffi.requests import AsyncSession
+from ..core.logger import debug_logger
+from ..core.config import config
+from .flow import endpoints
+from .flow import media as media_protocol
+from .flow import retry as retry_policy
+from .flow.session import with_session_token
+from .proxy_urls import normalize_proxy_url
+from .flow.fingerprint import (
+    apply_remote_fingerprint_headers,
+    merge_cookie_header,
+    normalize_remote_fingerprint,
+    resolve_browser_impersonate,
+    redact_credentials,
+    summarize_remote_http_error,
+)
+from .flow.video_edit import (
+    validate_optional_video_trim,
+    validate_video_trim,  # Re-export for existing service/API imports.
+    video_edit_frame_range,
+)
+
+try:
+    import httpx
+except ImportError:
+    httpx = None
+
+
+class FlowClient:
+    """VideoFX API客户端"""
+
+    FLOW_BASE_URL = "https://flow.google.com"
+
+    FLOW_PUBLIC_API_KEY = "AIzaSyBtrm0o5ab1c-Ec8ZuLcGt3oJAA5VWt3pY"
+    FLOW_BROWSER_CHANNEL_HEADER = "stable"
+    FLOW_BROWSER_COPYRIGHT_HEADER = "Copyright 2026 Google LLC. All Rights Reserved."
+    FLOW_BROWSER_VALIDATION_HEADER = "MRCPrt/rS3JY47x2Yiz9h3ag4U8="
+    FLOW_BROWSER_YEAR_HEADER = "2026"
+    FLOW_FRONTEND_EXPERIMENT_IDS = (
+        "106184493,106256669,105798603,106281924,106259075,106262194,"
+        "105993823,106104244,105484652,1714252,105928947,106238955,"
+        "106225453,106131447,1706538,119157484,106243706,105746691,"
+        "106151974,106125249,106001691,106077941"
+    )
+
+    def __init__(self, proxy_manager, db=None):
+        self.proxy_manager = proxy_manager
+        self.db = db  # Database instance for captcha config
+        self.flow_base_url = config.flow_base_url or self.FLOW_BASE_URL
+        self.labs_base_url = config.flow_labs_base_url  # https://labs.google/fx/api
+        self.api_base_url = config.flow_api_base_url  # https://aisandbox-pa.googleapis.com/v1
+        self.timeout = config.flow_timeout
+        # 当前请求链路绑定的浏览器指纹（基于 contextvar，避免并发串扰）
+        self._request_fingerprint_ctx: contextvars.ContextVar[Optional[Dict[str, Any]]] = (
+            contextvars.ContextVar("flow_request_fingerprint", default=None)
+        )
+        self._remote_browser_prefill_last_sent: Dict[str, float] = {}
+        # Trusted account configuration, separate from remote solver fingerprints.
+        self._account_proxy_ctx = contextvars.ContextVar("flow_account_proxy", default=None)
+
+        # 仅保留当前上游仍稳定出现的最小浏览器风格头；具体 UA / Accept-Language / UA-CH
+        # 统一以当前请求链路绑定的 runtime fingerprint 为准，不再兼容旧版随机平台策略。
+        self._default_client_headers = {
+            "sec-ch-ua-mobile": "?0",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "cross-site",
+        }
+        # 发车策略改为“请求到就发”：
+        # 不在 lay4flow 本地对提交做批次整形或排队，避免把同批请求打成阶梯。
+
+    def _generate_user_agent(self, account_id: str = None) -> str:
+        """读取配置兜底 UA；保留 account_id 参数以兼容现有调用。"""
+        return config.flow_user_agent
+
+    @contextmanager
+    def account_request_proxy(self, proxy_url: Optional[str]):
+        marker = self._account_proxy_ctx.set(normalize_proxy_url(proxy_url))
+        try:
+            yield
+        finally:
+            self._account_proxy_ctx.reset(marker)
+
+    def _set_request_fingerprint(self, fingerprint: Optional[Dict[str, Any]]):
+        """设置当前请求链路的浏览器指纹上下文。"""
+        snapshot = (
+            deepcopy(fingerprint)
+            if fingerprint and fingerprint.get("_source") == "remote_browser"
+            else dict(fingerprint)
+            if fingerprint
+            else None
+        )
+        self._request_fingerprint_ctx.set(snapshot)
+
+    def get_request_fingerprint(self) -> Optional[Dict[str, Any]]:
+        """获取当前请求链路绑定的浏览器指纹快照。"""
+        fingerprint = self._request_fingerprint_ctx.get()
+        if not isinstance(fingerprint, dict) or not fingerprint:
+            return None
+        return (
+            deepcopy(fingerprint)
+            if fingerprint.get("_source") == "remote_browser"
+            else dict(fingerprint)
+        )
+
+    def clear_request_fingerprint(self):
+        """清理请求链路绑定的浏览器指纹。"""
+        self._set_request_fingerprint(None)
+
+    def _remote_solve_fingerprint(self, payload: Dict[str, Any], project_id: str) -> Dict[str, Any]:
+        return normalize_remote_fingerprint(
+            payload,
+            project_id=project_id,
+            origin=self.flow_base_url,
+            referer=self._build_flow_project_page_url(project_id),
+        )
+
+    def _apply_remote_browser_headers(
+        self, headers: Dict[str, str], url: str, account_id: Optional[str]
+    ):
+        apply_remote_fingerprint_headers(
+            headers,
+            url,
+            self.get_request_fingerprint() or {},
+            fallback_user_agent=self._generate_user_agent(account_id),
+            now=time.time(),
+        )
+
+    @staticmethod
+    def _remote_safe_log(value: Any) -> Any:
+        return redact_credentials(value)
+
+    @staticmethod
+    def _remote_http_error(status_code: int, response_text: str) -> str:
+        return summarize_remote_http_error(status_code, response_text)
+
+    def _remote_safe_error(self, error: Exception, *, redact: bool = False) -> str:
+        text = str(error)
+        status = re.search(r"HTTP Error (\d{3})", text)
+        if status:
+            return self._remote_http_error(int(status.group(1)), text)
+        if self._is_proxy_connection_error(error):
+            return "proxy error: curl: (7)"
+        if self._is_retryable_network_error(text) or self._should_fallback_to_urllib(text):
+            return (
+                "network connection timed out"
+                if self._is_timeout_error(text)
+                else "network TLS connect error"
+            )
+        return f"remote REST request failed ({type(error).__name__})"
+
+    def _get_primary_accept_language(self, fallback: str = "zh-CN,zh;q=0.9") -> str:
+        fingerprint = self.get_request_fingerprint()
+        if isinstance(fingerprint, dict):
+            accept_language = str(fingerprint.get("accept_language") or "").strip()
+            if accept_language:
+                return self._normalize_accept_language_header(accept_language, fallback=fallback)
+        return self._normalize_accept_language_header(fallback, fallback=fallback)
+
+    def _get_primary_locale_code(self, fallback: str = "en-US") -> str:
+        fingerprint = self.get_request_fingerprint()
+        if isinstance(fingerprint, dict):
+            language = str(fingerprint.get("language") or "").strip()
+            if language:
+                return language
+            accept_language = str(fingerprint.get("accept_language") or "").strip()
+            if accept_language:
+                primary = accept_language.split(",", 1)[0].strip()
+                if primary:
+                    return primary
+        return fallback
+
+    def _infer_sec_ch_ua_from_user_agent(self, user_agent: Optional[str]) -> str:
+        ua = str(user_agent or "").strip()
+        if not ua:
+            return ""
+        import re
+
+        match = re.search(r"(?:Chrome|Chromium)/(\d+)", ua, re.IGNORECASE)
+        major = match.group(1) if match else "124"
+        return f'"Google Chrome";v="{major}", "Chromium";v="{major}", "Not)A;Brand";v="24"'
+
+    def _normalize_sec_ch_ua_header(
+        self,
+        sec_ch_ua: Optional[str],
+        *,
+        user_agent: Optional[str] = None,
+    ) -> str:
+        raw = str(sec_ch_ua or "").strip()
+        inferred = self._infer_sec_ch_ua_from_user_agent(user_agent)
+        if not raw:
+            return inferred
+        ua_text = str(user_agent or "").lower()
+        if "chrome/" in ua_text and "google chrome" not in raw.lower():
+            return inferred
+        return raw or inferred
+
+    def _build_fingerprint_from_user_agent(
+        self,
+        user_agent: Optional[str],
+        *,
+        accept_language: Optional[str] = None,
+        proxy_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        ua = str(user_agent or "").strip()
+        if not ua:
+            return {}
+        ua_lower = ua.lower()
+        platform = '"Windows"'
+        mobile = "?0"
+        if "android" in ua_lower:
+            platform = '"Android"'
+            mobile = "?1"
+        elif "iphone" in ua_lower or "ipad" in ua_lower or "ios" in ua_lower:
+            platform = '"iOS"'
+            mobile = "?1"
+        elif "mac" in ua_lower:
+            platform = '"macOS"'
+        elif "linux" in ua_lower or "x11" in ua_lower:
+            platform = '"Linux"'
+        fingerprint: Dict[str, Any] = {
+            "user_agent": ua,
+            "sec_ch_ua": self._infer_sec_ch_ua_from_user_agent(ua),
+            "sec_ch_ua_mobile": mobile,
+            "sec_ch_ua_platform": platform,
+        }
+        normalized_accept_language = self._normalize_accept_language_header(accept_language)
+        if normalized_accept_language:
+            fingerprint["accept_language"] = normalized_accept_language
+        if proxy_url:
+            fingerprint["proxy_url"] = proxy_url
+        return fingerprint
+
+    def _normalize_accept_language_header(
+        self,
+        accept_language: Optional[str],
+        fallback: str = "zh-CN,zh;q=0.9",
+    ) -> str:
+        raw = str(accept_language or "").strip()
+        if not raw:
+            return fallback
+        if "," in raw:
+            normalized_parts: list[str] = []
+            for index, item in enumerate(raw.split(",")):
+                candidate = str(item or "").strip()
+                if not candidate:
+                    continue
+                language = candidate.split(";", 1)[0].strip()
+                if not language:
+                    continue
+                if index == 0:
+                    normalized_parts.append(language)
+                    continue
+                q_match = re.search(r";\s*q=([0-9.]+)", candidate, re.IGNORECASE)
+                q_value = q_match.group(1) if q_match else f"{max(0.1, 1 - (index * 0.1)):.1f}"
+                normalized_parts.append(f"{language};q={q_value}")
+            if normalized_parts:
+                return ",".join(normalized_parts)
+            return fallback
+        if "-" in raw:
+            primary = raw.split("-", 1)[0].strip()
+            if len(primary) == 2 and primary.isalpha():
+                return f"{raw},{primary};q=0.9"
+        return raw
+
+    def _get_effective_request_user_agent(self, account_id: Optional[str] = None) -> str:
+        fingerprint = self.get_request_fingerprint()
+        if isinstance(fingerprint, dict):
+            user_agent = str(fingerprint.get("user_agent") or "").strip()
+            if user_agent:
+                return user_agent
+        return self._generate_user_agent(account_id)
+
+    @staticmethod
+    def _should_attach_runtime_session_cookies(url: str) -> bool:
+        host = str(urlparse(str(url or "")).hostname or "").lower()
+        if not host:
+            return False
+        return any(
+            host == candidate or host.endswith(f".{candidate}")
+            for candidate in (
+                "google.com",
+                "googleapis.com",
+                "flow.google.com",
+                "labs.google",
+                "recaptcha.net",
+            )
+        )
+
+    @staticmethod
+    def _merge_cookie_header(
+        existing_cookie_header: Optional[str],
+        extra_cookies: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        return merge_cookie_header(existing_cookie_header, extra_cookies)
+
+    def _build_flow_project_page_url(self, project_id: str) -> str:
+        return f"{self.flow_base_url}/project/{project_id}"
+
+    def _request_context_origin(self, url: str) -> str:
+        """Return the browser origin expected by the target Google endpoint."""
+        host = str(urlparse(str(url or "")).hostname or "").lower()
+        if host == "labs.google" or host.endswith(".labs.google"):
+            return "https://labs.google"
+        return self.flow_base_url
+
+    def _build_current_flow_media_headers(
+        self,
+        *,
+        content_type: str = "application/json",
+    ) -> Dict[str, str]:
+        headers = {
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Accept-Language": self._get_primary_accept_language(fallback="zh-CN,zh;q=0.9"),
+            "Content-Type": content_type,
+            "Origin": self.flow_base_url,
+            "Priority": "u=1, i",
+            "Referer": f"{self.flow_base_url}/",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "cross-site",
+            "sec-fetch-storage-access": "active",
+        }
+        headers.setdefault("x-browser-channel", self.FLOW_BROWSER_CHANNEL_HEADER)
+        headers.setdefault("x-browser-copyright", self.FLOW_BROWSER_COPYRIGHT_HEADER)
+        headers.setdefault("x-browser-validation", self.FLOW_BROWSER_VALIDATION_HEADER)
+        headers.setdefault("x-browser-year", self.FLOW_BROWSER_YEAR_HEADER)
+        return headers
+
+    def _build_labs_request_context_headers(self, project_id: Optional[str]) -> Dict[str, str]:
+        return self._build_current_flow_media_headers()
+
+    def _compact_json_dumps(self, payload: Any) -> str:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def _encode_trpc_input(self, payload: Dict[str, Any]) -> str:
+        return quote(self._compact_json_dumps(payload), safe="")
+
+    @staticmethod
+    def _extract_project_id_from_request_payload(
+        payload: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        if not isinstance(payload, dict):
+            return None
+        client_context = payload.get("clientContext")
+        if isinstance(client_context, dict):
+            project_id = str(client_context.get("projectId") or "").strip()
+            if project_id:
+                return project_id
+        requests = payload.get("requests")
+        if isinstance(requests, list):
+            for item in requests:
+                if not isinstance(item, dict):
+                    continue
+                item_client_context = item.get("clientContext")
+                if not isinstance(item_client_context, dict):
+                    continue
+                project_id = str(item_client_context.get("projectId") or "").strip()
+                if project_id:
+                    return project_id
+        return None
+
+    async def _get_token_st_by_id(self, token_id: Optional[int]) -> Optional[str]:
+        if not token_id or self.db is None or not hasattr(self.db, "get_token"):
+            return None
+        try:
+            token = await self.db.get_token(int(token_id))
+            st_value = str(getattr(token, "st", "") or "").strip() if token else ""
+            return st_value or None
+        except Exception as e:
+            debug_logger.log_warning(f"[VIDEO WARMUP] 读取 Token-{token_id} 的 ST 失败: {e}")
+            return None
+
+    def _build_request_headers(
+        self,
+        url: str,
+        headers: Optional[Dict],
+        json_data: Optional[Dict],
+        *,
+        fingerprint: Optional[Dict[str, Any]],
+        proxy_url: Optional[str],
+        use_st: bool,
+        st_token: Optional[str],
+        use_at: bool,
+        at_token: Optional[str],
+        apply_default_client_headers: bool,
+    ) -> Dict[str, str]:
+        """Build JSON/text request identity once; mode and proxy policy remain with the caller."""
+        if headers is None:
+            headers = {}
+        else:
+            headers = dict(headers)
+
+        if use_st and st_token:
+            existing = "; ".join(value for key, value in headers.items() if key.lower() == "cookie")
+            for key in list(headers):
+                if key.lower() == "cookie":
+                    del headers[key]
+            headers["Cookie"] = self._merge_cookie_header(
+                existing, {"__Secure-next-auth.session-token": st_token}
+            )
+
+        if use_at and at_token:
+            if not any((key.lower() == "authorization" for key in headers)):
+                headers["authorization"] = f"Bearer {at_token}"
+
+        account_id = None
+        if st_token:
+            account_id = st_token[:16]
+        elif at_token:
+            account_id = at_token[:16]
+
+        fingerprint_user_agent = None
+        if isinstance(fingerprint, dict):
+            fingerprint_user_agent = fingerprint.get("user_agent")
+
+        effective_user_agent = str(
+            fingerprint_user_agent or self._generate_user_agent(account_id)
+        ).strip()
+        headers.setdefault("Content-Type", "application/json")
+        headers.setdefault("User-Agent", effective_user_agent)
+        headers.setdefault(
+            "Accept-Language",
+            (fingerprint.get("accept_language") if isinstance(fingerprint, dict) else None)
+            or self._get_primary_accept_language(fallback="zh-CN,zh;q=0.9"),
+        )
+
+        if isinstance(fingerprint, dict):
+            if fingerprint.get("accept_language"):
+                headers.setdefault("Accept-Language", fingerprint["accept_language"])
+            if fingerprint.get("sec_ch_ua"):
+                headers["sec-ch-ua"] = self._normalize_sec_ch_ua_header(
+                    fingerprint["sec_ch_ua"],
+                    user_agent=headers.get("User-Agent"),
+                )
+            if fingerprint.get("sec_ch_ua_mobile"):
+                headers["sec-ch-ua-mobile"] = fingerprint["sec_ch_ua_mobile"]
+            if fingerprint.get("sec_ch_ua_platform"):
+                headers["sec-ch-ua-platform"] = fingerprint["sec_ch_ua_platform"]
+
+        if apply_default_client_headers:
+            for key, value in self._default_client_headers.items():
+                headers.setdefault(key, value)
+
+        inferred_fingerprint = self._build_fingerprint_from_user_agent(
+            headers.get("User-Agent"),
+            accept_language=headers.get("Accept-Language"),
+            proxy_url=proxy_url,
+        )
+        if not headers.get("sec-ch-ua") and inferred_fingerprint.get("sec_ch_ua"):
+            headers["sec-ch-ua"] = inferred_fingerprint["sec_ch_ua"]
+        if not headers.get("sec-ch-ua-platform") and inferred_fingerprint.get("sec_ch_ua_platform"):
+            headers["sec-ch-ua-platform"] = inferred_fingerprint["sec_ch_ua_platform"]
+        if not headers.get("sec-ch-ua-mobile") and inferred_fingerprint.get("sec_ch_ua_mobile"):
+            headers["sec-ch-ua-mobile"] = inferred_fingerprint["sec_ch_ua_mobile"]
+
+        if isinstance(fingerprint, dict) and self._should_attach_runtime_session_cookies(url):
+            origin = str(fingerprint.get("origin") or "").strip() or self.flow_base_url
+            referer = str(fingerprint.get("referer") or "").strip()
+            if not referer:
+                fingerprint_project_id = str(fingerprint.get("project_id") or "").strip()
+                if fingerprint_project_id:
+                    referer = self._build_flow_project_page_url(fingerprint_project_id)
+            if origin:
+                headers.setdefault("Origin", origin)
+            if referer:
+                headers.setdefault("Referer", referer)
+            merged_cookie_header = self._merge_cookie_header(
+                headers.get("Cookie"),
+                fingerprint.get("session_cookies"),
+            )
+            if merged_cookie_header:
+                headers["Cookie"] = merged_cookie_header
+
+        if self._should_attach_runtime_session_cookies(url):
+            derived_project_id = self._extract_project_id_from_request_payload(json_data)
+            headers.setdefault("Origin", self._request_context_origin(url))
+            if derived_project_id:
+                headers.setdefault("Referer", self._build_flow_project_page_url(derived_project_id))
+
+        self._apply_remote_browser_headers(headers, url, account_id)
+        return headers
+
+    async def _make_request(
+        self,
+        method: str,
+        url: str,
+        headers: Optional[Dict] = None,
+        json_data: Optional[Dict] = None,
+        raw_body: Optional[Union[str, bytes]] = None,
+        use_st: bool = False,
+        st_token: Optional[str] = None,
+        use_at: bool = False,
+        at_token: Optional[str] = None,
+        timeout: Optional[int] = None,
+        use_media_proxy: bool = False,
+        respect_fingerprint_proxy: bool = True,
+        force_no_proxy: bool = False,
+        allow_urllib_fallback: bool = True,
+        apply_default_client_headers: bool = True,
+        impersonate: Optional[str] = None,
+        capture_session_token: bool = False,
+    ) -> Dict[str, Any]:
+        """统一HTTP请求处理"""
+        fingerprint = self._request_fingerprint_ctx.get()
+
+        proxy_url = None
+        if not force_no_proxy:
+            account_proxy = self._account_proxy_ctx.get()
+            if account_proxy:
+                proxy_url = account_proxy
+            elif self.proxy_manager:
+                if use_media_proxy and hasattr(self.proxy_manager, "get_media_proxy_url"):
+                    proxy_url = await self.proxy_manager.get_media_proxy_url()
+                elif hasattr(self.proxy_manager, "get_request_proxy_url"):
+                    proxy_url = await self.proxy_manager.get_request_proxy_url()
+                else:
+                    proxy_url = await self.proxy_manager.get_proxy_url()
+
+        request_timeout = timeout or self.timeout
+
+        headers = self._build_request_headers(
+            url,
+            headers,
+            json_data,
+            fingerprint=fingerprint,
+            proxy_url=proxy_url,
+            use_st=use_st,
+            st_token=st_token,
+            use_at=use_at,
+            at_token=at_token,
+            apply_default_client_headers=apply_default_client_headers,
+        )
+        impersonate = impersonate or resolve_browser_impersonate(headers.get("User-Agent", ""))
+        request_body_for_log = raw_body if raw_body is not None else json_data
+        if raw_body is not None:
+            request_body_for_log = "<remote request body omitted>"
+        request_body_for_log = self._remote_safe_log(request_body_for_log)
+        if config.debug_enabled:
+            if isinstance(fingerprint, dict):
+                proxy_for_log = proxy_url if proxy_url else "direct"
+                debug_logger.log_info(
+                    f"[FINGERPRINT] 使用打码浏览器指纹提交请求: UA={headers.get('User-Agent', '')[:120]}, proxy={proxy_for_log}"
+                )
+            debug_logger.log_request(
+                method=method,
+                url=url,
+                headers=redact_credentials(headers)
+                if capture_session_token
+                else self._remote_safe_log(headers),
+                body=request_body_for_log,
+                proxy=proxy_url,
+            )
+
+        start_time = time.time()
+
+        try:
+            async with AsyncSession(trust_env=False) as session:
+                remote_options = {"default_headers": False, "allow_redirects": False}
+                if method.upper() == "GET":
+                    response = await session.get(
+                        url,
+                        headers=headers,
+                        proxy=proxy_url,
+                        timeout=request_timeout,
+                        impersonate=impersonate,
+                        **remote_options,
+                    )
+                else:
+                    request_kwargs = {
+                        "headers": headers,
+                        "proxy": proxy_url,
+                        "timeout": request_timeout,
+                        "impersonate": impersonate,
+                        **remote_options,
+                    }
+                    if raw_body is not None:
+                        request_kwargs["data"] = raw_body
+                    else:
+                        request_kwargs["json"] = json_data
+                    response = await session.post(url, **request_kwargs)
+
+                duration_ms = (time.time() - start_time) * 1000
+
+                if config.debug_enabled:
+                    debug_logger.log_response(
+                        status_code=response.status_code,
+                        headers=redact_credentials(dict(response.headers))
+                        if capture_session_token
+                        else self._remote_safe_log(dict(response.headers)),
+                        body="<session response body omitted>"
+                        if capture_session_token
+                        else ("<remote response body omitted>"),
+                        duration_ms=duration_ms,
+                    )
+
+                if response.status_code >= 400:
+                    error_reason = f"HTTP Error {response.status_code}"
+                    try:
+                        error_body = response.json()
+                        if "error" in error_body:
+                            error_info = error_body["error"]
+                            error_message = error_info.get("message", "")
+                            details = error_info.get("details", [])
+                            for detail in details:
+                                if detail.get("reason"):
+                                    error_reason = detail.get("reason")
+                                    break
+                            if error_message:
+                                error_reason = f"{error_reason}: {error_message}"
+                    except Exception:
+                        error_reason = f"HTTP Error {response.status_code}: {response.text[:200]}"
+
+                    debug_logger.log_error(f"[API FAILED] URL: {url}")
+                    debug_logger.log_error(f"[API FAILED] Request Body: {request_body_for_log}")
+                    error_reason = self._remote_http_error(response.status_code, response.text)
+                    raise Exception(error_reason)
+
+                result = response.json()
+                if capture_session_token:
+                    result = with_session_token(
+                        result,
+                        method=method,
+                        request_url=url,
+                        response_url=getattr(response, "url", ""),
+                        status_code=response.status_code,
+                        headers=response.headers,
+                    )
+                return result
+
+        except Exception as e:
+            error_msg = self._remote_safe_error(e, redact=capture_session_token)
+            if "HTTP Error" not in error_msg and not any(
+                x in error_msg for x in ["PUBLIC_ERROR", "INVALID_ARGUMENT"]
+            ):
+                debug_logger.log_error(f"[API FAILED] URL: {url}")
+                debug_logger.log_error(f"[API FAILED] Request Body: {request_body_for_log}")
+                debug_logger.log_error(f"[API FAILED] Exception: {error_msg}")
+
+            if allow_urllib_fallback and self._should_fallback_to_urllib(error_msg):
+                debug_logger.log_warning(
+                    f"[HTTP FALLBACK] curl_cffi 请求失败，回退 urllib: {method.upper()} {url}"
+                )
+                try:
+                    return await asyncio.to_thread(
+                        self._sync_json_request_via_urllib,
+                        method.upper(),
+                        url,
+                        headers,
+                        json_data,
+                        proxy_url,
+                        request_timeout,
+                        **({"capture_session_token": True} if capture_session_token else {}),
+                    )
+                except Exception as fallback_error:
+                    fallback_message = self._remote_safe_error(
+                        fallback_error, redact=capture_session_token
+                    )
+                    debug_logger.log_error(f"[HTTP FALLBACK] urllib 回退也失败: {fallback_message}")
+                    if capture_session_token:
+                        raise Exception(
+                            f"Flow API request failed: curl={error_msg}; urllib={fallback_message}"
+                        ) from None
+                    raise Exception(
+                        f"Flow API request failed: curl={error_msg}; urllib={fallback_message}"
+                    )
+
+            if capture_session_token:
+                raise Exception(f"Flow API request failed: {error_msg}") from None
+            raise Exception(f"Flow API request failed: {error_msg}")
+
+    async def _make_text_request(
+        self,
+        method: str,
+        url: str,
+        headers: Optional[Dict] = None,
+        json_data: Optional[Dict] = None,
+        raw_body: Optional[Union[str, bytes]] = None,
+        use_st: bool = False,
+        st_token: Optional[str] = None,
+        use_at: bool = False,
+        at_token: Optional[str] = None,
+        timeout: Optional[int] = None,
+        respect_fingerprint_proxy: bool = True,
+        force_no_proxy: bool = False,
+        apply_default_client_headers: bool = True,
+        impersonate: Optional[str] = None,
+    ) -> str:
+        """执行原始文本请求（如 SSE），返回响应文本。"""
+        fingerprint = self._request_fingerprint_ctx.get()
+
+        proxy_url = None
+        if not force_no_proxy:
+            account_proxy = self._account_proxy_ctx.get()
+            if account_proxy:
+                proxy_url = account_proxy
+            elif self.proxy_manager:
+                if hasattr(self.proxy_manager, "get_request_proxy_url"):
+                    proxy_url = await self.proxy_manager.get_request_proxy_url()
+                else:
+                    proxy_url = await self.proxy_manager.get_proxy_url()
+
+        request_timeout = timeout or self.timeout
+
+        headers = self._build_request_headers(
+            url,
+            headers,
+            json_data,
+            fingerprint=fingerprint,
+            proxy_url=proxy_url,
+            use_st=use_st,
+            st_token=st_token,
+            use_at=use_at,
+            at_token=at_token,
+            apply_default_client_headers=apply_default_client_headers,
+        )
+        impersonate = impersonate or resolve_browser_impersonate(headers.get("User-Agent", ""))
+        request_body_for_log = raw_body if raw_body is not None else json_data
+        if raw_body is not None:
+            request_body_for_log = "<remote request body omitted>"
+        request_body_for_log = self._remote_safe_log(request_body_for_log)
+        if config.debug_enabled:
+            if isinstance(fingerprint, dict):
+                proxy_for_log = proxy_url if proxy_url else "direct"
+                debug_logger.log_info(
+                    f"[FINGERPRINT] 使用打码浏览器指纹提交文本请求: UA={headers.get('User-Agent', '')[:120]}, proxy={proxy_for_log}"
+                )
+            debug_logger.log_request(
+                method=method,
+                url=url,
+                headers=self._remote_safe_log(headers),
+                body=request_body_for_log,
+                proxy=proxy_url,
+            )
+
+        start_time = time.time()
+
+        try:
+            async with AsyncSession(trust_env=False) as session:
+                remote_options = {"default_headers": False, "allow_redirects": False}
+                if method.upper() == "GET":
+                    response = await session.get(
+                        url,
+                        headers=headers,
+                        proxy=proxy_url,
+                        timeout=request_timeout,
+                        impersonate=impersonate,
+                        **remote_options,
+                    )
+                else:
+                    request_kwargs = {
+                        "headers": headers,
+                        "proxy": proxy_url,
+                        "timeout": request_timeout,
+                        "impersonate": impersonate,
+                        **remote_options,
+                    }
+                    if raw_body is not None:
+                        request_kwargs["data"] = raw_body
+                    else:
+                        request_kwargs["json"] = json_data
+                    response = await session.post(url, **request_kwargs)
+
+                duration_ms = (time.time() - start_time) * 1000
+                response_text = response.text
+
+                if config.debug_enabled:
+                    debug_logger.log_response(
+                        status_code=response.status_code,
+                        headers=self._remote_safe_log(dict(response.headers)),
+                        body="<remote response body omitted>",
+                        duration_ms=duration_ms,
+                    )
+
+                if response.status_code >= 400:
+                    error_reason = f"HTTP Error {response.status_code}: {response_text[:500]}"
+                    try:
+                        error_body = response.json()
+                        if "error" in error_body:
+                            error_info = error_body["error"]
+                            error_message = error_info.get("message", "")
+                            details = error_info.get("details", [])
+                            for detail in details:
+                                if detail.get("reason"):
+                                    error_reason = detail.get("reason")
+                                    break
+                            if error_message:
+                                error_reason = f"{error_reason}: {error_message}"
+                    except Exception:
+                        pass
+
+                    debug_logger.log_error(f"[API FAILED] URL: {url}")
+                    debug_logger.log_error(f"[API FAILED] Request Body: {request_body_for_log}")
+                    error_reason = self._remote_http_error(response.status_code, response_text)
+                    raise Exception(error_reason)
+
+                return response_text
+
+        except Exception as e:
+            error_msg = self._remote_safe_error(e)
+            if "HTTP Error" not in error_msg and not any(
+                x in error_msg for x in ["PUBLIC_ERROR", "INVALID_ARGUMENT"]
+            ):
+                debug_logger.log_error(f"[API FAILED] URL: {url}")
+                debug_logger.log_error(f"[API FAILED] Request Body: {request_body_for_log}")
+                debug_logger.log_error(f"[API FAILED] Exception: {error_msg}")
+            raise Exception(f"Flow API text request failed: {error_msg}")
+
+    def _should_fallback_to_urllib(self, error_message: str) -> bool:
+        """判断是否应从 curl_cffi 回退到 urllib。"""
+        return retry_policy.should_fallback_to_urllib(error_message)
+
+    def _sync_json_request_via_urllib(
+        self,
+        method: str,
+        url: str,
+        headers: Optional[Dict[str, Any]],
+        json_data: Optional[Dict[str, Any]],
+        proxy_url: Optional[str],
+        timeout: int,
+        capture_session_token: bool = False,
+    ) -> Dict[str, Any]:
+        """使用 urllib 执行 JSON 请求，作为 curl_cffi 的网络回退。"""
+        request_headers = dict(headers or {})
+        request_headers.setdefault("Accept", "application/json")
+        request_headers["Accept-Encoding"] = "identity"
+
+        data = None
+        if method.upper() != "GET" and json_data is not None:
+            data = json.dumps(json_data, ensure_ascii=False).encode("utf-8")
+            request_headers["Content-Type"] = "application/json"
+
+        handlers = [urllib.request.HTTPSHandler(context=ssl.create_default_context())]
+
+        class NoRemoteRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        handlers.append(NoRemoteRedirect())
+        if proxy_url:
+            handlers.append(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+        else:
+            handlers.append(urllib.request.ProxyHandler({}))
+
+        opener = urllib.request.build_opener(*handlers)
+        request = urllib.request.Request(
+            url=url,
+            data=data,
+            headers=request_headers,
+            method=method.upper(),
+        )
+
+        try:
+            with opener.open(
+                request,
+                timeout=timeout,
+            ) as response:
+                payload = response.read()
+                status_code = int(response.getcode() or 0)
+                content_encoding = str(response.headers.get("Content-Encoding") or "").lower()
+                response_url = response.geturl() if capture_session_token else ""
+                response_headers = response.headers
+        except urllib.error.HTTPError as exc:
+            payload = exc.read() if hasattr(exc, "read") else b""
+            status_code = int(getattr(exc, "code", 500) or 500)
+            content_encoding = str(
+                getattr(exc, "headers", {}).get("Content-Encoding") or ""
+            ).lower()
+            if content_encoding == "gzip" and payload:
+                try:
+                    payload = gzip.decompress(payload)
+                except Exception:
+                    pass
+            body_text = payload.decode("utf-8", errors="replace")
+            raise Exception(self._remote_http_error(status_code, body_text)) from None
+        except Exception as exc:
+            if capture_session_token:
+                raise Exception(self._remote_safe_error(exc, redact=True)) from None
+            raise Exception(str(exc)) from exc
+
+        if content_encoding == "gzip" and payload:
+            try:
+                payload = gzip.decompress(payload)
+            except Exception:
+                pass
+        body_text = payload.decode("utf-8", errors="replace")
+        if status_code >= 400:
+            raise Exception(self._remote_http_error(status_code, body_text))
+
+        try:
+            result = json.loads(body_text) if body_text else {}
+        except Exception as exc:
+            raise Exception("Invalid JSON response") from None
+
+        if capture_session_token:
+            result = with_session_token(
+                result,
+                method=method,
+                request_url=url,
+                response_url=response_url,
+                status_code=status_code,
+                headers=response_headers,
+            )
+        return result
+
+    def _is_timeout_error(self, error: Exception) -> bool:
+        """判断是否为网络超时，便于快速失败重试。"""
+        return retry_policy.is_timeout_error(error)
+
+    def _is_proxy_connection_error(self, error: Exception) -> bool:
+        """识别本地/上游代理不可用导致的连接失败。"""
+        return retry_policy.is_proxy_connection_error(error)
+
+    def _is_retryable_network_error(self, error_str: str) -> bool:
+        """识别可重试的 TLS/连接类网络错误。"""
+        return retry_policy.is_retryable_network_error(error_str)
+
+    def _get_control_plane_timeout(self) -> int:
+        """控制轻量控制面请求的超时，避免认证/项目接口长时间挂起。"""
+        return max(5, min(int(self.timeout or 0) or 120, 10))
+
+    def _get_video_submit_timeout(self) -> int:
+        """视频提交接口应快速返回 operation，避免单次网络挂死拖满整条链路。"""
+        return max(30, min(int(self.timeout or 0) or 120, 75))
+
+    def _get_video_poll_timeout(self) -> int:
+        """视频状态查询是轻量轮询，请求超时不应超过下一轮轮询太久。"""
+        return max(10, min(int(self.timeout or 0) or 120, 45))
+
+    def _resolve_generation_retry_budget(
+        self, base_max_retries: int, error: Optional[Union[Exception, str]] = None
+    ) -> int:
+        """计算当前生成链路允许的总重试次数。"""
+        effective_max_retries = retry_policy.generation_retry_budget(base_max_retries)
+        if retry_policy.is_recaptcha_evaluation_error(error):
+            return retry_policy.generation_retry_budget(
+                effective_max_retries,
+                captcha_rejected=True,
+                captcha_retries=config.browser_captcha_generation_retries,
+            )
+        return effective_max_retries
+
+    def _build_realistic_video_submit_headers(self) -> Dict[str, str]:
+        """构造当前上游真实抓包风格的视频提交头。"""
+        return self._build_current_flow_media_headers(content_type="text/plain;charset=UTF-8")
+
+    def _resolve_runtime_impersonate(self, fallback: str = "chrome150") -> str:
+        resolved = self._resolve_impersonate_from_fingerprint(fallback=fallback)
+        return resolved or fallback
+
+    def _resolve_impersonate_from_fingerprint(self, fallback: str = "chrome150") -> str:
+        """根据当前请求链路绑定的浏览器指纹，选择最接近的 curl_cffi impersonate。"""
+        fingerprint = self.get_request_fingerprint() or {}
+        ua = str(fingerprint.get("user_agent") or self._generate_user_agent()).strip()
+        return resolve_browser_impersonate(ua, fallback=fallback)
+
+    async def _make_video_api_request(
+        self,
+        url: str,
+        json_data: Dict[str, Any],
+        at: str,
+        timeout: int,
+        project_id: Optional[str] = None,
+        token_id: Optional[int] = None,
+        action: str = "VIDEO_GENERATION",
+    ) -> Dict[str, Any]:
+        """视频 API 加硬截止，避免 curl_cffi 底层偶发卡住导致整条请求悬挂。"""
+        raw_body = json.dumps(json_data, ensure_ascii=False, separators=(",", ":"))
+        headers = self._build_realistic_video_submit_headers()
+        headers.update(self._build_labs_request_context_headers(project_id))
+        try:
+            return await asyncio.wait_for(
+                self._make_request(
+                    method="POST",
+                    url=url,
+                    headers=headers,
+                    json_data=json_data,
+                    raw_body=raw_body,
+                    use_at=True,
+                    at_token=at,
+                    timeout=timeout,
+                    allow_urllib_fallback=False,
+                    apply_default_client_headers=False,
+                    impersonate=self._resolve_runtime_impersonate(),
+                ),
+                timeout=timeout + 5,
+            )
+        except asyncio.TimeoutError as exc:
+            raise Exception(f"Flow video API request timed out after {timeout}s") from exc
+
+    async def _acquire_image_launch_gate(
+        self,
+        token_id: Optional[int],
+        token_image_concurrency: Optional[int],
+    ) -> tuple[bool, int, int]:
+        """图片请求不再做本地发车排队，直接进入取 token 并提交上游。"""
+        return True, 0, 0
+
+    async def _release_image_launch_gate(self, token_id: Optional[int]):
+        """保留接口形状，当前无需释放任何本地发车状态。"""
+        return
+
+    async def _acquire_video_launch_gate(
+        self,
+        token_id: Optional[int],
+        token_video_concurrency: Optional[int],
+    ) -> tuple[bool, int, int]:
+        """视频请求不再做本地发车排队，直接进入取 token 并提交上游。"""
+        return True, 0, 0
+
+    async def _release_video_launch_gate(self, token_id: Optional[int]):
+        """保留接口形状，当前无需释放任何本地发车状态。"""
+        return
+
+    async def _make_image_generation_request(
+        self,
+        url: str,
+        json_data: Dict[str, Any],
+        at: str,
+        attempt_trace: Optional[Dict[str, Any]] = None,
+        project_id: Optional[str] = None,
+        token_id: Optional[int] = None,
+        *,
+        request_timeout: Optional[int] = None,
+        max_http_attempts: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """图片生成请求使用更短超时，并在网络超时时快速重试。"""
+        request_timeout = (
+            config.flow_image_request_timeout if request_timeout is None else request_timeout
+        )
+        total_attempts = max(
+            1,
+            config.flow_image_timeout_retry_count + 1
+            if max_http_attempts is None
+            else max_http_attempts,
+        )
+        retry_delay = config.flow_image_timeout_retry_delay
+
+        # 对于浏览器/远程浏览器打码链路，优先保持与打码时一致的出口。
+        # 否则在首跳改走媒体代理时，容易触发 reCAPTCHA 校验失败并放大长尾。
+        fingerprint = self._request_fingerprint_ctx.get()
+        has_fingerprint_context = bool(isinstance(fingerprint, dict) and fingerprint)
+
+        has_media_proxy = False
+        if self.proxy_manager and config.flow_image_timeout_use_media_proxy_fallback:
+            try:
+                has_media_proxy = bool(await self.proxy_manager.get_media_proxy_url())
+            except Exception:
+                has_media_proxy = False
+        prefer_media_first = bool(has_media_proxy and config.flow_image_prefer_media_proxy)
+
+        if has_fingerprint_context and prefer_media_first:
+            prefer_media_first = False
+            debug_logger.log_info(
+                "[IMAGE] 检测到打码浏览器指纹上下文，首跳固定走打码链路；"
+                "媒体代理仅在网络超时时作为兜底回退。"
+            )
+
+        last_error: Optional[Exception] = None
+
+        for attempt_index in range(total_attempts):
+            if has_media_proxy:
+                # 两次重试时采用“主链路 + 备链路”策略，避免每次都先卡在错误链路上。
+                if attempt_index == 0:
+                    prefer_media_proxy = prefer_media_first
+                elif attempt_index == 1:
+                    prefer_media_proxy = not prefer_media_first
+                else:
+                    prefer_media_proxy = prefer_media_first
+            else:
+                prefer_media_proxy = False
+            route_label = "媒体代理链路" if prefer_media_proxy else "打码链路"
+            http_attempt_started_at = time.time()
+            http_attempt_info: Optional[Dict[str, Any]] = None
+            if isinstance(attempt_trace, dict):
+                http_attempt_info = {
+                    "attempt": attempt_index + 1,
+                    "route": route_label,
+                    "timeout_seconds": request_timeout,
+                    "used_media_proxy": bool(prefer_media_proxy),
+                }
+            try:
+                result = await self._make_request(
+                    method="POST",
+                    url=url,
+                    headers=self._build_labs_request_context_headers(project_id),
+                    json_data=json_data,
+                    use_at=True,
+                    at_token=at,
+                    timeout=request_timeout,
+                    use_media_proxy=prefer_media_proxy,
+                    respect_fingerprint_proxy=not prefer_media_proxy,
+                )
+                if http_attempt_info is not None:
+                    http_attempt_info["duration_ms"] = int(
+                        (time.time() - http_attempt_started_at) * 1000
+                    )
+                    http_attempt_info["success"] = True
+                    attempt_trace.setdefault("http_attempts", []).append(http_attempt_info)
+                return result
+            except Exception as e:
+                last_error = e
+                if http_attempt_info is not None:
+                    http_attempt_info["duration_ms"] = int(
+                        (time.time() - http_attempt_started_at) * 1000
+                    )
+                    http_attempt_info["success"] = False
+                    http_attempt_info["timeout_error"] = bool(self._is_timeout_error(e))
+                    http_attempt_info["error"] = str(e)[:240]
+                    attempt_trace.setdefault("http_attempts", []).append(http_attempt_info)
+                if not self._is_timeout_error(e) or attempt_index >= total_attempts - 1:
+                    raise
+
+                if has_media_proxy and total_attempts > 1:
+                    next_prefer_media_proxy = (
+                        not prefer_media_proxy if attempt_index == 0 else prefer_media_proxy
+                    )
+                else:
+                    next_prefer_media_proxy = prefer_media_proxy
+                next_route_label = "媒体代理链路" if next_prefer_media_proxy else "打码链路"
+                debug_logger.log_warning(
+                    f"[IMAGE] 图片生成请求网络超时，准备快速重试 "
+                    f"({attempt_index + 2}/{total_attempts})，当前链路={route_label}，"
+                    f"下一链路={next_route_label}，timeout={request_timeout}s"
+                )
+                if retry_delay > 0:
+                    await asyncio.sleep(retry_delay)
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("图片生成请求失败")
+
+    # ========== 认证相关 (使用ST) ==========
+
+    async def st_to_at(self, st: str) -> dict:
+        """ST转AT
+
+        Args:
+            st: Session Token
+
+        Returns:
+            {
+                "access_token": "AT",
+                "expires": "2025-11-15T04:46:04.000Z",
+                "user": {...}
+            }
+        """
+        url = f"{self.labs_base_url}/auth/session"
+        # A configured proxy is part of the account's network identity. Never
+        # retry this authentication request directly: doing so can mix exits,
+        # trigger upstream risk checks, and hide a broken proxy configuration.
+        return await self._make_request(
+            method="GET",
+            url=url,
+            use_st=True,
+            st_token=st,
+            timeout=self._get_control_plane_timeout(),
+            capture_session_token=True,
+        )
+
+    # ========== 项目管理 (使用ST) ==========
+
+    async def create_project(self, st: str, title: str) -> str:
+        """创建项目,返回project_id
+
+        Args:
+            st: Session Token
+            title: 项目标题
+
+        Returns:
+            project_id (UUID)
+        """
+        session = await self.st_to_at(st)
+        at = session.get("access_token")
+        if not at:
+            raise ValueError("ST session did not return an access token")
+
+        # Flow disabled the Labs tRPC project API after moving to flow.google.com.
+        # CreateProject's REST mapping takes the Project itself as the JSON body.
+        url = self.api_base_url + endpoints.CREATE_PROJECT
+        json_data = {"projectInfo": {"projectTitle": title}}
+        max_retries = config.flow_max_retries
+        request_timeout = max(self._get_control_plane_timeout(), min(self.timeout, 15))
+        last_error: Optional[Exception] = None
+
+        for retry_attempt in range(max_retries):
+            try:
+                result = await self._make_request(
+                    method="POST",
+                    url=url,
+                    headers={
+                        "Origin": self.flow_base_url,
+                        "Referer": f"{self.flow_base_url}/",
+                    },
+                    json_data=json_data,
+                    use_at=True,
+                    at_token=at,
+                    timeout=request_timeout,
+                )
+                project_id = result.get("projectId") if isinstance(result, dict) else None
+                if not project_id:
+                    raise Exception("Invalid CreateProject response: missing projectId")
+                return project_id
+            except Exception as e:
+                last_error = e
+                retry_reason = (
+                    "网络超时" if self._is_timeout_error(e) else self._get_retry_reason(str(e))
+                )
+                if retry_reason and retry_attempt < max_retries - 1:
+                    debug_logger.log_warning(
+                        f"[PROJECT] 创建项目失败，准备重试 ({retry_attempt + 2}/{max_retries}) "
+                        f"title={title!r}, reason={retry_reason}: {e}"
+                    )
+                    await asyncio.sleep(1)
+                    continue
+                raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("创建项目失败")
+
+    async def delete_project(self, st: str, project_id: str):
+        """删除项目
+
+        Args:
+            st: Session Token
+            project_id: 项目ID
+        """
+        url = f"{self.labs_base_url}/trpc/project.deleteProject"
+        json_data = {"json": {"projectToDeleteId": project_id}}
+
+        await self._make_request(
+            method="POST",
+            url=url,
+            json_data=json_data,
+            use_st=True,
+            st_token=st,
+            timeout=self._get_control_plane_timeout(),
+        )
+
+    # ========== 媒体获取 (使用AT) ==========
+
+    async def get_media(self, at: str, media_name: str) -> dict:
+        """获取媒体内容 (视频返回base64编码数据)
+
+        Google 的 batchCheckAsyncVideoGenerationStatus 接口在视频生成成功后
+        不返回下载 URL。需要通过 GET /v1/media/{name} 获取视频内容。
+
+        Args:
+            at: Access Token
+            media_name: 媒体名称 (UUID格式)
+
+        Returns:
+            {
+                "name": "uuid",
+                "video": {
+                    "encodedVideo": "base64...",
+                    "seed": 74602,
+                    "prompt": "...",
+                    "model": "veo_3_1_t2v_fast",
+                    "aspectRatio": "VIDEO_ASPECT_RATIO_LANDSCAPE"
+                }
+            }
+        """
+        url = self.api_base_url + endpoints.GET_MEDIA.format(media_name=media_name)
+        return await self._make_request(
+            method="GET",
+            url=url,
+            use_at=True,
+            at_token=at,
+            timeout=max(60, int(self.timeout or 120)),
+        )
+
+    # ========== 余额查询 (使用AT) ==========
+
+    async def get_credits(self, at: str) -> dict:
+        """查询余额
+
+        Args:
+            at: Access Token
+
+        Returns:
+            {
+                "credits": 920,
+                "userPaygateTier": "PAYGATE_TIER_ONE"
+            }
+        """
+        url = self.api_base_url + endpoints.GET_CREDITS
+        result = await self._make_request(
+            method="GET",
+            url=url,
+            use_at=True,
+            at_token=at,
+            timeout=self._get_control_plane_timeout(),
+        )
+        return result
+
+    # ========== 图片上传 (使用AT) ==========
+
+    def _detect_image_mime_type(self, image_bytes: bytes) -> str:
+        """通过文件头 magic bytes 检测图片 MIME 类型
+
+        Args:
+            image_bytes: 图片字节数据
+
+        Returns:
+            MIME 类型字符串，默认 image/jpeg
+        """
+        if len(image_bytes) < 12:
+            return "image/jpeg"
+
+        # WebP: RIFF....WEBP
+        if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+            return "image/webp"
+        # PNG: 89 50 4E 47
+        if image_bytes[:4] == b"\x89PNG":
+            return "image/png"
+        # JPEG: FF D8 FF
+        if image_bytes[:3] == b"\xff\xd8\xff":
+            return "image/jpeg"
+        # GIF: GIF87a 或 GIF89a
+        if image_bytes[:6] in (b"GIF87a", b"GIF89a"):
+            return "image/gif"
+        # BMP: BM
+        if image_bytes[:2] == b"BM":
+            return "image/bmp"
+        # JPEG 2000: 00 00 00 0C 6A 50
+        if image_bytes[:6] == b"\x00\x00\x00\x0cjP":
+            return "image/jp2"
+
+        return "image/jpeg"
+
+    def _convert_to_jpeg(self, image_bytes: bytes) -> bytes:
+        """将图片转换为 JPEG 格式
+
+        Args:
+            image_bytes: 原始图片字节数据
+
+        Returns:
+            JPEG 格式的图片字节数据
+        """
+        from io import BytesIO
+        from PIL import Image
+
+        img = Image.open(BytesIO(image_bytes))
+        # 如果有透明通道，转换为 RGB
+        if img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGB")
+
+        output = BytesIO()
+        img.save(output, format="JPEG", quality=95)
+        return output.getvalue()
+
+    async def upload_image(
+        self,
+        at: str,
+        image_bytes: bytes,
+        aspect_ratio: str = "IMAGE_ASPECT_RATIO_LANDSCAPE",
+        project_id: Optional[str] = None,
+    ) -> str:
+        """上传图片,返回mediaId
+
+        Args:
+            at: Access Token
+            image_bytes: 图片字节数据
+            aspect_ratio: 图片或视频宽高比（会自动转换为图片格式）
+            project_id: 项目ID（新上传接口可使用）
+
+        Returns:
+            mediaId
+        """
+        # 转换视频aspect_ratio为图片aspect_ratio
+        # VIDEO_ASPECT_RATIO_LANDSCAPE -> IMAGE_ASPECT_RATIO_LANDSCAPE
+        # VIDEO_ASPECT_RATIO_PORTRAIT -> IMAGE_ASPECT_RATIO_PORTRAIT
+        if aspect_ratio.startswith("VIDEO_"):
+            aspect_ratio = aspect_ratio.replace("VIDEO_", "IMAGE_")
+
+        # 自动检测图片 MIME 类型
+        mime_type = self._detect_image_mime_type(image_bytes)
+
+        # 编码为base64 (去掉前缀)
+        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+
+        # 优先尝试新版上传接口: /v1/flow/uploadImage
+        # 若失败则自动回退到旧接口,保证兼容
+        ext = "png" if "png" in mime_type else "jpg"
+        upload_file_name = f"lay4flow_upload_{int(time.time() * 1000)}.{ext}"
+        new_url = self.api_base_url + endpoints.UPLOAD_IMAGE
+        normalized_project_id = str(project_id or "").strip()
+        new_client_context = {"sessionId": self._generate_session_id(), "tool": "PINHOLE"}
+        if normalized_project_id:
+            new_client_context["projectId"] = normalized_project_id
+
+        new_json_data = {
+            "clientContext": new_client_context,
+            "fileName": upload_file_name,
+            "imageBytes": image_base64,
+            "isHidden": False,
+            "isUserUploaded": True,
+            "mimeType": mime_type,
+        }
+
+        # 兼容回退：旧接口 :uploadUserImage
+        legacy_url = self.api_base_url + endpoints.UPLOAD_IMAGE_LEGACY
+        legacy_json_data = {
+            "imageInput": {
+                "rawImageBytes": image_base64,
+                "mimeType": mime_type,
+                "isUserUploaded": True,
+                "aspectRatio": aspect_ratio,
+            },
+            "clientContext": {"sessionId": self._generate_session_id(), "tool": "ASSET_MANAGER"},
+        }
+        max_retries = config.flow_max_retries
+        last_error: Optional[Exception] = None
+
+        for retry_attempt in range(max_retries):
+            try:
+                new_result = await self._make_request(
+                    method="POST",
+                    url=new_url,
+                    json_data=new_json_data,
+                    use_at=True,
+                    at_token=at,
+                    use_media_proxy=True,
+                )
+                media_id = self._extract_media_name(new_result.get("media")) or new_result.get(
+                    "mediaGenerationId", {}
+                ).get("mediaGenerationId")
+                if media_id:
+                    return media_id
+                raise Exception(
+                    f"Invalid upload response: missing media id, keys={list(new_result.keys())}"
+                )
+            except Exception as new_upload_error:
+                last_error = new_upload_error
+                retry_reason = (
+                    "网络超时"
+                    if self._is_timeout_error(new_upload_error)
+                    else self._get_retry_reason(str(new_upload_error))
+                )
+
+                # 旧接口不携带 projectId，带项目上下文的上传一旦回退就可能把图片挂到错误项目。
+                if normalized_project_id:
+                    if retry_reason and retry_attempt < max_retries - 1:
+                        debug_logger.log_warning(
+                            f"[UPLOAD] Project-scoped upload 遇到{retry_reason}，准备重试新版接口 "
+                            f"({retry_attempt + 2}/{max_retries}, project_id={normalized_project_id})..."
+                        )
+                        await asyncio.sleep(1)
+                        continue
+                    raise RuntimeError(
+                        "Project-scoped image upload failed via /flow/uploadImage; "
+                        "legacy :uploadUserImage fallback is disabled because it may attach media "
+                        f"to a different project (project_id={normalized_project_id})."
+                    ) from new_upload_error
+
+                debug_logger.log_warning(
+                    f"[UPLOAD] New upload API failed, fallback to legacy endpoint: {new_upload_error}"
+                )
+
+            try:
+                legacy_result = await self._make_request(
+                    method="POST",
+                    url=legacy_url,
+                    json_data=legacy_json_data,
+                    use_at=True,
+                    at_token=at,
+                    use_media_proxy=True,
+                )
+
+                media_id = legacy_result.get("mediaGenerationId", {}).get(
+                    "mediaGenerationId"
+                ) or legacy_result.get("media", {}).get("name")
+                if media_id:
+                    return media_id
+                raise Exception(
+                    f"Legacy upload response missing media id: keys={list(legacy_result.keys())}"
+                )
+            except Exception as legacy_upload_error:
+                last_error = legacy_upload_error
+                retry_reason = self._get_retry_reason(str(legacy_upload_error))
+                if retry_reason and retry_attempt < max_retries - 1:
+                    debug_logger.log_warning(
+                        f"[UPLOAD] 上传遇到{retry_reason}，准备重试 ({retry_attempt + 2}/{max_retries})..."
+                    )
+                    await asyncio.sleep(1)
+                    continue
+                raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("上传图片失败")
+
+    async def upload_video(
+        self,
+        at: str,
+        video_bytes: bytes,
+        mime_type: str = "video/mp4",
+        project_id: Optional[str] = None,
+        trim_start_ms: int = 0,
+        trim_end_ms: int = 10000,
+    ) -> str:
+        """Upload a video asset through Flow's resumable upload endpoint."""
+        validate_video_trim(trim_start_ms, trim_end_ms)
+        project = str(project_id or "").strip()
+        if not project:
+            raise ValueError("project_id is required for video upload")
+        safe_ext = {"video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov"}.get(
+            mime_type, "mp4"
+        )
+        filename = f"lay4flow_upload_{int(time.time() * 1000)}.{safe_ext}"
+        url = f"https://flow.google.com/upload/v1/flow/upload/video/{quote(project, safe='')}"
+        headers = self._build_current_flow_media_headers(content_type="application/octet-stream")
+        headers.update(
+            {
+                "Authorization": f"Bearer {at}",
+                "X-Goog-Upload-Protocol": "resumable",
+                "X-Goog-Upload-Command": "start",
+                "X-Goog-Upload-Header-Content-Length": str(len(video_bytes)),
+                "X-Goog-Upload-Header-Content-Type": mime_type,
+                "x-trim-start": str(trim_start_ms),
+                "x-trim-end": str(trim_end_ms),
+                "Content-Length": "0",
+                "Slug": quote(filename),
+            }
+        )
+        account_proxy = self._account_proxy_ctx.get()
+        proxy_url = account_proxy or (
+            await self.proxy_manager.get_request_proxy_url()
+            if self.proxy_manager and hasattr(self.proxy_manager, "get_request_proxy_url")
+            else None
+        )
+        fingerprint = self.get_request_fingerprint()
+        if isinstance(fingerprint, dict):
+            if fingerprint.get("user_agent"):
+                headers["User-Agent"] = str(fingerprint["user_agent"])
+            if fingerprint.get("accept_language"):
+                headers["Accept-Language"] = str(fingerprint["accept_language"])
+            if fingerprint.get("sec_ch_ua"):
+                headers["sec-ch-ua"] = str(fingerprint["sec_ch_ua"])
+            if fingerprint.get("sec_ch_ua_mobile"):
+                headers["sec-ch-ua-mobile"] = str(fingerprint["sec_ch_ua_mobile"])
+            if fingerprint.get("sec_ch_ua_platform"):
+                headers["sec-ch-ua-platform"] = str(fingerprint["sec_ch_ua_platform"])
+            cookie = self._merge_cookie_header(
+                headers.get("Cookie"), fingerprint.get("session_cookies")
+            )
+            if cookie:
+                headers["Cookie"] = cookie
+
+        async def post_upload(
+            target_url: str, *, target_headers: Dict[str, str], data: bytes, timeout: int
+        ):
+            target_headers = self._build_request_headers(
+                target_url,
+                target_headers,
+                None,
+                fingerprint=self.get_request_fingerprint(),
+                proxy_url=proxy_url,
+                use_st=False,
+                st_token=None,
+                use_at=False,
+                at_token=None,
+                apply_default_client_headers=True,
+            )
+            self._apply_remote_browser_headers(target_headers, target_url, at[:16])
+            last_error = None
+            for attempt in range(3):
+                try:
+                    async with AsyncSession(trust_env=False) as session:
+                        remote_options = {"default_headers": False, "allow_redirects": False}
+                        return await session.post(
+                            target_url,
+                            headers=target_headers,
+                            data=data,
+                            proxy=proxy_url,
+                            timeout=timeout,
+                            impersonate=resolve_browser_impersonate(
+                                target_headers.get("User-Agent", "")
+                            ),
+                            **remote_options,
+                        )
+                except Exception as exc:
+                    last_error = exc
+                    if (
+                        not any(
+                            marker in str(exc).lower()
+                            for marker in (
+                                "curl: (35)",
+                                "ssl_error_syscall",
+                                "ssl connect error",
+                                "tls connect error",
+                            )
+                        )
+                        or attempt == 2
+                    ):
+                        raise
+                    await asyncio.sleep(1 + attempt)
+            raise last_error
+
+        start_response = await post_upload(
+            url, target_headers={**headers, "Authorization": f"Bearer {at}"}, data=b"", timeout=60
+        )
+        if start_response.status_code >= 400:
+            raise RuntimeError(f"Flow video upload start failed: HTTP {start_response.status_code}")
+        upload_url = str(start_response.headers.get("X-Goog-Upload-URL") or "").strip()
+        if not upload_url:
+            raise RuntimeError("Flow video upload did not return an upload URL")
+        upload_headers = {
+            "Authorization": f"Bearer {at}",
+            "Content-Type": mime_type,
+            "X-Goog-Upload-Protocol": "resumable",
+            "X-Goog-Upload-Command": "upload, finalize",
+            "X-Goog-Upload-Offset": "0",
+        }
+        upload_response = await post_upload(
+            upload_url, target_headers=upload_headers, data=video_bytes, timeout=180
+        )
+        if upload_response.status_code >= 400:
+            raise RuntimeError(
+                f"Flow video upload finalize failed: HTTP {upload_response.status_code}"
+            )
+        result = upload_response.json()
+        media = result.get("media") if isinstance(result, dict) else None
+        media_id = self._extract_media_name(media) or (
+            result.get("mediaId") if isinstance(result, dict) else None
+        )
+        if not media_id:
+            raise RuntimeError(
+                f"Flow video upload response missing media id: keys={list(result) if isinstance(result, dict) else []}"
+            )
+        if isinstance(media, dict):
+            await self._wait_for_uploaded_video(at, project, {**media, "name": str(media_id)})
+        return str(media_id)
+
+    async def _wait_for_uploaded_video(
+        self, at: str, project_id: str, media: Dict[str, Any]
+    ) -> None:
+        """Wait for Flow to finish processing the uploaded asset before editing it."""
+        media_id = self._extract_media_name(media)
+        operation = self._media_to_video_operation(media, fallback_project_id=project_id)
+        for attempt in range(61):
+            status = operation.get("status") or ""
+            if status in {
+                "MEDIA_GENERATION_STATUS_FAILED",
+                "MEDIA_GENERATION_STATUS_CANCELED",
+                "MEDIA_GENERATION_STATUS_CANCELLED",
+            } or status.startswith("MEDIA_GENERATION_STATUS_ERROR"):
+                raise RuntimeError(f"Flow video upload processing failed: {status}")
+            video = media.get("video") or {}
+            uploaded_video = video.get("userUploadedVideo") or video.get("uploadedVideo") or {}
+            if status == "MEDIA_GENERATION_STATUS_SUCCESSFUL" or self._extract_video_url_from_media(
+                {"video": uploaded_video}
+            ):
+                return
+            if attempt == 60:
+                raise TimeoutError("Flow video upload processing timed out after 60 status checks")
+            await asyncio.sleep(5)
+            result = await self.check_video_status(at, [operation])
+            media = next(
+                (
+                    item
+                    for item in result.get("media", [])
+                    if isinstance(item, dict) and self._extract_media_name(item) == media_id
+                ),
+                {},
+            )
+            operation = self._media_to_video_operation(
+                media, fallback_project_id=project_id
+            ) or next(
+                (
+                    item
+                    for item in result.get("operations", [])
+                    if item.get("mediaName") == media_id
+                    or (item.get("operation") or {}).get("name") == media_id
+                ),
+                operation,
+            )
+            operation.setdefault("projectId", project_id)
+
+    async def _get_video_edit_frame_range(
+        self,
+        at: str,
+        project_id: str,
+        video_media_id: str,
+        trim_start_ms: Optional[int],
+        trim_end_ms: Optional[int],
+        uploaded_video: bool,
+    ) -> Dict[str, int]:
+        validate_optional_video_trim(trim_start_ms, trim_end_ms)
+        result = await self.check_video_status(
+            at, [{"mediaName": video_media_id, "projectId": project_id}]
+        )
+        media = next(
+            (
+                item
+                for item in result.get("media", [])
+                if isinstance(item, dict) and self._extract_media_name(item) == video_media_id
+            ),
+            {},
+        )
+        return video_edit_frame_range(media, trim_start_ms, trim_end_ms, uploaded_video)
+
+    async def generate_video_edit(
+        self,
+        at: str,
+        project_id: str,
+        prompt: str,
+        model_key: str,
+        aspect_ratio: str,
+        video_media_id: str,
+        reference_images: Optional[List[Dict[str, str]]] = None,
+        trim_start_ms: Optional[int] = None,
+        trim_end_ms: Optional[int] = None,
+        user_paygate_tier: str = "PAYGATE_TIER_ONE",
+        token_id: Optional[int] = None,
+        token_video_concurrency: Optional[int] = None,
+        uploaded_video: bool = False,
+    ) -> dict:
+        """Edit a video; trim offsets refer to the supplied media asset."""
+        frame_range = await self._get_video_edit_frame_range(
+            at, project_id, video_media_id, trim_start_ms, trim_end_ms, uploaded_video
+        )
+        recaptcha_token, browser_id = await self._get_recaptcha_token(
+            project_id, action="VIDEO_GENERATION", token_id=token_id
+        )
+        if not recaptcha_token:
+            raise RuntimeError("Failed to obtain reCAPTCHA token")
+        session_id = self._generate_session_id()
+        request = {
+            "aspectRatio": aspect_ratio,
+            "textInput": {"structuredPrompt": {"parts": [{"text": prompt}]}},
+            "videoInput": {"mediaId": video_media_id, **frame_range},
+            "videoModelKey": model_key,
+            "metadata": {},
+        }
+        if reference_images:
+            request["referenceImages"] = reference_images
+        json_data = {
+            "clientContext": {
+                "recaptchaContext": {
+                    "token": recaptcha_token,
+                    "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
+                },
+                "sessionId": session_id,
+                "projectId": project_id,
+                "tool": "PINHOLE",
+                "userPaygateTier": user_paygate_tier,
+            },
+            "mediaGenerationContext": self._build_video_media_generation_context(str(uuid.uuid4())),
+            "requests": [request],
+        }
+        try:
+            result = await self._make_video_api_request(
+                url=self.api_base_url + endpoints.EDIT_VIDEO,
+                json_data=json_data,
+                at=at,
+                timeout=self._get_video_submit_timeout(),
+                project_id=project_id,
+                token_id=token_id,
+                action="VIDEO_GENERATION",
+            )
+            return self._normalize_video_generation_response(result, fallback_project_id=project_id)
+        finally:
+            await self._notify_browser_captcha_request_finished(browser_id)
+
+    # ========== 图片生成 (使用AT) - 同步返回 ==========
+
+    async def generate_image(
+        self,
+        at: str,
+        project_id: str,
+        prompt: str,
+        model_name: str,
+        aspect_ratio: str,
+        image_inputs: Optional[List[Dict]] = None,
+        token_id: Optional[int] = None,
+        token_image_concurrency: Optional[int] = None,
+        progress_callback: Optional[Callable[[str, int], Awaitable[None]]] = None,
+    ) -> tuple[dict, str, Dict[str, Any]]:
+        """生成图片(同步返回)
+
+        Args:
+            at: Access Token
+            project_id: 项目ID
+            prompt: 提示词
+            model_name: BELUGA / HARBOR_SEAL / GEM_PIX_2 / IMAGEN_3_5
+            aspect_ratio: 图片宽高比
+            image_inputs: 参考图片列表(图生图时使用)
+
+        Returns:
+            (result, session_id, perf_trace)
+            result: 上游返回的生成结果
+            session_id: 本次成功图片生成请求使用的 sessionId
+            perf_trace: 生成重试与链路耗时轨迹
+        """
+        url = self.api_base_url + endpoints.GENERATE_IMAGES.format(project_id=project_id)
+
+        # 403/reCAPTCHA 重试逻辑
+        max_retries = config.flow_max_retries
+        last_error = None
+        perf_trace: Dict[str, Any] = {
+            "max_retries": max_retries,
+            "generation_attempts": [],
+        }
+
+        retry_attempt = 0
+        while retry_attempt < max_retries:
+            attempt_trace: Dict[str, Any] = {
+                "attempt": retry_attempt + 1,
+                "recaptcha_ok": False,
+            }
+            attempt_started_at = time.time()
+            # 每次重试都重新获取 reCAPTCHA token
+            recaptcha_started_at = time.time()
+            if progress_callback is not None:
+                await progress_callback("solving_image_captcha", 38)
+            launch_gate_acquired = False
+            launch_ok, launch_queue_ms, launch_stagger_ms = await self._acquire_image_launch_gate(
+                token_id=token_id,
+                token_image_concurrency=token_image_concurrency,
+            )
+            attempt_trace["launch_queue_ms"] = launch_queue_ms
+            attempt_trace["launch_stagger_ms"] = launch_stagger_ms
+            if not launch_ok:
+                last_error = Exception("Image launch queue wait timeout")
+                attempt_trace["success"] = False
+                attempt_trace["error"] = str(last_error)
+                attempt_trace["duration_ms"] = int((time.time() - attempt_started_at) * 1000)
+                perf_trace["generation_attempts"].append(attempt_trace)
+                raise last_error
+
+            launch_gate_acquired = True
+            try:
+                recaptcha_token, browser_id = await self._get_recaptcha_token(
+                    project_id, action="IMAGE_GENERATION", token_id=token_id
+                )
+            finally:
+                if launch_gate_acquired:
+                    await self._release_image_launch_gate(token_id)
+            attempt_trace["recaptcha_ms"] = int((time.time() - recaptcha_started_at) * 1000)
+            attempt_trace["recaptcha_ok"] = bool(recaptcha_token)
+            if not recaptcha_token:
+                last_error = Exception("Failed to obtain reCAPTCHA token")
+                attempt_trace["success"] = False
+                attempt_trace["error"] = str(last_error)
+                attempt_trace["duration_ms"] = int((time.time() - attempt_started_at) * 1000)
+                perf_trace["generation_attempts"].append(attempt_trace)
+                should_retry = await self._handle_missing_recaptcha_token(
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[IMAGE] 生成",
+                )
+                if should_retry:
+                    max_retries = self._resolve_generation_retry_budget(max_retries, last_error)
+                    perf_trace["max_retries"] = max_retries
+                    retry_attempt += 1
+                    continue
+                raise last_error
+            if progress_callback is not None:
+                await progress_callback("submitting_image", 48)
+            session_id = self._generate_session_id()
+
+            # 构建请求 - 新版接口在外层和 requests 内都带 clientContext
+            client_context = {
+                "recaptchaContext": {
+                    "token": recaptcha_token,
+                    "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
+                },
+                "sessionId": session_id,
+                "projectId": project_id,
+                "tool": "PINHOLE",
+            }
+
+            # 新版图片接口使用结构化提示词 + new media 开关
+            request_data = {
+                "clientContext": client_context,
+                "seed": random.randint(1, 999999),
+                "imageModelName": model_name,
+                "imageAspectRatio": aspect_ratio,
+                "structuredPrompt": {"parts": [{"text": prompt}]},
+                "imageInputs": image_inputs or [],
+            }
+
+            json_data = {
+                "clientContext": client_context,
+                "mediaGenerationContext": {"batchId": str(uuid.uuid4())},
+                "useNewMedia": True,
+                "requests": [request_data],
+            }
+
+            try:
+                result = await self._make_image_generation_request(
+                    url=url,
+                    json_data=json_data,
+                    at=at,
+                    attempt_trace=attempt_trace,
+                    project_id=project_id,
+                    token_id=token_id,
+                )
+                attempt_trace["success"] = True
+                attempt_trace["duration_ms"] = int((time.time() - attempt_started_at) * 1000)
+                perf_trace["generation_attempts"].append(attempt_trace)
+                perf_trace["final_success_attempt"] = retry_attempt + 1
+                return result, session_id, perf_trace
+            except Exception as e:
+                last_error = e
+                attempt_trace["success"] = False
+                attempt_trace["error"] = str(e)[:240]
+                attempt_trace["duration_ms"] = int((time.time() - attempt_started_at) * 1000)
+                perf_trace["generation_attempts"].append(attempt_trace)
+                should_retry = await self._handle_retryable_generation_error(
+                    error=e,
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[IMAGE] 生成",
+                )
+                if should_retry:
+                    max_retries = self._resolve_generation_retry_budget(max_retries, e)
+                    perf_trace["max_retries"] = max_retries
+                    retry_attempt += 1
+                    continue
+                raise
+            finally:
+                await self._notify_browser_captcha_request_finished(browser_id)
+
+        # 所有重试都失败
+        perf_trace["final_success_attempt"] = None
+        raise last_error
+
+    async def upsample_image(
+        self,
+        at: str,
+        project_id: str,
+        media_id: str,
+        target_resolution: str = "UPSAMPLE_IMAGE_RESOLUTION_4K",
+        user_paygate_tier: str = "PAYGATE_TIER_NOT_PAID",
+        session_id: Optional[str] = None,
+        token_id: Optional[int] = None,
+    ) -> str:
+        """放大图片到 2K/4K
+
+        Args:
+            at: Access Token
+            project_id: 项目ID
+            media_id: 图片的 mediaId (从 batchGenerateImages 返回的 media[0]["name"])
+            target_resolution: UPSAMPLE_IMAGE_RESOLUTION_2K 或 UPSAMPLE_IMAGE_RESOLUTION_4K
+            user_paygate_tier: 用户等级 (如 PAYGATE_TIER_NOT_PAID / PAYGATE_TIER_ONE)
+            session_id: 可选，复用图片生成请求的 sessionId
+
+        Returns:
+            base64 编码的图片数据
+        """
+        url = self.api_base_url + endpoints.UPSAMPLE_IMAGE
+
+        # 403/reCAPTCHA/500 重试逻辑 - 使用配置的最大重试次数
+        max_retries = config.flow_max_retries
+        last_error = None
+
+        retry_attempt = 0
+        while retry_attempt < max_retries:
+            # 获取 reCAPTCHA token - 使用 IMAGE_GENERATION action
+            recaptcha_token, browser_id = await self._get_recaptcha_token(
+                project_id, action="IMAGE_GENERATION", token_id=token_id
+            )
+            if not recaptcha_token:
+                last_error = Exception("Failed to obtain reCAPTCHA token")
+                should_retry = await self._handle_missing_recaptcha_token(
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[IMAGE UPSAMPLE] 放大",
+                )
+                if should_retry:
+                    max_retries = self._resolve_generation_retry_budget(max_retries, last_error)
+                    retry_attempt += 1
+                    continue
+                raise last_error
+            upsample_session_id = session_id or self._generate_session_id()
+
+            json_data = {
+                "mediaId": media_id,
+                "targetResolution": target_resolution,
+                "clientContext": {
+                    "recaptchaContext": {
+                        "token": recaptcha_token,
+                        "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
+                    },
+                    "sessionId": upsample_session_id,
+                    "projectId": project_id,
+                    "tool": "PINHOLE",
+                    "userPaygateTier": user_paygate_tier,
+                },
+            }
+
+            # 4K/2K 放大使用专用超时，因为返回的 base64 数据量很大
+            try:
+                result = await self._make_image_generation_request(
+                    url=url,
+                    json_data=json_data,
+                    at=at,
+                    project_id=project_id,
+                    token_id=token_id,
+                    request_timeout=config.upsample_timeout,
+                    max_http_attempts=1,
+                )
+
+                # 返回 base64 编码的图片
+                return result.get("encodedImage", "")
+            except Exception as e:
+                last_error = e
+                should_retry = await self._handle_retryable_generation_error(
+                    error=e,
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[IMAGE UPSAMPLE] 放大",
+                )
+                if should_retry:
+                    max_retries = self._resolve_generation_retry_budget(max_retries, e)
+                    retry_attempt += 1
+                    continue
+                raise
+            finally:
+                await self._notify_browser_captcha_request_finished(browser_id)
+
+        raise last_error
+
+    # ========== 视频生成 (使用AT) - 异步返回 ==========
+
+    def _extract_media_name(self, media: Any) -> Optional[str]:
+        return media_protocol.extract_media_name(media)
+
+    def _build_video_text_input(
+        self, prompt: str, use_v2_model_config: bool = False
+    ) -> Dict[str, Any]:
+        # 当前 Flow 上游视频链路统一使用 structuredPrompt，不再兼容旧 prompt 字段。
+        return {"structuredPrompt": {"parts": [{"text": prompt}]}}
+
+    def _find_nested_string(self, value: Any, keys: tuple[str, ...]) -> Optional[str]:
+        return media_protocol.find_nested_string(value, keys)
+
+    def _truncate_large_debug_value(self, data: Any, max_length: int = 240) -> Any:
+        """截断调试输出中的超长字段，避免污染控制台。"""
+        if isinstance(data, dict):
+            return {
+                key: self._truncate_large_debug_value(value, max_length=max_length)
+                for key, value in data.items()
+            }
+        if isinstance(data, list):
+            return [self._truncate_large_debug_value(item, max_length=max_length) for item in data]
+        if isinstance(data, str) and len(data) > max_length:
+            return f"{data[:max_length]}... (truncated, total {len(data)} chars)"
+        return data
+
+    def _extract_video_status_from_media(
+        self, media: Dict[str, Any]
+    ) -> tuple[Optional[str], Dict[str, Any]]:
+        return media_protocol.extract_video_status_from_media(media)
+
+    def _extract_video_url_from_media(self, media: Dict[str, Any]) -> Optional[str]:
+        return media_protocol.extract_video_url_from_media(media)
+
+    def _extract_video_metadata_from_media(
+        self,
+        media: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return media_protocol.extract_video_metadata_from_media(media)
+
+    def _media_to_video_operation(
+        self,
+        media: Dict[str, Any],
+        fallback_project_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        return media_protocol.media_to_video_operation(media, fallback_project_id)
+
+    def _merge_video_operations_with_media(
+        self,
+        operations: List[Dict[str, Any]],
+        media_operations: List[Dict[str, Any]],
+        fallback_project_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        return media_protocol.merge_video_operations_with_media(
+            operations, media_operations, fallback_project_id
+        )
+
+    def _normalize_video_generation_response(
+        self,
+        result: Dict[str, Any],
+        fallback_project_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return media_protocol.normalize_video_generation_response(result, fallback_project_id)
+
+    def _build_video_media_generation_context(self, batch_id: str) -> Dict[str, Any]:
+        return {
+            "batchId": batch_id,
+            "audioFailurePreference": "BLOCK_SILENCED_VIDEOS",
+        }
+
+    def _operations_to_media_refs(
+        self,
+        operations: List[Dict[str, Any]],
+    ) -> List[Dict[str, str]]:
+        return media_protocol.operations_to_media_refs(operations)
+
+    async def generate_video_text(
+        self,
+        at: str,
+        project_id: str,
+        prompt: str,
+        model_key: str,
+        aspect_ratio: str,
+        use_v2_model_config: bool = False,
+        user_paygate_tier: str = "PAYGATE_TIER_ONE",
+        token_id: Optional[int] = None,
+        token_video_concurrency: Optional[int] = None,
+    ) -> dict:
+        """文生视频,返回task_id
+
+        Args:
+            at: Access Token
+            project_id: 项目ID
+            prompt: 提示词
+            model_key: veo_3_1_t2v_fast 等
+            aspect_ratio: 视频宽高比
+            user_paygate_tier: 用户等级
+
+        Returns:
+            {
+                "operations": [{
+                    "operation": {"name": "task_id"},
+                    "sceneId": "uuid",
+                    "status": "MEDIA_GENERATION_STATUS_PENDING"
+                }],
+                "remainingCredits": 900
+            }
+        """
+        url = self.api_base_url + endpoints.GENERATE_VIDEO_TEXT
+
+        # 403/reCAPTCHA 重试逻辑 - reCAPTCHA evaluation failed 时允许更高重试上限
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
+        last_error = None
+        retry_attempt = 0
+        session_id = self._generate_session_id()
+        batch_id = str(uuid.uuid4())
+        video_context_warmed = False
+        while retry_attempt < max_retries:
+            # 每次重试都重新获取 reCAPTCHA token - 视频使用 VIDEO_GENERATION action
+            launch_gate_acquired = False
+            launch_ok, _, _ = await self._acquire_video_launch_gate(
+                token_id=token_id,
+                token_video_concurrency=token_video_concurrency,
+            )
+            if not launch_ok:
+                last_error = Exception("Video launch queue wait timeout")
+                raise last_error
+
+            launch_gate_acquired = True
+            try:
+                recaptcha_token, browser_id = await self._get_recaptcha_token(
+                    project_id, action="VIDEO_GENERATION", token_id=token_id
+                )
+            finally:
+                if launch_gate_acquired:
+                    await self._release_video_launch_gate(token_id)
+            if not recaptcha_token:
+                last_error = Exception("Failed to obtain reCAPTCHA token")
+                should_retry = await self._handle_missing_recaptcha_token(
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO T2V] 生成",
+                )
+                if should_retry:
+                    retry_attempt += 1
+                    continue
+                raise last_error
+            if not video_context_warmed:
+                await self._warmup_flow_video_frontend_context(
+                    at=at,
+                    project_id=project_id,
+                    token_id=token_id,
+                    session_id=session_id,
+                    user_paygate_tier=user_paygate_tier,
+                    prompt=prompt,
+                    model_key=model_key,
+                    aspect_ratio=aspect_ratio,
+                )
+                video_context_warmed = True
+            client_context = {
+                "recaptchaContext": {
+                    "token": recaptcha_token,
+                    "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
+                },
+                "sessionId": session_id,
+                "projectId": project_id,
+                "tool": "PINHOLE",
+                "userPaygateTier": user_paygate_tier,
+            }
+            request_seed = random.randint(1, 99999)
+            request_data = {
+                "aspectRatio": aspect_ratio,
+                "seed": request_seed,
+                "textInput": self._build_video_text_input(prompt, use_v2_model_config=True),
+                "videoModelKey": model_key,
+                "metadata": {},
+            }
+            json_data = {
+                "mediaGenerationContext": self._build_video_media_generation_context(batch_id),
+                "clientContext": client_context,
+                "requests": [request_data],
+                "useV2ModelConfig": True,
+            }
+
+            try:
+                result = await self._make_video_api_request(
+                    url=url,
+                    json_data=json_data,
+                    at=at,
+                    timeout=self._get_video_submit_timeout(),
+                    project_id=project_id,
+                    token_id=token_id,
+                    action="VIDEO_GENERATION",
+                )
+                return self._normalize_video_generation_response(
+                    result, fallback_project_id=project_id
+                )
+            except Exception as e:
+                last_error = e
+                should_retry = await self._handle_retryable_generation_error(
+                    error=e,
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO T2V] 生成",
+                    defer_browser_error_notification=True,
+                )
+                if should_retry:
+                    max_retries = self._resolve_generation_retry_budget(max_retries, e)
+                    retry_attempt += 1
+                    continue
+                raise
+            finally:
+                await self._notify_browser_captcha_request_finished(browser_id)
+            retry_attempt += 1
+
+        # 所有重试都失败
+        raise last_error
+
+    def _build_browser_style_control_headers(
+        self,
+        referer: str,
+        origin: Optional[str] = None,
+        account_id: Optional[str] = None,
+        content_type: Optional[str] = None,
+        accept_language: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ) -> Dict[str, str]:
+        headers: Dict[str, str] = {
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Referer": referer,
+            "User-Agent": self._get_effective_request_user_agent(account_id),
+            "Accept-Language": accept_language
+            or self._get_primary_accept_language(fallback="zh-CN,zh;q=0.9"),
+            "Priority": "u=1, i",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "cross-site",
+        }
+        if origin:
+            headers["Origin"] = origin
+            if origin == "https://labs.google":
+                headers.setdefault("sec-fetch-storage-access", "active")
+        if content_type:
+            headers["Content-Type"] = content_type
+        if api_key:
+            headers["x-goog-api-key"] = api_key
+        headers.setdefault("x-browser-channel", self.FLOW_BROWSER_CHANNEL_HEADER)
+        headers.setdefault("x-browser-copyright", self.FLOW_BROWSER_COPYRIGHT_HEADER)
+        headers.setdefault("x-browser-validation", self.FLOW_BROWSER_VALIDATION_HEADER)
+        headers.setdefault("x-browser-year", self.FLOW_BROWSER_YEAR_HEADER)
+        return headers
+
+    async def _labs_trpc_get_with_st(
+        self,
+        path_with_query: str,
+        st: str,
+        project_id: str,
+        timeout: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        page_url = self._build_flow_project_page_url(project_id)
+        return await self._make_request(
+            method="GET",
+            url=f"{self.labs_base_url}/trpc/{path_with_query}",
+            headers=self._build_browser_style_control_headers(
+                referer=page_url,
+                account_id=st[:16],
+                content_type="application/json",
+            ),
+            use_st=True,
+            st_token=st,
+            timeout=timeout or self._get_control_plane_timeout(),
+            apply_default_client_headers=False,
+            allow_urllib_fallback=False,
+            impersonate=self._resolve_runtime_impersonate(),
+        )
+
+    async def _labs_trpc_post_with_st(
+        self,
+        trpc_path: str,
+        payload: Dict[str, Any],
+        st: str,
+        project_id: str,
+        timeout: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        page_url = self._build_flow_project_page_url(project_id)
+        return await self._make_request(
+            method="POST",
+            url=f"{self.labs_base_url}/trpc/{trpc_path}",
+            headers=self._build_browser_style_control_headers(
+                referer=page_url,
+                origin="https://labs.google",
+                account_id=st[:16],
+                content_type="application/json",
+            ),
+            json_data=payload,
+            use_st=True,
+            st_token=st,
+            timeout=timeout or self._get_control_plane_timeout(),
+            apply_default_client_headers=False,
+            allow_urllib_fallback=False,
+            impersonate=self._resolve_runtime_impersonate(),
+        )
+
+    async def _aisandbox_request(
+        self,
+        method: str,
+        path: str,
+        at: Optional[str],
+        *,
+        json_data: Optional[Dict[str, Any]] = None,
+        raw_body: Optional[Union[str, bytes]] = None,
+        content_type: Optional[str] = "text/plain;charset=UTF-8",
+        accept_language: Optional[str] = None,
+        api_key: Optional[str] = None,
+        timeout: Optional[int] = None,
+        account_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        headers = self._build_browser_style_control_headers(
+            referer="https://labs.google/",
+            origin="https://labs.google",
+            account_id=account_id,
+            content_type=content_type,
+            accept_language=accept_language,
+            api_key=api_key,
+        )
+        return await self._make_request(
+            method=method,
+            url=f"{self.api_base_url}{path}",
+            headers=headers,
+            json_data=json_data,
+            raw_body=raw_body,
+            use_at=bool(at),
+            at_token=at,
+            timeout=timeout or self._get_control_plane_timeout(),
+            apply_default_client_headers=False,
+            allow_urllib_fallback=False,
+            impersonate=self._resolve_runtime_impersonate(),
+        )
+
+    async def _warmup_flow_video_frontend_context(
+        self,
+        *,
+        at: str,
+        project_id: str,
+        token_id: Optional[int],
+        session_id: str,
+        user_paygate_tier: str,
+        prompt: str,
+        model_key: str,
+        aspect_ratio: str,
+    ) -> None:
+        """按当前上游真实页面顺序补齐视频提交前的最小首方初始化/telemetry链路。"""
+        account_id = at[:16] if at else None
+        page_url = self._build_flow_project_page_url(project_id)
+        session_create_time = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+
+        st = await self._get_token_st_by_id(token_id)
+        if st:
+            null_meta_input = self._encode_trpc_input(
+                {
+                    "json": None,
+                    "meta": {"values": ["undefined"]},
+                }
+            )
+            labs_get_paths = [
+                f"general.fetchUserPreferences?input={null_meta_input}",
+                f"videoFx.getFlowAppConfig?input={null_meta_input}",
+                f"videoFx.getUserSettings?input={null_meta_input}",
+            ]
+            for path_with_query in labs_get_paths:
+                try:
+                    await self._labs_trpc_get_with_st(path_with_query, st=st, project_id=project_id)
+                except Exception as e:
+                    debug_logger.log_warning(
+                        f"[VIDEO WARMUP] Labs GET 失败 ({path_with_query}): {e}"
+                    )
+
+            labs_batch_log_payload = {
+                "json": {
+                    "appEvents": [
+                        {
+                            "event": "PAGE_VIEW",
+                            "eventProperties": [
+                                {"key": "URL", "stringValue": page_url},
+                                {
+                                    "key": "USER_AGENT",
+                                    "stringValue": self._get_effective_request_user_agent(st[:16]),
+                                },
+                                {"key": "IS_DESKTOP"},
+                            ],
+                            "activeExperiments": [],
+                            "eventMetadata": {"sessionId": session_id},
+                            "eventTime": session_create_time,
+                        }
+                    ]
+                }
+            }
+            try:
+                await self._labs_trpc_post_with_st(
+                    "general.submitBatchLog",
+                    payload=labs_batch_log_payload,
+                    st=st,
+                    project_id=project_id,
+                )
+            except Exception as e:
+                debug_logger.log_warning(f"[VIDEO WARMUP] Labs submitBatchLog 失败: {e}")
+
+        try:
+            await self._aisandbox_request(
+                "POST",
+                ":checkAppAvailability",
+                at=None,
+                raw_body=self._compact_json_dumps({"clientContext": {"tool": "PINHOLE"}}),
+                api_key=self.FLOW_PUBLIC_API_KEY,
+                account_id=account_id,
+            )
+        except Exception as e:
+            debug_logger.log_warning(f"[VIDEO WARMUP] checkAppAvailability 失败: {e}")
+
+        debug_logger.log_info(
+            f"[VIDEO WARMUP] 当前视频最小初始化链路已补齐: project_id={project_id}, "
+            f"session_id={session_id}, model_key={model_key}, aspect_ratio={aspect_ratio}, "
+            f"user_paygate_tier={user_paygate_tier}, prompt_len={len(prompt or '')}"
+        )
+
+    def _video_aspect_ratio_to_agent_aspect_ratio(self, aspect_ratio: str) -> str:
+        mapping = {
+            "VIDEO_ASPECT_RATIO_LANDSCAPE": "16:9",
+            "VIDEO_ASPECT_RATIO_PORTRAIT": "9:16",
+            "VIDEO_ASPECT_RATIO_SQUARE": "1:1",
+        }
+        return mapping.get(str(aspect_ratio or "").strip(), "16:9")
+
+    def _parse_sse_json_events(self, raw_text: str) -> List[Dict[str, Any]]:
+        events: List[Dict[str, Any]] = []
+        if not raw_text:
+            return events
+
+        for block in raw_text.split("\n\n"):
+            block = block.strip()
+            if not block:
+                continue
+
+            data_lines = [
+                line[5:].strip() for line in block.splitlines() if line.startswith("data:")
+            ]
+            if not data_lines:
+                continue
+
+            payload_text = "\n".join(data_lines).strip()
+            if not payload_text or payload_text == "[DONE]":
+                continue
+
+            try:
+                payload = json.loads(payload_text)
+            except Exception:
+                continue
+
+            if isinstance(payload, dict):
+                events.append(payload)
+
+        return events
+
+    def _extract_agent_session_id(self, sessions_payload: Dict[str, Any]) -> Optional[str]:
+        if not isinstance(sessions_payload, dict):
+            return None
+
+        sessions = sessions_payload.get("sessions")
+        if isinstance(sessions, list):
+            for session in sessions:
+                if not isinstance(session, dict):
+                    continue
+                session_id = str(session.get("agentSessionId") or "").strip()
+                if session_id:
+                    return session_id
+
+        session_info = sessions_payload.get("sessionInfo")
+        if isinstance(session_info, dict):
+            session_id = str(session_info.get("agentSessionId") or "").strip()
+            if session_id:
+                return session_id
+
+        return None
+
+    def _extract_flow_entity_id(self, entity_payload: Dict[str, Any]) -> Optional[str]:
+        if not isinstance(entity_payload, dict):
+            return None
+
+        candidates = [entity_payload]
+        result = entity_payload.get("result")
+        if isinstance(result, dict):
+            candidates.append(result)
+            data = result.get("data")
+            if isinstance(data, dict):
+                candidates.append(data)
+                json_node = data.get("json")
+                if isinstance(json_node, dict):
+                    candidates.append(json_node)
+                    nested_result = json_node.get("result")
+                    if isinstance(nested_result, dict):
+                        candidates.append(nested_result)
+
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            for key in ("entityId", "id", "parentEntityId"):
+                entity_id = str(candidate.get(key) or "").strip()
+                if entity_id:
+                    return entity_id
+
+        return None
+
+    def _extract_turn_count(self, session_detail: Dict[str, Any]) -> int:
+        if not isinstance(session_detail, dict):
+            return 0
+        turns = session_detail.get("turns")
+        if isinstance(turns, list):
+            return len(turns)
+        return 0
+
+    def _extract_generate_video_with_references_result(
+        self,
+        events: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            agent_message = event.get("agentMessage")
+            if not isinstance(agent_message, dict):
+                continue
+            agent_events = agent_message.get("agentEvents")
+            if not isinstance(agent_events, list):
+                continue
+            for agent_event in agent_events:
+                if not isinstance(agent_event, dict):
+                    continue
+                tool_result_wrapper = agent_event.get("toolResult")
+                if not isinstance(tool_result_wrapper, dict):
+                    continue
+                if tool_result_wrapper.get("toolName") != "generate_video_with_references":
+                    continue
+                tool_result = tool_result_wrapper.get("toolResult")
+                if isinstance(tool_result, dict):
+                    return tool_result
+        return None
+
+    async def get_flow_creation_agent_session(
+        self,
+        at: str,
+        project_id: str,
+        *,
+        account_id: Optional[str] = None,
+        allow_global_fallback: bool = True,
+    ) -> Optional[str]:
+        sessions_result = await self._aisandbox_request(
+            "GET",
+            f"/flowCreationAgent/sessions?projectId={quote(project_id, safe='')}",
+            at=at,
+            content_type=None,
+            account_id=account_id,
+        )
+        session_id = self._extract_agent_session_id(sessions_result)
+        if session_id or not allow_global_fallback:
+            return session_id
+
+        global_sessions_result = await self._aisandbox_request(
+            "GET",
+            "/flowCreationAgent/sessions",
+            at=at,
+            content_type=None,
+            account_id=account_id,
+        )
+        return self._extract_agent_session_id(global_sessions_result)
+
+    async def get_flow_creation_agent_session_detail(
+        self,
+        at: str,
+        agent_session_id: str,
+        *,
+        account_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await self._aisandbox_request(
+            "GET",
+            f"/flowCreationAgent/sessions/{quote(agent_session_id, safe='')}",
+            at=at,
+            content_type=None,
+            account_id=account_id,
+        )
+
+    async def create_flow_entity(
+        self,
+        st: str,
+        project_id: str,
+    ) -> str:
+        payload = {"json": {"projectId": project_id}}
+        result = await self._labs_trpc_post_with_st(
+            "flow.createEntity",
+            payload=payload,
+            st=st,
+            project_id=project_id,
+        )
+        entity_id = self._extract_flow_entity_id(result)
+        if not entity_id:
+            raise RuntimeError(f"flow.createEntity 响应缺少 entityId: keys={list(result.keys())}")
+        return entity_id
+
+    async def copy_project_media_to_character_slot(
+        self,
+        at: str,
+        *,
+        project_id: str,
+        media_id: str,
+        entity_id: str,
+        image_reference_index: int,
+        account_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "mediaId": media_id,
+            "destinationProjectId": project_id,
+            "destinationMediaContext": {
+                "entityContext": {
+                    "entityId": entity_id,
+                    "characterSlot": {
+                        "imageReferenceIndex": int(image_reference_index),
+                    },
+                }
+            },
+        }
+        return await self._aisandbox_request(
+            "POST",
+            "/flow:copyProjectMedia",
+            at=at,
+            raw_body=self._compact_json_dumps(payload),
+            account_id=account_id,
+        )
+
+    async def stream_flow_creation_agent(
+        self,
+        at: str,
+        payload: Dict[str, Any],
+        *,
+        project_id: Optional[str] = None,
+        token_id: Optional[int] = None,
+        action: str = "VIDEO_GENERATION",
+        account_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        url = self.api_base_url + endpoints.CREATION_AGENT
+        headers = self._build_browser_style_control_headers(
+            referer="https://labs.google/",
+            origin="https://labs.google",
+            account_id=account_id,
+            content_type="application/json",
+            accept_language=self._get_primary_accept_language(),
+        )
+        headers["Accept"] = "text/event-stream, text/event-stream"
+
+        raw_text = await self._make_text_request(
+            method="POST",
+            url=url,
+            headers=headers,
+            json_data=payload,
+            use_at=True,
+            at_token=at,
+            timeout=self._get_video_submit_timeout(),
+            apply_default_client_headers=False,
+            impersonate=self._resolve_runtime_impersonate(),
+        )
+        return self._parse_sse_json_events(raw_text)
+
+    async def generate_omni_reference_video(
+        self,
+        at: str,
+        st: str,
+        project_id: str,
+        prompt: str,
+        aspect_ratio: str,
+        reference_media_ids: List[str],
+        model_usage_key: str = "abra_r2v_10s",
+        model_display_name: str = "Omni Flash",
+        duration: int = 10,
+        user_paygate_tier: str = "PAYGATE_TIER_ONE",
+        token_id: Optional[int] = None,
+        token_video_concurrency: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        if not st:
+            raise RuntimeError("Omni 参考图视频需要 ST token，但当前账号未提供 ST")
+        if not reference_media_ids:
+            raise RuntimeError("Omni 参考图视频至少需要 1 张参考图")
+
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
+        last_error = None
+        retry_attempt = 0
+        session_id = self._generate_session_id()
+        entity_handle = "entity-0"
+        video_context_warmed = False
+        account_id = at[:16] if at else None
+        entity_id: Optional[str] = None
+        agent_aspect_ratio = self._video_aspect_ratio_to_agent_aspect_ratio(aspect_ratio)
+        agent_prompt = (
+            f"{prompt}\n\nUse a {agent_aspect_ratio} aspect ratio."
+            if prompt
+            else f"Use a {agent_aspect_ratio} aspect ratio."
+        )
+
+        while retry_attempt < max_retries:
+            launch_gate_acquired = False
+            approve_browser_id = None
+            launch_ok, _, _ = await self._acquire_video_launch_gate(
+                token_id=token_id,
+                token_video_concurrency=token_video_concurrency,
+            )
+            if not launch_ok:
+                last_error = Exception("Video launch queue wait timeout")
+                raise last_error
+
+            launch_gate_acquired = True
+            browser_id = None
+            try:
+                recaptcha_token, browser_id = await self._get_recaptcha_token(
+                    project_id,
+                    action="VIDEO_GENERATION",
+                    token_id=token_id,
+                )
+            finally:
+                if launch_gate_acquired:
+                    await self._release_video_launch_gate(token_id)
+
+            if not recaptcha_token:
+                last_error = Exception("Failed to obtain reCAPTCHA token")
+                should_retry = await self._handle_missing_recaptcha_token(
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO OMNI-R2V] 生成",
+                )
+                if should_retry:
+                    retry_attempt += 1
+                    continue
+                raise last_error
+
+            try:
+                if not entity_id:
+                    entity_id = await self.create_flow_entity(st=st, project_id=project_id)
+                    for index, media_id in enumerate(reference_media_ids):
+                        await self.copy_project_media_to_character_slot(
+                            at=at,
+                            project_id=project_id,
+                            media_id=media_id,
+                            entity_id=entity_id,
+                            image_reference_index=index,
+                            account_id=account_id,
+                        )
+                    debug_logger.log_info(
+                        f"[VIDEO OMNI-R2V] 已创建角色实体并挂载参考图: project_id={project_id}, entity_id={entity_id}, refs={len(reference_media_ids)}"
+                    )
+
+                if not video_context_warmed:
+                    await self._warmup_flow_video_frontend_context(
+                        at=at,
+                        project_id=project_id,
+                        token_id=token_id,
+                        session_id=session_id,
+                        user_paygate_tier=user_paygate_tier,
+                        prompt=agent_prompt,
+                        model_key=model_usage_key,
+                        aspect_ratio=aspect_ratio,
+                    )
+                    video_context_warmed = True
+
+                agent_session_id = await self.get_flow_creation_agent_session(
+                    at=at,
+                    project_id=project_id,
+                    account_id=account_id,
+                    allow_global_fallback=True,
+                )
+                if not agent_session_id:
+                    raise RuntimeError(
+                        f"未找到 Flow Creation Agent Session: project_id={project_id}"
+                    )
+
+                session_detail = await self.get_flow_creation_agent_session_detail(
+                    at=at,
+                    agent_session_id=agent_session_id,
+                    account_id=account_id,
+                )
+                current_turn_count = self._extract_turn_count(session_detail)
+                next_turn_number = current_turn_count + 1
+
+                prompt_payload = {
+                    "agentSessionId": agent_session_id,
+                    "agentClientContext": {
+                        "projectId": f"projects/{project_id}",
+                        "clientSessionId": session_id,
+                        "recaptchaContext": {
+                            "token": recaptcha_token,
+                            "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
+                        },
+                        "turnNumber": next_turn_number,
+                    },
+                    "userMessage": {
+                        "userPrompt": {
+                            "parts": [{"text": agent_prompt}],
+                        },
+                        "entityReferences": [
+                            {
+                                "entityId": entity_id,
+                                "handle": entity_handle,
+                            }
+                        ],
+                    },
+                }
+
+                prompt_events = await self.stream_flow_creation_agent(
+                    at=at,
+                    payload=prompt_payload,
+                    project_id=project_id,
+                    token_id=token_id,
+                    account_id=account_id,
+                )
+                tool_result = self._extract_generate_video_with_references_result(prompt_events)
+
+                if not tool_result:
+                    approve_recaptcha_token, approve_browser_id = await self._get_recaptcha_token(
+                        project_id,
+                        action="VIDEO_GENERATION",
+                        token_id=token_id,
+                    )
+                    if not approve_recaptcha_token:
+                        raise RuntimeError("Omni 参考图视频审批阶段获取 reCAPTCHA token 失败")
+                    approve_payload = {
+                        "agentSessionId": agent_session_id,
+                        "agentClientContext": {
+                            "projectId": f"projects/{project_id}",
+                            "clientSessionId": session_id,
+                            "recaptchaContext": {
+                                "token": approve_recaptcha_token,
+                                "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
+                            },
+                            "turnNumber": next_turn_number + 1,
+                        },
+                        "userMessage": {
+                            "userPrompt": {
+                                "parts": [{"text": "Approve"}],
+                            }
+                        },
+                    }
+                    approve_events = await self.stream_flow_creation_agent(
+                        at=at,
+                        payload=approve_payload,
+                        project_id=project_id,
+                        token_id=token_id,
+                        account_id=account_id,
+                    )
+                    tool_result = self._extract_generate_video_with_references_result(
+                        approve_events
+                    )
+                    await self._notify_browser_captcha_request_finished(approve_browser_id)
+                    approve_browser_id = None
+
+                if not tool_result:
+                    raise RuntimeError(
+                        "Omni 参考图视频链路未返回 generate_video_with_references toolResult"
+                    )
+
+                media_id = str(tool_result.get("media_id") or "").strip()
+                resolved_project_id = (
+                    str(tool_result.get("project_id") or project_id).strip() or project_id
+                )
+                if not media_id:
+                    raise RuntimeError(f"Omni 参考图视频 toolResult 缺少 media_id: {tool_result}")
+
+                operation = {
+                    "operation": {"name": media_id},
+                    "name": media_id,
+                    "mediaName": media_id,
+                    "projectId": resolved_project_id,
+                    "workflowId": tool_result.get("workflow_id"),
+                    "batchId": tool_result.get("batch_id"),
+                    "status": "MEDIA_GENERATION_STATUS_ACTIVE",
+                }
+                return {
+                    "operations": [operation],
+                    "agentToolResult": tool_result,
+                    "projectId": resolved_project_id,
+                    "entityId": entity_id,
+                    "entityHandle": entity_handle,
+                    "modelUsageKey": model_usage_key,
+                    "aspectRatio": tool_result.get("aspect_ratio") or aspect_ratio,
+                    "duration": duration,
+                    "modelDisplayName": model_display_name,
+                }
+            except Exception as e:
+                last_error = e
+                should_retry = await self._handle_retryable_generation_error(
+                    error=e,
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO OMNI-R2V] 生成",
+                    defer_browser_error_notification=True,
+                )
+                if should_retry:
+                    max_retries = self._resolve_generation_retry_budget(max_retries, e)
+                    retry_attempt += 1
+                    continue
+                raise
+            finally:
+                await self._notify_browser_captcha_request_finished(browser_id)
+                if approve_browser_id:
+                    await self._notify_browser_captcha_request_finished(approve_browser_id)
+
+            retry_attempt += 1
+
+        raise last_error
+
+    async def generate_video_reference_images(
+        self,
+        at: str,
+        project_id: str,
+        prompt: str,
+        model_key: str,
+        aspect_ratio: str,
+        reference_images: List[Dict],
+        user_paygate_tier: str = "PAYGATE_TIER_ONE",
+        token_id: Optional[int] = None,
+        token_video_concurrency: Optional[int] = None,
+    ) -> dict:
+        """图生视频,返回task_id
+
+        Args:
+            at: Access Token
+            project_id: 项目ID
+            prompt: 提示词
+            model_key: veo_3_1_r2v_fast_landscape
+            aspect_ratio: 视频宽高比
+            reference_images: 参考图片列表 [{"imageUsageType": "IMAGE_USAGE_TYPE_ASSET", "mediaId": "..."}]
+            user_paygate_tier: 用户等级
+
+        Returns:
+            同 generate_video_text
+        """
+        url = self.api_base_url + endpoints.GENERATE_VIDEO_REFERENCES
+
+        # 403/reCAPTCHA 重试逻辑 - reCAPTCHA evaluation failed 时允许更高重试上限
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
+        last_error = None
+        retry_attempt = 0
+        session_id = self._generate_session_id()
+        batch_id = str(uuid.uuid4())
+        video_context_warmed = False
+        while retry_attempt < max_retries:
+            # 每次重试都重新获取 reCAPTCHA token - 视频使用 VIDEO_GENERATION action
+            launch_gate_acquired = False
+            launch_ok, _, _ = await self._acquire_video_launch_gate(
+                token_id=token_id,
+                token_video_concurrency=token_video_concurrency,
+            )
+            if not launch_ok:
+                last_error = Exception("Video launch queue wait timeout")
+                raise last_error
+
+            launch_gate_acquired = True
+            try:
+                recaptcha_token, browser_id = await self._get_recaptcha_token(
+                    project_id, action="VIDEO_GENERATION", token_id=token_id
+                )
+            finally:
+                if launch_gate_acquired:
+                    await self._release_video_launch_gate(token_id)
+            if not recaptcha_token:
+                last_error = Exception("Failed to obtain reCAPTCHA token")
+                should_retry = await self._handle_missing_recaptcha_token(
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO R2V] 生成",
+                )
+                if should_retry:
+                    retry_attempt += 1
+                    continue
+                raise last_error
+            if not video_context_warmed:
+                await self._warmup_flow_video_frontend_context(
+                    at=at,
+                    project_id=project_id,
+                    token_id=token_id,
+                    session_id=session_id,
+                    user_paygate_tier=user_paygate_tier,
+                    prompt=prompt,
+                    model_key=model_key,
+                    aspect_ratio=aspect_ratio,
+                )
+                video_context_warmed = True
+            request_seed = random.randint(1, 99999)
+            json_data = {
+                "mediaGenerationContext": self._build_video_media_generation_context(batch_id),
+                "clientContext": {
+                    "recaptchaContext": {
+                        "token": recaptcha_token,
+                        "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
+                    },
+                    "sessionId": session_id,
+                    "projectId": project_id,
+                    "tool": "PINHOLE",
+                    "userPaygateTier": user_paygate_tier,
+                },
+                "requests": [
+                    {
+                        "aspectRatio": aspect_ratio,
+                        "seed": request_seed,
+                        "textInput": self._build_video_text_input(prompt, use_v2_model_config=True),
+                        "videoModelKey": model_key,
+                        "referenceImages": reference_images,
+                        "metadata": {},
+                    }
+                ],
+                "useV2ModelConfig": True,
+            }
+
+            try:
+                result = await self._make_video_api_request(
+                    url=url,
+                    json_data=json_data,
+                    at=at,
+                    timeout=self._get_video_submit_timeout(),
+                    project_id=project_id,
+                    token_id=token_id,
+                    action="VIDEO_GENERATION",
+                )
+                return self._normalize_video_generation_response(
+                    result, fallback_project_id=project_id
+                )
+            except Exception as e:
+                last_error = e
+                should_retry = await self._handle_retryable_generation_error(
+                    error=e,
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO R2V] 生成",
+                    defer_browser_error_notification=True,
+                )
+                if should_retry:
+                    max_retries = self._resolve_generation_retry_budget(max_retries, e)
+                    retry_attempt += 1
+                    continue
+                raise
+            finally:
+                await self._notify_browser_captcha_request_finished(browser_id)
+            retry_attempt += 1
+
+        # 所有重试都失败
+        raise last_error
+
+    async def generate_video_start_end(
+        self,
+        at: str,
+        project_id: str,
+        prompt: str,
+        model_key: str,
+        aspect_ratio: str,
+        start_media_id: str,
+        end_media_id: str,
+        use_v2_model_config: bool = False,
+        user_paygate_tier: str = "PAYGATE_TIER_ONE",
+        token_id: Optional[int] = None,
+        token_video_concurrency: Optional[int] = None,
+    ) -> dict:
+        """收尾帧生成视频,返回task_id
+
+        Args:
+            at: Access Token
+            project_id: 项目ID
+            prompt: 提示词
+            model_key: veo_3_1_i2v_s_fast_fl
+            aspect_ratio: 视频宽高比
+            start_media_id: 起始帧mediaId
+            end_media_id: 结束帧mediaId
+            user_paygate_tier: 用户等级
+
+        Returns:
+            同 generate_video_text
+        """
+        url = self.api_base_url + endpoints.GENERATE_VIDEO_FRAMES
+
+        # 403/reCAPTCHA 重试逻辑 - reCAPTCHA evaluation failed 时允许更高重试上限
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
+        last_error = None
+        retry_attempt = 0
+        session_id = self._generate_session_id()
+        batch_id = str(uuid.uuid4())
+        video_context_warmed = False
+        while retry_attempt < max_retries:
+            # 每次重试都重新获取 reCAPTCHA token - 视频使用 VIDEO_GENERATION action
+            launch_gate_acquired = False
+            launch_ok, _, _ = await self._acquire_video_launch_gate(
+                token_id=token_id,
+                token_video_concurrency=token_video_concurrency,
+            )
+            if not launch_ok:
+                last_error = Exception("Video launch queue wait timeout")
+                raise last_error
+
+            launch_gate_acquired = True
+            try:
+                recaptcha_token, browser_id = await self._get_recaptcha_token(
+                    project_id, action="VIDEO_GENERATION", token_id=token_id
+                )
+            finally:
+                if launch_gate_acquired:
+                    await self._release_video_launch_gate(token_id)
+            if not recaptcha_token:
+                last_error = Exception("Failed to obtain reCAPTCHA token")
+                should_retry = await self._handle_missing_recaptcha_token(
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO I2V] 首尾帧生成",
+                )
+                if should_retry:
+                    retry_attempt += 1
+                    continue
+                raise last_error
+            if not video_context_warmed:
+                await self._warmup_flow_video_frontend_context(
+                    at=at,
+                    project_id=project_id,
+                    token_id=token_id,
+                    session_id=session_id,
+                    user_paygate_tier=user_paygate_tier,
+                    prompt=prompt,
+                    model_key=model_key,
+                    aspect_ratio=aspect_ratio,
+                )
+                video_context_warmed = True
+            client_context = {
+                "recaptchaContext": {
+                    "token": recaptcha_token,
+                    "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
+                },
+                "sessionId": session_id,
+                "projectId": project_id,
+                "tool": "PINHOLE",
+                "userPaygateTier": user_paygate_tier,
+            }
+            request_seed = random.randint(1, 99999)
+            request_data = {
+                "aspectRatio": aspect_ratio,
+                "seed": request_seed,
+                "textInput": self._build_video_text_input(prompt, use_v2_model_config=True),
+                "videoModelKey": model_key,
+                "startImage": {"mediaId": start_media_id},
+                "endImage": {"mediaId": end_media_id},
+                "metadata": {},
+            }
+            json_data = {
+                "mediaGenerationContext": self._build_video_media_generation_context(batch_id),
+                "clientContext": client_context,
+                "requests": [request_data],
+                "useV2ModelConfig": True,
+            }
+
+            try:
+                result = await self._make_video_api_request(
+                    url=url,
+                    json_data=json_data,
+                    at=at,
+                    timeout=self._get_video_submit_timeout(),
+                    project_id=project_id,
+                    token_id=token_id,
+                    action="VIDEO_GENERATION",
+                )
+                return self._normalize_video_generation_response(
+                    result, fallback_project_id=project_id
+                )
+            except Exception as e:
+                last_error = e
+                should_retry = await self._handle_retryable_generation_error(
+                    error=e,
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO I2V] 首尾帧生成",
+                    defer_browser_error_notification=True,
+                )
+                if should_retry:
+                    max_retries = self._resolve_generation_retry_budget(max_retries, e)
+                    retry_attempt += 1
+                    continue
+                raise
+            finally:
+                await self._notify_browser_captcha_request_finished(browser_id)
+            retry_attempt += 1
+
+        # 所有重试都失败
+        raise last_error
+
+    async def generate_video_start_image(
+        self,
+        at: str,
+        project_id: str,
+        prompt: str,
+        model_key: str,
+        aspect_ratio: str,
+        start_media_id: str,
+        use_v2_model_config: bool = False,
+        user_paygate_tier: str = "PAYGATE_TIER_ONE",
+        token_id: Optional[int] = None,
+        token_video_concurrency: Optional[int] = None,
+    ) -> dict:
+        """仅首帧生成视频,返回task_id
+
+        Args:
+            at: Access Token
+            project_id: 项目ID
+            prompt: 提示词
+            model_key: veo_3_1_i2v_s_fast_fl等
+            aspect_ratio: 视频宽高比
+            start_media_id: 起始帧mediaId
+            user_paygate_tier: 用户等级
+
+        Returns:
+            同 generate_video_text
+        """
+        url = self.api_base_url + endpoints.GENERATE_VIDEO_FIRST_FRAME
+
+        # 403/reCAPTCHA 重试逻辑 - reCAPTCHA evaluation failed 时允许更高重试上限
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
+        last_error = None
+        retry_attempt = 0
+        session_id = self._generate_session_id()
+        batch_id = str(uuid.uuid4())
+        video_context_warmed = False
+        while retry_attempt < max_retries:
+            # 每次重试都重新获取 reCAPTCHA token - 视频使用 VIDEO_GENERATION action
+            launch_gate_acquired = False
+            launch_ok, _, _ = await self._acquire_video_launch_gate(
+                token_id=token_id,
+                token_video_concurrency=token_video_concurrency,
+            )
+            if not launch_ok:
+                last_error = Exception("Video launch queue wait timeout")
+                raise last_error
+
+            launch_gate_acquired = True
+            try:
+                recaptcha_token, browser_id = await self._get_recaptcha_token(
+                    project_id, action="VIDEO_GENERATION", token_id=token_id
+                )
+            finally:
+                if launch_gate_acquired:
+                    await self._release_video_launch_gate(token_id)
+            if not recaptcha_token:
+                last_error = Exception("Failed to obtain reCAPTCHA token")
+                should_retry = await self._handle_missing_recaptcha_token(
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO I2V] 首帧生成",
+                )
+                if should_retry:
+                    retry_attempt += 1
+                    continue
+                raise last_error
+            if not video_context_warmed:
+                await self._warmup_flow_video_frontend_context(
+                    at=at,
+                    project_id=project_id,
+                    token_id=token_id,
+                    session_id=session_id,
+                    user_paygate_tier=user_paygate_tier,
+                    prompt=prompt,
+                    model_key=model_key,
+                    aspect_ratio=aspect_ratio,
+                )
+                video_context_warmed = True
+            client_context = {
+                "recaptchaContext": {
+                    "token": recaptcha_token,
+                    "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
+                },
+                "sessionId": session_id,
+                "projectId": project_id,
+                "tool": "PINHOLE",
+                "userPaygateTier": user_paygate_tier,
+            }
+            request_seed = random.randint(1, 99999)
+            request_data = {
+                "aspectRatio": aspect_ratio,
+                "seed": request_seed,
+                "textInput": self._build_video_text_input(prompt, use_v2_model_config=True),
+                "videoModelKey": model_key,
+                "startImage": {"mediaId": start_media_id},
+                # 注意: 没有endImage字段,只用首帧
+                "metadata": {},
+            }
+            json_data = {
+                "mediaGenerationContext": self._build_video_media_generation_context(batch_id),
+                "clientContext": client_context,
+                "requests": [request_data],
+                "useV2ModelConfig": True,
+            }
+
+            try:
+                result = await self._make_video_api_request(
+                    url=url,
+                    json_data=json_data,
+                    at=at,
+                    timeout=self._get_video_submit_timeout(),
+                    project_id=project_id,
+                    token_id=token_id,
+                    action="VIDEO_GENERATION",
+                )
+                return self._normalize_video_generation_response(
+                    result, fallback_project_id=project_id
+                )
+            except Exception as e:
+                last_error = e
+                should_retry = await self._handle_retryable_generation_error(
+                    error=e,
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO I2V] 首帧生成",
+                    defer_browser_error_notification=True,
+                )
+                if should_retry:
+                    max_retries = self._resolve_generation_retry_budget(max_retries, e)
+                    retry_attempt += 1
+                    continue
+                raise
+            finally:
+                await self._notify_browser_captcha_request_finished(browser_id)
+            retry_attempt += 1
+
+        # 所有重试都失败
+        raise last_error
+
+    # ========== 视频续写 (Video Extend) ==========
+
+    async def generate_video_extend(
+        self,
+        at: str,
+        project_id: str,
+        prompt: str,
+        model_key: str,
+        aspect_ratio: str,
+        video_media_id: str,
+        user_paygate_tier: str = "PAYGATE_TIER_ONE",
+        token_id: Optional[int] = None,
+        token_video_concurrency: Optional[int] = None,
+    ) -> dict:
+        """视频续写,基于已生成的视频延伸7秒
+
+        Args:
+            at: Access Token
+            project_id: 项目ID
+            prompt: 续写提示词
+            model_key: veo_3_1_extend_portrait / veo_3_1_extend 等
+            aspect_ratio: 视频宽高比
+            video_media_id: 源视频的 mediaGenerationId
+            user_paygate_tier: 用户等级
+
+        Returns:
+            同 generate_video_text (operations 列表)
+        """
+        url = self.api_base_url + endpoints.EXTEND_VIDEO
+
+        # 403/reCAPTCHA 重试逻辑 - reCAPTCHA evaluation failed 时允许更高重试上限
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
+        last_error = None
+        retry_attempt = 0
+        session_id = self._generate_session_id()
+        workflow_id = str(uuid.uuid4())
+        batch_id = str(uuid.uuid4())
+        video_context_warmed = False
+        while retry_attempt < max_retries:
+            launch_gate_acquired = False
+            launch_ok, _, _ = await self._acquire_video_launch_gate(
+                token_id=token_id,
+                token_video_concurrency=token_video_concurrency,
+            )
+            if not launch_ok:
+                last_error = Exception("Video launch queue wait timeout")
+                raise last_error
+
+            launch_gate_acquired = True
+            try:
+                recaptcha_token, browser_id = await self._get_recaptcha_token(
+                    project_id, action="VIDEO_GENERATION", token_id=token_id
+                )
+            finally:
+                if launch_gate_acquired:
+                    await self._release_video_launch_gate(token_id)
+            if not recaptcha_token:
+                last_error = Exception("Failed to obtain reCAPTCHA token")
+                should_retry = await self._handle_missing_recaptcha_token(
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO EXTEND] 续写",
+                )
+                if should_retry:
+                    retry_attempt += 1
+                    continue
+                raise last_error
+            if not video_context_warmed:
+                await self._warmup_flow_video_frontend_context(
+                    at=at,
+                    project_id=project_id,
+                    token_id=token_id,
+                    session_id=session_id,
+                    user_paygate_tier=user_paygate_tier,
+                    prompt=prompt,
+                    model_key=model_key,
+                    aspect_ratio=aspect_ratio,
+                )
+                video_context_warmed = True
+
+            request_seed = random.randint(1, 99999)
+            json_data = {
+                "clientContext": {
+                    "recaptchaContext": {
+                        "token": recaptcha_token,
+                        "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
+                    },
+                    "sessionId": session_id,
+                    "projectId": project_id,
+                    "tool": "PINHOLE",
+                    "userPaygateTier": user_paygate_tier,
+                },
+                "mediaGenerationContext": self._build_video_media_generation_context(batch_id),
+                "requests": [
+                    {
+                        "aspectRatio": aspect_ratio,
+                        "seed": request_seed,
+                        "textInput": {"structuredPrompt": {"parts": [{"text": prompt}]}},
+                        "videoInput": {"mediaId": video_media_id},
+                        "videoModelKey": model_key,
+                        "metadata": {"workflowId": workflow_id},
+                    }
+                ],
+                "useV2ModelConfig": True,
+            }
+
+            # Debug: 打印请求体用于调试
+            import json as _json
+
+            debug_logger.log_info(f"[VIDEO EXTEND] Request URL: {url}")
+            debug_logger.log_info(
+                f"[VIDEO EXTEND] Request JSON: {_json.dumps(self._remote_safe_log(json_data), indent=2, ensure_ascii=False)[:2000]}"
+            )
+
+            try:
+                result = await self._make_video_api_request(
+                    url=url,
+                    json_data=json_data,
+                    at=at,
+                    timeout=self._get_video_submit_timeout(),
+                    project_id=project_id,
+                    token_id=token_id,
+                    action="VIDEO_GENERATION",
+                )
+                return self._normalize_video_generation_response(
+                    result, fallback_project_id=project_id
+                )
+            except Exception as e:
+                last_error = e
+                should_retry = await self._handle_retryable_generation_error(
+                    error=e,
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO EXTEND] 续写",
+                    defer_browser_error_notification=True,
+                )
+                if should_retry:
+                    max_retries = self._resolve_generation_retry_budget(max_retries, e)
+                    retry_attempt += 1
+                    continue
+                raise
+            finally:
+                await self._notify_browser_captcha_request_finished(browser_id)
+            retry_attempt += 1
+
+        # 所有重试都失败
+        raise last_error
+
+    # ========== 视频拼接 (Video Concatenation) ==========
+
+    async def run_concatenation(
+        self,
+        at: str,
+        original_media_id: str,
+        extend_media_id: str,
+    ) -> dict:
+        """
+        调用 Google runVideoFxConcatenation API 拼接视频
+
+        Args:
+            at: 认证 token
+            original_media_id: 原始视频的 mediaGenerationId (UUID)
+            extend_media_id: 续写视频的 mediaGenerationId (UUID)
+
+        Returns:
+            包含 operation name 的字典
+        """
+        url = self.api_base_url + endpoints.CONCATENATE_VIDEO
+
+        json_data = {
+            "inputVideos": [
+                {
+                    "mediaGenerationId": original_media_id,
+                    "lengthNanos": 8000,
+                    "startTimeOffset": "0s",
+                    "endTimeOffset": "8s",
+                },
+                {
+                    "mediaGenerationId": extend_media_id,
+                    "lengthNanos": 8000,
+                    "startTimeOffset": "1s",
+                    "endTimeOffset": "8s",
+                },
+            ]
+        }
+
+        debug_logger.log_info(
+            f"[CONCAT] 提交拼接任务: original={original_media_id[:12]}..., extend={extend_media_id[:12]}..."
+        )
+
+        result = await self._make_request(
+            method="POST", url=url, json_data=json_data, use_at=True, at_token=at
+        )
+        debug_logger.log_info(
+            f"[CONCAT] 拼接任务已提交: {json.dumps(result, ensure_ascii=False)[:300]}"
+        )
+        return result
+
+    async def poll_concatenation_status(
+        self,
+        at: str,
+        operation_name: str,
+        timeout: int = 300,
+        poll_interval: int = 3,
+    ) -> dict:
+        """
+        轮询拼接任务状态，直到完成或超时
+
+        Args:
+            at: 认证 token
+            operation_name: 拼接任务的 operation name
+            timeout: 超时秒数
+            poll_interval: 轮询间隔秒数
+
+        Returns:
+            包含 outputUri 和 mediaGenerationId 的字典
+        """
+        url = self.api_base_url + endpoints.CHECK_CONCATENATION
+        json_data = {"operation": {"operation": {"name": operation_name}}}
+
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            result = await self._make_request(
+                method="POST",
+                url=url,
+                json_data=json_data,
+                use_at=True,
+                at_token=at,
+                timeout=300,  # concat API returns base64 video (~14MB), needs longer timeout
+            )
+
+            status = result.get("status", "")
+            output_uri = result.get("outputUri", "")
+            encoded_video = result.get("encodedVideo", "")
+
+            ev_len = len(encoded_video) if encoded_video else 0
+            elapsed = int(time.time() - start_time)
+            all_keys = list(result.keys())
+            debug_logger.log_info(
+                f"[CONCAT] 状态: {status}, outputUri={'yes' if output_uri else 'no'}, "
+                f"encodedVideo={ev_len} chars, elapsed={elapsed}s, keys={all_keys}"
+            )
+
+            # 优先检查 outputUri
+            if output_uri:
+                debug_logger.log_info(f"[CONCAT] 拼接完成 (outputUri): {output_uri[:120]}")
+                return result
+
+            # Google API 返回 encodedVideo（base64 编码的 MP4）而不是 outputUri
+            if encoded_video and "SUCCESSFUL" in status:
+                try:
+                    import os
+
+                    video_bytes = base64.b64decode(encoded_video)
+                    video_filename = f"concat_{uuid.uuid4().hex[:12]}.mp4"
+
+                    # 保存到 tmp/ 目录（FastAPI 已挂载为 /tmp 静态文件）
+                    save_dir = "tmp"
+                    os.makedirs(save_dir, exist_ok=True)
+                    save_path = os.path.join(save_dir, video_filename)
+
+                    with open(save_path, "wb") as f:
+                        f.write(video_bytes)
+
+                    # 构造 URL：FastAPI 挂载了 /tmp -> /app/tmp/
+                    serve_url = f"/tmp/{video_filename}"
+                    debug_logger.log_info(
+                        f"[CONCAT] 拼接完成 (encodedVideo): 保存 {len(video_bytes)} bytes -> {serve_url}"
+                    )
+
+                    result["outputUri"] = serve_url
+                    result["local_file"] = save_path
+                    return result
+                except Exception as e:
+                    debug_logger.log_error(f"[CONCAT] 解码 encodedVideo 失败: {e}")
+                    raise Exception(f"解码拼接视频失败: {e}")
+
+            # SUCCESSFUL but neither outputUri nor encodedVideo
+            if "SUCCESSFUL" in status:
+                debug_logger.log_warning(
+                    f"[CONCAT] SUCCESSFUL 但无 outputUri/encodedVideo: {json.dumps(result, ensure_ascii=False)[:300]}"
+                )
+
+            if "FAILED" in status or "ERROR" in status:
+                debug_logger.log_error(
+                    f"[CONCAT] 失败: {status}, 响应: {json.dumps(result, ensure_ascii=False)[:300]}"
+                )
+                raise Exception(f"视频拼接失败: {status}")
+
+            await asyncio.sleep(poll_interval)
+
+        debug_logger.log_error(f"[CONCAT] 超时 ({timeout}s)，放弃拼接")
+        raise Exception(f"视频拼接超时 ({timeout}s)")
+
+    # ========== 视频放大 (Video Upsampler) ==========
+
+    async def upsample_video(
+        self,
+        at: str,
+        project_id: str,
+        video_media_id: str,
+        aspect_ratio: str,
+        resolution: str,
+        model_key: str,
+        user_paygate_tier: str = "PAYGATE_TIER_ONE",
+        token_id: Optional[int] = None,
+        token_video_concurrency: Optional[int] = None,
+    ) -> dict:
+        """视频放大到 4K/1080P，返回 task_id
+
+        Args:
+            at: Access Token
+            project_id: 项目ID
+            video_media_id: 视频的 mediaId
+            aspect_ratio: 视频宽高比 VIDEO_ASPECT_RATIO_PORTRAIT/LANDSCAPE
+            resolution: VIDEO_RESOLUTION_4K 或 VIDEO_RESOLUTION_1080P
+            model_key: veo_3_1_upsampler_4k 或 veo_3_1_upsampler_1080p
+
+        Returns:
+            同 generate_video_text
+        """
+        url = self.api_base_url + endpoints.UPSAMPLE_VIDEO
+
+        # 403/reCAPTCHA 重试逻辑 - reCAPTCHA evaluation failed 时允许更高重试上限
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
+        last_error = None
+        retry_attempt = 0
+        session_id = self._generate_session_id()
+        batch_id = str(uuid.uuid4())
+        scene_id = str(uuid.uuid4())
+        video_context_warmed = False
+        while retry_attempt < max_retries:
+            launch_gate_acquired = False
+            launch_ok, _, _ = await self._acquire_video_launch_gate(
+                token_id=token_id,
+                token_video_concurrency=token_video_concurrency,
+            )
+            if not launch_ok:
+                last_error = Exception("Video launch queue wait timeout")
+                raise last_error
+
+            launch_gate_acquired = True
+            try:
+                recaptcha_token, browser_id = await self._get_recaptcha_token(
+                    project_id, action="VIDEO_GENERATION", token_id=token_id
+                )
+            finally:
+                if launch_gate_acquired:
+                    await self._release_video_launch_gate(token_id)
+            if not recaptcha_token:
+                last_error = Exception("Failed to obtain reCAPTCHA token")
+                should_retry = await self._handle_missing_recaptcha_token(
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO UPSAMPLE] 放大",
+                )
+                if should_retry:
+                    retry_attempt += 1
+                    continue
+                raise last_error
+            if not video_context_warmed:
+                await self._warmup_flow_video_frontend_context(
+                    at=at,
+                    project_id=project_id,
+                    token_id=token_id,
+                    session_id=session_id,
+                    user_paygate_tier=user_paygate_tier,
+                    prompt="",
+                    model_key=model_key,
+                    aspect_ratio=aspect_ratio,
+                )
+                video_context_warmed = True
+
+            request_seed = random.randint(1, 99999)
+            json_data = {
+                "mediaGenerationContext": self._build_video_media_generation_context(batch_id),
+                "requests": [
+                    {
+                        "aspectRatio": aspect_ratio,
+                        "resolution": resolution,
+                        "seed": request_seed,
+                        "videoInput": {"mediaId": video_media_id},
+                        "videoModelKey": model_key,
+                        "metadata": {"sceneId": scene_id},
+                    }
+                ],
+                "clientContext": {
+                    "recaptchaContext": {
+                        "token": recaptcha_token,
+                        "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
+                    },
+                    "sessionId": session_id,
+                    "projectId": project_id,
+                    "tool": "PINHOLE",
+                    "userPaygateTier": user_paygate_tier,
+                },
+                "useV2ModelConfig": True,
+            }
+
+            try:
+                result = await self._make_video_api_request(
+                    url=url,
+                    json_data=json_data,
+                    at=at,
+                    timeout=self._get_video_submit_timeout(),
+                    project_id=project_id,
+                    token_id=token_id,
+                    action="VIDEO_GENERATION",
+                )
+                return self._normalize_video_generation_response(
+                    result, fallback_project_id=project_id
+                )
+            except Exception as e:
+                last_error = e
+                should_retry = await self._handle_retryable_generation_error(
+                    error=e,
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO UPSAMPLE] 放大",
+                    defer_browser_error_notification=True,
+                )
+                if should_retry:
+                    max_retries = self._resolve_generation_retry_budget(max_retries, e)
+                    retry_attempt += 1
+                    continue
+                raise
+            finally:
+                await self._notify_browser_captcha_request_finished(browser_id)
+            retry_attempt += 1
+
+        raise last_error
+
+    # ========== 任务轮询 (使用AT) ==========
+
+    async def check_video_status(self, at: str, operations: List[Dict]) -> dict:
+        """查询视频生成状态
+
+        Args:
+            at: Access Token
+            operations: 内部操作列表；当前上游状态查询仅使用其中抽取出的 media 引用
+
+        Returns:
+            {
+                "operations": [{
+                    "operation": {
+                        "name": "task_id",
+                        "metadata": {...}  # 完成时包含视频信息
+                    },
+                    "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL"
+                }]
+            }
+        """
+        url = self.api_base_url + endpoints.CHECK_VIDEO
+
+        media_refs = self._operations_to_media_refs(operations)
+        if not media_refs:
+            raise ValueError("视频状态查询缺少 media 引用，无法按当前上游结构发起查询")
+
+        json_data = {"media": media_refs}
+        max_retries = config.flow_max_retries
+        last_error: Optional[Exception] = None
+
+        for retry_attempt in range(max_retries):
+            try:
+                result = await self._make_video_api_request(
+                    url=url, json_data=json_data, at=at, timeout=self._get_video_poll_timeout()
+                )
+                try:
+                    media_preview = result.get("media") if isinstance(result, dict) else None
+                    operations_preview = (
+                        result.get("operations") if isinstance(result, dict) else None
+                    )
+                    preview_payload = {
+                        "top_keys": list(result.keys()) if isinstance(result, dict) else [],
+                        "media_count": len(media_preview) if isinstance(media_preview, list) else 0,
+                        "operations_count": len(operations_preview)
+                        if isinstance(operations_preview, list)
+                        else 0,
+                        "first_media": media_preview[0]
+                        if isinstance(media_preview, list) and media_preview
+                        else None,
+                        "first_operation": operations_preview[0]
+                        if isinstance(operations_preview, list) and operations_preview
+                        else None,
+                    }
+                    preview_payload.pop("first_media", None)
+                    preview_payload.pop("first_operation", None)
+                    print(
+                        "[VIDEO POLL RAW] "
+                        + json.dumps(
+                            self._truncate_large_debug_value(preview_payload),
+                            ensure_ascii=False,
+                        )[:4000]
+                    )
+                except Exception:
+                    pass
+                return self._normalize_video_generation_response(result)
+            except Exception as e:
+                last_error = e
+                retry_reason = self._get_retry_reason(str(e))
+                if retry_reason and retry_attempt < max_retries - 1:
+                    debug_logger.log_warning(
+                        f"[VIDEO POLL] 状态查询遇到{retry_reason}，准备重试 ({retry_attempt + 2}/{max_retries})..."
+                    )
+                    await asyncio.sleep(1)
+                    continue
+                raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("视频状态查询失败")
+
+    # ========== 媒体删除 (使用ST) ==========
+
+    async def delete_media(self, st: str, media_names: List[str]):
+        """删除媒体
+
+        Args:
+            st: Session Token
+            media_names: 媒体ID列表
+        """
+        url = f"{self.labs_base_url}/trpc/media.deleteMedia"
+        json_data = {"json": {"names": media_names}}
+
+        await self._make_request(
+            method="POST", url=url, json_data=json_data, use_st=True, st_token=st
+        )
+
+    async def get_media_url_redirect(
+        self,
+        st: str,
+        media_name: str,
+        media_url_type: str = "MEDIA_URL_TYPE_FULL_MEDIA",
+    ) -> Optional[str]:
+        """通过 trpc media.getMediaUrlRedirect 获取媒体实际访问 URL。"""
+        normalized_media_name = str(media_name or "").strip()
+        if not normalized_media_name:
+            return None
+
+        url = (
+            f"{self.labs_base_url}/trpc/media.getMediaUrlRedirect"
+            f"?name={quote(normalized_media_name, safe='')}"
+            f"&mediaUrlType={quote(str(media_url_type or 'MEDIA_URL_TYPE_FULL_MEDIA'), safe='')}"
+        )
+
+        proxy_url = self._account_proxy_ctx.get()
+        if proxy_url is None and self.proxy_manager:
+            if hasattr(self.proxy_manager, "get_request_proxy_url"):
+                proxy_url = await self.proxy_manager.get_request_proxy_url()
+            else:
+                proxy_url = await self.proxy_manager.get_proxy_url()
+
+        headers = {
+            "Cookie": f"__Secure-next-auth.session-token={st}",
+            "User-Agent": self._get_effective_request_user_agent(st[:16] if st else None),
+            "Accept": "*/*",
+        }
+        for key, value in self._default_client_headers.items():
+            headers.setdefault(key, value)
+
+        self._apply_remote_browser_headers(headers, url, st[:16] if st else None)
+        request_timeout = self._get_control_plane_timeout()
+        start_time = time.time()
+        try:
+            async with AsyncSession(trust_env=False) as session:
+                remote_options = {"default_headers": False}
+                response = await session.get(
+                    url,
+                    headers=headers,
+                    proxy=proxy_url,
+                    timeout=request_timeout,
+                    impersonate=self._resolve_runtime_impersonate(),
+                    allow_redirects=False,
+                    **remote_options,
+                )
+
+            duration_ms = (time.time() - start_time) * 1000
+            if config.debug_enabled:
+                debug_logger.log_response(
+                    status_code=response.status_code,
+                    headers=self._remote_safe_log(dict(response.headers)),
+                    body="<remote response body omitted>",
+                    duration_ms=duration_ms,
+                )
+
+            if 300 <= response.status_code < 400:
+                location = response.headers.get("Location") or response.headers.get("location")
+                if location:
+                    return urljoin(url, location)
+
+            final_url = str(getattr(response, "url", "") or "").strip()
+            if response.status_code == 200 and final_url and final_url != url:
+                return final_url
+
+            raise RuntimeError(
+                f"media.getMediaUrlRedirect returned unexpected status={response.status_code} "
+                f"for media={normalized_media_name}"
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"获取媒体重定向地址失败: media={normalized_media_name}, type={media_url_type}, error={e}"
+            ) from e
+
+    # ========== 辅助方法 ==========
+
+    async def _handle_retryable_generation_error(
+        self,
+        error: Exception,
+        retry_attempt: int,
+        max_retries: int,
+        browser_id: Optional[Union[int, str]],
+        project_id: str,
+        log_prefix: str,
+        defer_browser_error_notification: bool = False,
+    ) -> bool:
+        """统一处理生成链路的重试判定与打码自愈通知。"""
+        error_str = str(error)
+        retry_reason = self._get_retry_reason(error_str)
+        retry_delay = self._get_retry_delay_seconds(error_str, retry_attempt)
+
+        effective_max_retries = self._resolve_generation_retry_budget(max_retries, error_str)
+        is_terminal_attempt = retry_attempt >= effective_max_retries - 1
+        should_notify_browser = (
+            not defer_browser_error_notification or not retry_reason or is_terminal_attempt
+        )
+
+        if should_notify_browser:
+            notify_reason = retry_reason or error_str[:120] or type(error).__name__
+            await self._notify_browser_captcha_error(
+                browser_id=browser_id,
+                project_id=project_id,
+                error_reason=notify_reason,
+                error_message=error_str,
+            )
+
+        if not retry_reason:
+            return False
+
+        if is_terminal_attempt:
+            debug_logger.log_warning(
+                f"{log_prefix}遇到{retry_reason}，已达到最大重试次数({effective_max_retries})，本次请求失败并执行关闭回收。"
+            )
+            return False
+
+        debug_logger.log_warning(
+            f"{log_prefix}遇到{retry_reason}，将在 {retry_delay} 秒后重新获取验证码重试 ({retry_attempt + 2}/{effective_max_retries})..."
+        )
+        await asyncio.sleep(retry_delay)
+        return True
+
+    async def _handle_missing_recaptcha_token(
+        self,
+        retry_attempt: int,
+        max_retries: int,
+        browser_id: Optional[Union[int, str]],
+        project_id: str,
+        log_prefix: str,
+    ) -> bool:
+        token_error = Exception("Failed to obtain reCAPTCHA token")
+        return await self._handle_retryable_generation_error(
+            error=token_error,
+            retry_attempt=retry_attempt,
+            max_retries=max_retries,
+            browser_id=browser_id,
+            project_id=project_id,
+            log_prefix=log_prefix,
+        )
+
+    def _get_retry_reason(self, error_str: str) -> Optional[str]:
+        """判断是否需要重试，返回日志提示内容"""
+        return retry_policy.get_retry_reason(
+            error_str, network_classifier=self._is_retryable_network_error
+        )
+
+    def _get_retry_delay_seconds(self, error_str: str, retry_attempt: int) -> int:
+        return retry_policy.get_retry_delay_seconds(error_str, retry_attempt)
+
+    async def _notify_browser_captcha_error(
+        self,
+        browser_id: Optional[Union[int, str]] = None,
+        project_id: Optional[str] = None,
+        error_reason: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ):
+        """Report an upstream rejection for the same remote solve session."""
+        if not browser_id:
+            return
+        try:
+            session_id = quote(str(browser_id), safe="")
+            await self._call_remote_browser_service(
+                method="POST",
+                path=f"/api/v1/sessions/{session_id}/error",
+                json_data={"error_reason": error_reason or error_message or "upstream_error"},
+                timeout_override=2,
+            )
+        except Exception as error:
+            debug_logger.log_warning(
+                f"[Remote captcha] error callback failed ({type(error).__name__})"
+            )
+
+    async def _notify_browser_captcha_request_finished(
+        self, browser_id: Optional[Union[int, str]] = None
+    ):
+        """Release the remote session after the upstream request finishes."""
+        if not browser_id:
+            return
+        try:
+            session_id = quote(str(browser_id), safe="")
+            await self._call_remote_browser_service(
+                method="POST",
+                path=f"/api/v1/sessions/{session_id}/finish",
+                json_data={"status": "success"},
+                timeout_override=2,
+            )
+        except Exception as error:
+            debug_logger.log_warning(
+                f"[Remote captcha] finish callback failed ({type(error).__name__})"
+            )
+
+    def _generate_session_id(self) -> str:
+        """生成sessionId: ;timestamp"""
+        return f";{int(time.time() * 1000)}"
+
+    def _generate_scene_id(self) -> str:
+        """生成sceneId: UUID"""
+        return str(uuid.uuid4())
+
+    def _get_remote_browser_service_config(self) -> tuple[str, str, int]:
+        base_url = (config.remote_browser_base_url or "").strip().rstrip("/")
+        api_key = (config.remote_browser_api_key or "").strip()
+        timeout = max(5, int(config.remote_browser_timeout or 60))
+
+        if not base_url:
+            raise RuntimeError("remote_browser 服务地址未配置")
+        if not api_key:
+            raise RuntimeError("remote_browser API Key 未配置")
+
+        if not (base_url.startswith("http://") or base_url.startswith("https://")):
+            raise RuntimeError("remote_browser 服务地址格式错误")
+
+        return base_url, api_key, timeout
+
+    @staticmethod
+    def _build_remote_browser_http_timeout(read_timeout: float) -> Any:
+        read_value = max(3.0, float(read_timeout))
+        write_value = min(10.0, max(3.0, read_value))
+        if httpx is None:
+            return read_value
+        return httpx.Timeout(
+            connect=2.5,
+            read=read_value,
+            write=write_value,
+            pool=2.5,
+        )
+
+    @staticmethod
+    def _parse_json_response_text(text: str) -> Optional[Any]:
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            return None
+
+    @staticmethod
+    async def _stdlib_json_http_request(
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        payload: Optional[Dict[str, Any]],
+        timeout: int,
+    ) -> tuple[int, Optional[Any], str]:
+        req_headers = dict(headers or {})
+        req_headers.setdefault("Accept", "application/json")
+        request_method = (method or "GET").upper()
+        request_data: Optional[bytes] = None
+
+        if payload is not None:
+            req_headers["Content-Type"] = "application/json; charset=utf-8"
+            if request_method != "GET":
+                request_data = json.dumps(payload).encode("utf-8")
+
+        def do_request() -> tuple[int, str]:
+            request = urllib.request.Request(
+                url=url,
+                data=request_data,
+                headers=req_headers,
+                method=request_method,
+            )
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            try:
+                with opener.open(request, timeout=max(1.0, float(timeout))) as response:
+                    status_code = int(getattr(response, "status", 0) or response.getcode() or 0)
+                    body = response.read()
+                    charset = response.headers.get_content_charset() or "utf-8"
+                    return status_code, body.decode(charset, errors="replace")
+            except urllib.error.HTTPError as exc:
+                body = exc.read()
+                charset = exc.headers.get_content_charset() if exc.headers else None
+                return int(getattr(exc, "code", 0) or 0), body.decode(
+                    charset or "utf-8", errors="replace"
+                )
+
+        try:
+            status_code, text = await asyncio.to_thread(do_request)
+        except Exception as e:
+            raise RuntimeError(f"remote_browser 请求失败: {e}") from e
+
+        return status_code, FlowClient._parse_json_response_text(text), text
+
+    @staticmethod
+    async def _sync_json_http_request(
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        payload: Optional[Dict[str, Any]],
+        timeout: int,
+    ) -> tuple[int, Optional[Any], str]:
+        req_headers = dict(headers or {})
+        req_headers.setdefault("Accept", "application/json")
+        request_method = (method or "GET").upper()
+        request_kwargs: Dict[str, Any] = {
+            "headers": req_headers,
+            "timeout": FlowClient._build_remote_browser_http_timeout(timeout),
+        }
+
+        if payload is not None:
+            req_headers["Content-Type"] = "application/json; charset=utf-8"
+            if request_method != "GET":
+                request_kwargs["json"] = payload
+
+        if httpx is None:
+            return await FlowClient._stdlib_json_http_request(
+                method=method,
+                url=url,
+                headers=req_headers,
+                payload=payload,
+                timeout=timeout,
+            )
+
+        try:
+            # remote_browser 控制面只需要稳定传输 JSON，不需要浏览器指纹伪装。
+            # 使用 httpx 可以避免 curl_cffi 在当前环境下 POST body 被吞掉。
+            async with httpx.AsyncClient(follow_redirects=False, trust_env=False) as session:
+                response = await session.request(
+                    method=request_method,
+                    url=url,
+                    **request_kwargs,
+                )
+        except Exception as e:
+            raise RuntimeError(f"remote_browser 请求失败: {e}") from e
+
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        text = response.text or ""
+        parsed = FlowClient._parse_json_response_text(text)
+
+        return status_code, parsed, text
+
+    async def _call_remote_browser_service(
+        self,
+        method: str,
+        path: str,
+        json_data: Optional[Dict[str, Any]] = None,
+        timeout_override: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        base_url, api_key, timeout = self._get_remote_browser_service_config()
+        url = f"{base_url}{path}"
+        effective_timeout = max(5, int(timeout_override or timeout))
+
+        status_code, payload, response_text = await self._sync_json_http_request(
+            method=method,
+            url=url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            payload=json_data,
+            timeout=effective_timeout,
+        )
+
+        if status_code >= 300:
+            raise RuntimeError(f"remote_browser request failed: HTTP {status_code}")
+
+        if not isinstance(payload, dict):
+            raise RuntimeError("remote_browser 返回格式错误")
+
+        return payload
+
+    async def prefill_remote_browser_pool(
+        self,
+        project_id: str,
+        action: str = "IMAGE_GENERATION",
+        token_id: Optional[int] = None,
+        *,
+        cooldown_seconds: float = 8.0,
+    ) -> bool:
+        """让本地 remote_browser 服务提前开始补池，尽量把取 token 等待搬到前面。"""
+
+        normalized_project = str(project_id or "").strip()
+        normalized_action = str(action or "IMAGE_GENERATION").strip() or "IMAGE_GENERATION"
+        if not normalized_project:
+            return False
+
+        cache_key = f"{normalized_project}|{normalized_action}|{int(token_id or 0)}"
+        now_value = time.monotonic()
+        last_sent = float(self._remote_browser_prefill_last_sent.get(cache_key, 0.0) or 0.0)
+        if (now_value - last_sent) < max(0.5, float(cooldown_seconds)):
+            return False
+
+        try:
+            await self._call_remote_browser_service(
+                method="POST",
+                path="/api/v1/prefill",
+                json_data={
+                    "project_id": normalized_project,
+                    "action": normalized_action,
+                    "token_id": token_id,
+                },
+                timeout_override=3,
+            )
+            self._remote_browser_prefill_last_sent[cache_key] = now_value
+            return True
+        except Exception as e:
+            debug_logger.log_warning(f"[reCAPTCHA RemoteBrowser] prefill 失败: {type(e).__name__}")
+            return False
+
+    async def prefill_remote_browser_for_tokens(
+        self, tokens: List[Any], action: str = "IMAGE_GENERATION"
+    ) -> int:
+
+        unique_projects: List[str] = []
+        seen_projects = set()
+        for token in tokens or []:
+            project_id = str(getattr(token, "current_project_id", "") or "").strip()
+            if not project_id or project_id in seen_projects:
+                continue
+            seen_projects.add(project_id)
+            unique_projects.append(project_id)
+
+        warmed = 0
+        for project_id in unique_projects:
+            if await self.prefill_remote_browser_pool(project_id, action=action):
+                warmed += 1
+        return warmed
+
+    def _resolve_remote_browser_solve_timeout(self, action: str) -> int:
+        base_timeout = max(5, int(config.remote_browser_timeout or 60))
+        action_name = str(action or "").strip().upper()
+
+        # 这里只是拿 reCAPTCHA token，不应该跟整条生成链路共用数百秒级超时。
+        target_timeout = 45 if action_name == "VIDEO_GENERATION" else 35
+        return max(12, min(base_timeout, target_timeout))
+
+    async def _get_recaptcha_token(
+        self,
+        project_id: str,
+        action: str = "IMAGE_GENERATION",
+        token_id: Optional[int] = None,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Acquire one remote solve and its isolated browser identity snapshot."""
+        self.clear_request_fingerprint()
+        try:
+            payload = await self._call_remote_browser_service(
+                method="POST",
+                path="/api/v1/solve",
+                json_data={"project_id": project_id, "action": action, "token_id": token_id},
+                timeout_override=self._resolve_remote_browser_solve_timeout(action),
+            )
+            token, session_id = payload.get("token"), payload.get("session_id")
+            if (
+                payload.get("success") is False
+                or not isinstance(token, str)
+                or not token.strip()
+                or not isinstance(session_id, str)
+                or not session_id.strip()
+            ):
+                raise RuntimeError("Remote captcha solve failed or missing token/session_id")
+            self._set_request_fingerprint(self._remote_solve_fingerprint(payload, project_id))
+            return token.strip(), session_id.strip()
+        except Exception as error:
+            debug_logger.log_error(f"[Remote captcha] solve failed ({type(error).__name__})")
+            self.clear_request_fingerprint()
+            return None, None

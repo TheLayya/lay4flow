@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>账号浏览器 · lay4flow</title>
+    <style>
+        *{box-sizing:border-box}body{margin:0;font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;background:#111827;color:#e5e7eb;height:100vh;display:flex;flex-direction:column}
+        header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 16px;background:#1f2937;border-bottom:1px solid #374151}h1{font-size:16px;margin:0}#status{flex:1;min-width:160px;color:#cbd5e1}#status[data-error="true"]{color:#fca5a5}
+        nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap}button,a{font:inherit;cursor:pointer;padding:7px 12px;border-radius:6px;border:1px solid #4b5563;background:#374151;color:#fff;text-decoration:none}button:hover,a:hover{background:#4b5563}button:focus-visible,a:focus-visible{outline:2px solid #93c5fd;outline-offset:2px}button:disabled{cursor:wait;opacity:.5}#refreshOpenCredentials{background:#1d4ed8;border-color:#2563eb}
+        #screen{flex:1;min-height:0;overflow:hidden}#screen p{padding:24px;color:#cbd5e1}footer{padding:6px 16px;font-size:12px;background:#1f2937;color:#94a3b8}
+        #pastePanel{position:fixed;z-index:10;top:80px;right:16px;max-width:calc(100vw - 32px);width:360px;padding:16px;border:1px solid #4b5563;border-radius:8px;background:#1f2937;box-shadow:0 12px 32px #0006}#pastePanel[hidden]{display:none}#pastePanel p{font-size:12px;color:#cbd5e1;margin:8px 0 12px}#pasteInput{display:block;width:100%;margin:8px 0 12px;padding:9px 10px;font:inherit;color:#fff;background:#111827;border:1px solid #64748b;border-radius:6px}#pasteInput:focus-visible{outline:2px solid #93c5fd;outline-offset:2px}.paste-actions{display:flex;justify-content:flex-end;gap:8px}
+    </style>
+</head>
+<body>
+    <header>
+        <h1 id="accountTitle">账号浏览器</h1>
+        <div id="status" role="status" aria-live="polite">正在连接浏览器…</div>
+        <nav aria-label="浏览器操作">
+            <button id="pasteText" type="button" disabled aria-controls="pastePanel" aria-expanded="false">粘贴文本</button>
+            <button id="refreshOpenCredentials" type="button">刷新凭据（保持窗口）</button>
+            <button id="refreshCredentials" type="button">关闭并刷新凭据</button>
+            <button id="closeBrowser" type="button">关闭浏览器和窗口</button>
+            <a href="/manage">返回管理页</a>
+        </nav>
+    </header>
+    <section id="pastePanel" role="dialog" aria-labelledby="pasteLabel" hidden>
+        <label id="pasteLabel" for="pasteInput">粘贴文本或密码</label>
+        <p>先在浏览器画面中点选输入框，再在这里粘贴。内容以圆点显示，输入后自动清空；换行和制表符会被忽略。</p>
+        <input id="pasteInput" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" aria-label="要粘贴的文本或密码">
+        <div class="paste-actions">
+            <button id="pasteCancel" type="button">取消</button>
+            <button id="pasteSend" type="button" disabled>输入到浏览器</button>
+        </div>
+    </section>
+    <main id="screen" aria-label="可交互的账号浏览器"><p>浏览器画面将在这里显示。</p></main>
+    <footer>点选画面中的输入框后，可用 Ctrl / ⌘ + V 或顶部“粘贴文本”输入。点击“刷新凭据（保持窗口）”可刷新并继续调试。</footer>
+    <script type="module" src="/static/js/profile_browser.js?v=20261014-profile-paste"></script>
+</body>
+</html>

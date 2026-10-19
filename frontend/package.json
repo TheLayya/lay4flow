@@ -1,0 +1,36 @@
+{
+  "name": "lay4flow-remote",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node --test tests/*.test.mjs",
+    "test:e2e": "node tests/ui.e2e.mjs",
+    "test:gallery": "node tests/studio-gallery.e2e.mjs",
+    "test:studio-workflow": "node tests/studio-workflow.e2e.mjs",
+    "test:image-editor": "node tests/image-editor.e2e.mjs",
+    "test:accounts": "node tests/accounts-glance.e2e.mjs",
+    "test:settings": "node tests/settings-overview.e2e.mjs",
+    "test:proxy-pool": "node tests/proxy-pool.e2e.mjs",
+    "test:motion": "node tests/anime-motion.e2e.mjs"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "2.3.2",
+    "element-plus": "2.14.7",
+    "vue": "3.5.44",
+    "vue-router": "4.6.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "6.0.10",
+    "playwright": "^1.64.0",
+    "prettier": "^3.9.10",
+    "unplugin-vue-components": "^32.1.0",
+    "vite": "8.3.4"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}

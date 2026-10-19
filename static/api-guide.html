@@ -1,0 +1,739 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Flow 接口文档 · lay4flow</title>
+<style>
+:root{color-scheme:light;--text:#303342;--muted:#737888;--border:#e4e4e7;--accent:#18181b;--surface:#f4f4f5}*{box-sizing:border-box}
+body{margin:0;color:var(--text);background:#fff;font:15px/1.7 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}button{font:inherit;cursor:pointer}
+button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}[hidden]{display:none!important}
+header{height:56px;border-bottom:1px solid var(--border);background:rgba(255,255,255,.95);display:flex;align-items:center;justify-content:space-between;padding:0 max(24px,calc((100vw - 1280px)/2));position:sticky;top:0;z-index:2;backdrop-filter:blur(8px)}
+.brand{font-size:20px;font-weight:700;color:#09090b}.brand span{color:var(--muted);font-size:13px;font-weight:400;margin-left:14px}.header-links{display:flex;gap:28px;font-size:14px}.header-links a{color:#52525b}.header-links a:hover{color:#09090b;text-decoration:none}.header-links a:first-child{font-weight:600;color:#09090b}
+.layout{display:grid;grid-template-columns:240px minmax(0,1fr) 190px;max-width:1500px;margin:auto}
+.sidebar{padding:28px 20px;background:var(--surface);border-right:1px solid var(--border);position:sticky;top:56px;height:calc(100vh - 56px);overflow:auto}
+.nav-label{color:#9a9eab;font-size:12px;margin:18px 12px 6px;letter-spacing:.06em}.nav-label:first-child{margin-top:0}
+.doc-nav a{display:block;padding:7px 12px;border-radius:6px;color:#5c6170;font-size:14px}.doc-nav a[aria-current=page]{background:#e4e4e7;color:#09090b;font-weight:600}.doc-nav a:hover{background:#efeff5;text-decoration:none}
+main{min-width:0;padding:42px 48px 80px}.doc-section{max-width:860px;margin:auto;scroll-margin-top:90px}.eyebrow{color:var(--muted);font-size:12px;margin:0 0 8px}
+h1{font-size:29px;line-height:1.4;letter-spacing:-.02em;margin:0 0 14px;color:#272a36}
+h2{font-size:20px;margin:34px 0 14px;padding-top:22px;border-top:1px solid var(--border);scroll-margin-top:88px}
+h3{font-size:16px;margin:26px 0 10px;scroll-margin-top:88px}p{margin:10px 0}.lead{color:var(--muted);margin-bottom:24px}
+.callout{border-left:3px solid #a1a1aa;background:#fafafa;border-radius:0 6px 6px 0;padding:12px 16px;font-size:13px;margin:18px 0}
+.endpoint{display:flex;gap:12px;align-items:center;padding:13px 16px;border:1px solid var(--border);border-radius:6px;background:var(--surface);margin:20px 0;overflow-wrap:anywhere}
+.method{color:#237a5c;background:#e4f3eb;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:700;flex-shrink:0}.method.get{background:#e8effb;color:#366baf}
+code{font:13px/1.6 ui-monospace,'SFMono-Regular',Consolas,monospace;color:#3f3f46;background:#f4f4f5;border-radius:4px;padding:2px 5px;overflow-wrap:anywhere}
+.endpoint code{background:none;color:#3f4353;font-size:14px}.table-wrap{overflow-x:auto;margin:14px 0 20px}
+table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.65}th{background:var(--surface);text-align:left;color:#4e5363;font-weight:600}
+th,td{border-bottom:1px solid var(--border);padding:11px 12px;vertical-align:top}td:first-child{min-width:175px}td:first-child code,th{white-space:nowrap}td code{font-size:12px}.muted{color:var(--muted);font-size:13px}.required{color:#b65151}
+.example{border:1px solid var(--border);border-radius:8px;margin:14px 0 20px;overflow:hidden}
+.example-bar{display:flex;align-items:center;justify-content:space-between;background:var(--surface);border-bottom:1px solid var(--border);gap:12px;padding:8px 14px;font-size:12px;color:var(--muted)}
+.example-options{display:flex;gap:20px}.example-options button{background:none;color:#7b7f8d;border:0;border-bottom:2px solid transparent;padding:6px 0;font-size:12px}
+.example-options button[aria-pressed=true]{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+.copy{background:#fff;color:#606575;border:1px solid #dcdee6;border-radius:4px;padding:3px 9px;font-size:12px;flex-shrink:0}
+pre{margin:0;background:#fafbfe;padding:20px;overflow-x:auto;tab-size:2}pre code{display:block;background:none;color:#3d4560;padding:0;white-space:pre;overflow-wrap:normal;font-size:12px;line-height:1.8}
+.toc{position:sticky;top:56px;height:max-content;padding:42px 16px;font-size:12px}.toc p{font-weight:600;margin:0 0 12px}.toc a{display:block;color:#7b8090;padding:5px 0 5px 12px;border-left:1px solid var(--border)}
+.status-line{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:20px 0}.status-line span{background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:4px 10px}
+.doc-toolbar{max-width:1500px;margin:auto;padding:20px 28px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:20px;background:#fff}.mode-switch{display:inline-flex;gap:4px;padding:4px;border:1px solid var(--border);border-radius:10px;background:var(--surface);flex-shrink:0}.mode-switch button{border:0;padding:10px 18px;border-radius:7px;background:transparent;color:#71717a;font-weight:600;font-size:14px}.mode-switch button[aria-pressed=true]{background:#18181b;color:#fff;box-shadow:0 1px 3px #0001}.mode-copy{margin:0;color:var(--muted);font-size:13px}.business-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:24px 0}.business-summary div{border:1px solid var(--border);border-radius:8px;padding:16px}.business-summary strong{display:block;color:#18181b;margin-bottom:4px}.business-summary span{font-size:12px;color:var(--muted)}.sku-tools{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:18px 0}.sku-tools label{display:flex;align-items:center;gap:10px;font-size:13px}.sku-tools select{font:inherit;border:1px solid var(--border);border-radius:6px;background:#fff;padding:7px 10px}.sku-table td:first-child{min-width:285px}.sku-table .copy{margin-top:7px}.business-link{display:inline-flex;border:1px solid var(--border);border-radius:6px;padding:7px 12px;font-size:13px;margin-right:8px}.business-link:hover{background:var(--surface);text-decoration:none}
+:root{--doc-header-height:56px;--doc-toolbar-height:84px}body.embedded{--doc-header-height:0px}header{z-index:4}.doc-toolbar{position:sticky;top:var(--doc-header-height);height:var(--doc-toolbar-height);z-index:3}.sidebar,.toc{top:calc(var(--doc-header-height) + var(--doc-toolbar-height))}.sidebar{height:calc(100vh - var(--doc-header-height) - var(--doc-toolbar-height))}.doc-section,h2,h3{scroll-margin-top:calc(var(--doc-header-height) + var(--doc-toolbar-height) + 24px)}
+footer{max-width:860px;margin:44px auto 0;padding-top:18px;border-top:1px solid var(--border);font-size:12px;color:#989da9}
+@media(max-width:1100px){.layout{grid-template-columns:210px minmax(0,1fr)}.toc{display:none}main{padding:32px}}
+@media(max-width:720px){header{padding:0 16px}.brand span{display:none}.header-links{gap:12px}.layout{display:block}.sidebar{position:static;height:auto;padding:12px;border-right:0;border-bottom:1px solid var(--border)}.doc-nav{display:flex;overflow-x:auto;gap:6px}.doc-nav a{flex-shrink:0}.nav-label{display:none}main{padding:28px 16px 50px}h1{font-size:24px}th,td{padding:9px}table{min-width:620px}pre{padding:14px}}
+@media(max-width:720px){.doc-toolbar{padding:14px 16px;display:block}.mode-switch{display:flex}.mode-switch button{flex:1;padding:10px 8px}.mode-copy{margin-top:10px}.business-summary{grid-template-columns:1fr}.doc-nav [data-nav-mode]{display:flex;gap:6px;flex-shrink:0}.sku-tools{align-items:flex-start;flex-direction:column;gap:8px}}
+@media(max-width:720px){:root{--doc-toolbar-height:112px}.sidebar{height:auto}.sku-table td:first-child code{white-space:normal;overflow-wrap:anywhere}}
+@media(max-width:720px){.header-links{font-size:12px;gap:10px}.header-links a[href="/api-guide"]{display:none}.sidebar{position:sticky;top:calc(var(--doc-header-height) + var(--doc-toolbar-height));z-index:2;background:#fff}.doc-section,h2,h3{scroll-margin-top:calc(var(--doc-header-height) + var(--doc-toolbar-height) + 82px)}}
+</style>
+</head>
+<body>
+<header><a class="brand" href="/manage">lay4flow <span>开发者文档</span></a><div class="header-links"><a href="/manage">管理后台</a><a href="/test">测试页面</a><a href="/vids-api-guide">Vids 文档</a><a href="/api-guide" aria-current="page">API 文档</a><a href="/api-docs" data-doc-swagger>Swagger</a><a href="/v1/openapi.json" data-doc-schema>OpenAPI</a></div></header>
+<div class="doc-toolbar"><div class="mode-switch" role="group" aria-label="文档模式"><button type="button" data-doc-mode="aggregate" aria-pressed="true">聚合模式</button><button type="button" data-doc-mode="business" aria-pressed="false">商务对接</button></div><p class="mode-copy" id="docModeDescription" aria-live="polite">聚合模型 + 参数选择，适合直接调用与测试。</p></div>
+<div class="layout">
+<aside class="sidebar"><nav class="doc-nav" aria-label="文档目录"><div data-nav-mode="aggregate"><p class="nav-label">接入说明</p><a href="#overview">基础信息</a>
+<a href="#models">模型列表</a>
+<a href="#parameters">模型参数</a>
+<a href="#endpoints">接口支持概览</a>
+<p class="nav-label">图片接口</p><a href="#images">生成图片</a>
+<a href="#image-edits">编辑图片 / 参考图</a>
+<p class="nav-label">视频接口</p><a href="#videos">生成视频</a>
+<a href="#video-query">查询视频任务</a>
+<a href="#video-download">下载视频</a>
+<a href="#video-edit">编辑视频</a>
+<p class="nav-label">兼容接口</p><a href="#chat">Chat Completions</a>
+<a href="#gemini">Gemini 原生格式</a>
+<a href="#responses">Responses</a>
+<a href="#errors">错误与限制</a></div><div data-nav-mode="business" hidden><p class="nav-label">商务对接</p><a href="#downstream">渠道接入</a><a href="#business-models">SKU模型列表</a><a href="#business-parameters">SKU参数与素材</a><a href="#business-endpoints">接口概览</a><a href="#business-chat">Chat图片 / 视频</a><a href="#business-chat-stream">Chat SSE</a><a href="#business-images">Images生成</a><a href="#business-image-edits">Images编辑</a><a href="#business-videos">Videos创建</a><a href="#business-video-query">Videos查询 / 列表</a><a href="#business-video-download">Videos下载</a><a href="#business-video-delete">Videos删除</a><a href="#business-video-edit">Omni视频编辑</a><a href="#business-billing">定价与计费</a><a href="#business-errors">错误与限制</a></div></nav></aside>
+<main>
+<section class="doc-section" id="overview"><p class="eyebrow">接入说明 / 基础信息</p><h1>Flow 接口文档</h1><p class="lead">图片生成、参考图编辑和视频任务。先选模型，再按需要选择接口。</p>
+<h2 id="overview-base">基础信息</h2><div class="table-wrap"><table><thead><tr><th>项目</th><th>填写内容</th></tr></thead><tbody><tr><td>服务地址</td><td><code data-origin>https://your-lay4flow-host</code></td></tr>
+<tr><td>HTTP 认证</td><td><code>Authorization: Bearer YOUR_API_KEY</code></td></tr>
+<tr><td>API Key 来源</td><td>管理后台 → 系统配置 → API Key。不是 Google Token 或 Cookie。</td></tr>
+<tr><td>SDK base_url</td><td><code data-origin-suffix="/v1">https://your-lay4flow-host/v1</code></td></tr></tbody></table></div><div class="callout">示例中的 <code>YOUR_API_KEY</code> 换成自己的密钥。地址由当前页面自动填入；本页面不会提交生成请求。</div><h2 id="overview-choice">按用途选择接口</h2><div class="table-wrap"><table><thead><tr><th>我要做什么</th><th>推荐接口</th><th>返回什么</th></tr></thead><tbody><tr><td>文字生成图片</td><td><a href="#images">POST /v1/images/generations</a></td><td>图片 URL 或 Base64</td></tr>
+<tr><td>上传图片并修改</td><td><a href="#image-edits">POST /v1/images/edits</a></td><td>图片 URL 或 Base64</td></tr>
+<tr><td>文字 / 首帧生成视频</td><td><a href="#videos">POST /v1/videos</a></td><td>任务 ID；完成后下载 MP4</td></tr>
+<tr><td>修改已有视频</td><td><a href="#video-edit">POST /v1/videos，Omni edit 模式</a></td><td>任务 ID；完成后下载 MP4</td></tr>
+<tr><td>首尾帧 / 多参考图 / SSE</td><td><a href="#chat">Chat</a> / <a href="#gemini">Gemini</a></td><td>媒体内容或 SSE</td></tr></tbody></table></div><p class="muted">接口名称与其他服务可能相似，但参数并不完全相同。请使用这里的模型 ID、字段和取值，不拼接其他服务的模型后缀。</p>
+</section>
+
+<section class="doc-section" id="downstream" data-doc-mode="business"><p class="eyebrow">商务对接 / 渠道接入</p><h1>渠道接入</h1><p class="lead">选择适合的调用路径，地址、SKU 与计费规则一起配置。</p><div class="business-summary"><div><strong>普通 OpenAI 渠道</strong><span>Chat / Images 使用现有网关接口。</span></div><div><strong>每个 SKU 独立价格</strong><span>模型名称锁定规格，下游设置零售价。</span></div><div><strong>Videos 原生任务</strong><span>创建、查询、下载、删除和编辑接口均已实现。</span></div></div><h2 id="downstream-settings">基本配置</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td>Base URL</td><td>URL</td><td>是</td><td>普通渠道填 <code data-origin-suffix="/compat">https://your-lay4flow-host/compat</code>；不加 /v1。</td></tr><tr><td>API Key</td><td>Bearer</td><td>是</td><td>管理后台 API Key；请求头 Authorization: Bearer YOUR_API_KEY。</td></tr><tr><td>SDK base_url</td><td>URL</td><td>是</td><td><code data-origin-suffix="/compat/v1">https://your-lay4flow-host/compat/v1</code>。</td></tr><tr><td>模型与价格</td><td>SKU / 倍率</td><td>是</td><td>直接配置真实 SKU，不映射回聚合模型。</td></tr></tbody></table></div><h2 id="downstream-support">网关支持范围</h2><div class="table-wrap"><table><thead><tr><th>路径</th><th>New API</th><th>原版 One API</th></tr></thead><tbody><tr><td>Chat 图片/视频/编辑</td><td>普通 OpenAI 渠道，按次或倍率</td><td>普通 OpenAI 渠道，固定用量倍率</td></tr><tr><td>Images 生成</td><td>支持，按张配置</td><td>支持，按模型倍率</td></tr><tr><td>Images 编辑</td><td>有对应路由，按实际版本验证 multipart 转发</td><td>不支持，改用 Chat 参考图</td></tr><tr><td>Videos 异步任务</td><td>本服务已适配；网关须有支持这些 SKU 的任务适配，不能仅以有 Sora 插件推断支持</td><td>不支持原生 Videos；使用 Chat 视频</td></tr></tbody></table></div><p>对方不改网关时，图片和视频均推荐 <a href="#business-chat">Chat 入口</a>。原生 Videos 可由应用直接调用本服务，或经已有匹配适配的网关调用。</p><h2 id="downstream-auth">鉴权与端点</h2><p>所有生成、查询、下载、删除均要求 Bearer Key；不接收 Google Cookie。Swagger 和 OpenAPI 文档链接随模式切换，文档页面不读取 Key、不提交生成任务。</p></section>
+
+<section class="doc-section" id="business-models" data-doc-mode="business"><p class="eyebrow">商务对接 / SKU 模型列表</p><h1>SKU 模型列表</h1><p class="lead">37 个独立收费 SKU；清单自动来自服务端，不设置零售价。</p><div class="endpoint"><span class="method get">GET</span><code>/compat/v1/models</code></div><h2 id="business-models-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td>Authorization</td><td>header string</td><td>是</td><td>Bearer API Key；无查询参数。</td></tr><tr><td>model</td><td>path string</td><td>否</td><td>单项详情可调用 GET /compat/v1/models/{model}。</td></tr></tbody></table></div><h2 id="business-models-request">请求示例</h2><div class="example" data-path="/compat/v1/models" data-method="GET"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{}</code></pre></div><h2 id="business-models-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;object&quot;: &quot;list&quot;,
+  &quot;data&quot;: [
+    {
+      &quot;id&quot;: &quot;flow-banana-pro-4k&quot;,
+      &quot;object&quot;: &quot;model&quot;,
+      &quot;owned_by&quot;: &quot;lay4flow&quot;,
+      &quot;type&quot;: &quot;image&quot;,
+      &quot;public_model&quot;: &quot;gemini-3.0-pro-image&quot;,
+      &quot;locked_spec&quot;: {
+        &quot;imageSize&quot;: &quot;4k&quot;
+      },
+      &quot;allowed_modes&quot;: [
+        &quot;generate&quot;,
+        &quot;edit&quot;
+      ],
+      &quot;supported_endpoints&quot;: [
+        &quot;/compat/v1/chat/completions&quot;,
+        &quot;/compat/v1/images/generations&quot;,
+        &quot;/compat/v1/images/edits&quot;
+      ]
+    }
+  ]
+}</code></pre></div><h2 id="business-models-catalog">完整可售清单</h2><div class="sku-tools"><label>筛选类型 <select id="skuFilter"><option value="all">全部</option><option value="image">图片</option><option value="video">视频</option></select></label><span class="muted" id="skuCount"></span></div><div class="table-wrap"><table class="sku-table"><thead><tr><th>SKU 模型名</th><th>类型</th><th>锁定规格</th><th>允许模式</th></tr></thead><tbody id="skuRows"></tbody></table></div><p>默认 standard 优先级省略后缀，仅 Relaxed 保留 <code>-relaxed</code>；旧 <code>-standard</code> 名称仍兼容调用，目录只列简短名称。目录 includes defaults/capabilities/mode_capabilities；minTier 是账号要求，不是价格。可选比例和模式以具体 SKU 的能力为准。Omni 编辑 SKU 固定分辨率，时长来自源片段，最多 10 秒。</p><h2 id="business-models-detail">? SKU ??</h2><div class="example" data-path="/compat/v1/models/flow-banana-pro-4k" data-method="GET"><div class="example-bar"><div class="example-options" role="group" aria-label="????"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">??</button></div><pre><code data-json>{}</code></pre></div></section>
+
+<section class="doc-section" id="business-parameters" data-doc-mode="business"><p class="eyebrow">商务对接 / SKU 参数与素材</p><h1>SKU 参数与素材</h1><p class="lead">锁定收费规格与普通参数分别校验；冲突在提交上游前返回 400。</p><h2 id="business-parameters-locked">规格规则</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td>图片清晰度</td><td>SKU</td><td>是</td><td>模型 + 1K/2K/4K；Lite/Imagen 仅1K。</td></tr><tr><td>视频生成规格</td><td>SKU</td><td>是</td><td>模型 + quality + seconds + resolution；Relaxed 另加 -relaxed，默认 standard 省略；Veo8秒，Omni4/6/8/10秒。</td></tr><tr><td>Omni编辑</td><td>SKU</td><td>是</td><td>flow-omni-1-1-flash-edit-{360p|720p|1080p|4k}；无固定秒数，按次结算。</td></tr><tr><td>aspectRatio</td><td>string</td><td>否</td><td>图片16:9/9:16/1:1/4:3/3:4（Imagen仅前两项），视频16:9/9:16。</td></tr><tr><td>mode</td><td>string</td><td>否</td><td>text_to_video/image_to_video/first_last_frame/reference_to_video；编辑SKU仅edit。</td></tr><tr><td>trimStartMs/trimEndMs</td><td>integer ms</td><td>否</td><td>编辑片段：0 ≤ start &lt; end，片段≤10000毫秒且不超过源视频。</td></tr><tr><td>图片size/quality</td><td>string</td><td>否</td><td>像素size是比例提示，quality=auto/standard/high/hd不改变SKU清晰度。</td></tr></tbody></table></div><h2 id="business-parameters-inputs">素材数量与限制</h2><div class="table-wrap"><table><thead><tr><th>用途</th><th>素材</th><th>限制</th></tr></thead><tbody><tr><td>图片生成/编辑</td><td>0–10图</td><td>PNG/JPEG/WebP；编辑上传每张20MiB，总100MiB。</td></tr><tr><td>首帧/首尾帧</td><td>1图/2图</td><td>首尾帧明确mode，按图片顺序。</td></tr><tr><td>参考视频</td><td>Veo最多3图、Omni最多7图</td><td>允许模式以SKU为准；两图不自动当首尾帧。</td></tr><tr><td>视频编辑</td><td>1视频，可附最多5图</td><td>仅Omni编辑SKU；上传视频100MiB，所有上传合计100MiB。</td></tr></tbody></table></div><p>Typed 单图默认首帧，多图默认参考模式；Markdown 引用请显式传mode。URL素材下载会检查公网地址、类型和大小，不支持 file_id、mask 或任意本机路径。</p></section>
+
+<section class="doc-section" id="business-endpoints" data-doc-mode="business"><p class="eyebrow">商务对接 / 接口支持概览</p><h1>接口支持概览</h1><p class="lead">从模型发现到成品下载，按真实方法与路径接入。</p><h2 id="business-endpoints-list">端点清单</h2><div class="table-wrap"><table><thead><tr><th>方法</th><th>路径</th><th>用途 / 返回</th></tr></thead><tbody><tr><td>GET</td><td><code>/compat/v1/models</code></td><td>SKU目录</td></tr><tr><td>GET</td><td><code>/compat/v1/models/{model}</code></td><td>单SKU详情</td></tr><tr><td>POST</td><td><code>/compat/v1/chat/completions</code></td><td>同步图片/视频/编辑；完成后SSE</td></tr><tr><td>POST</td><td><code>/compat/v1/images/generations</code></td><td>单图生成</td></tr><tr><td>POST</td><td><code>/compat/v1/images/edits</code></td><td>multipart图片编辑</td></tr><tr><td>POST</td><td><code>/compat/v1/videos</code></td><td>异步视频生成/Omni编辑</td></tr><tr><td>GET</td><td><code>/compat/v1/videos</code></td><td>分页任务列表</td></tr><tr><td>GET</td><td><code>/compat/v1/videos/{video_id}</code></td><td>单任务状态</td></tr><tr><td>GET</td><td><code>/compat/v1/videos/{video_id}/content</code></td><td>MP4下载</td></tr><tr><td>DELETE</td><td><code>/compat/v1/videos/{video_id}</code></td><td>删除终态任务记录</td></tr></tbody></table></div><p>商务入口当前不提供 Gemini、Responses、Files、Audio、Embeddings、回调或 /videos/{id}/remix；这些路径不会被伪装成成功。聚合模式保留原有能力。视频编辑使用创建路由和编辑SKU。</p></section>
+
+<section class="doc-section" id="business-chat" data-doc-mode="business"><p class="eyebrow">商务对接 / Chat 图片 / 视频</p><h1>Chat 图片 / 视频</h1><p class="lead">生成完成、检查成品后才返回成功。</p><div class="endpoint"><span class="method ">POST</span><code>/compat/v1/chat/completions</code></div><h2 id="business-chat-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>model</code></td><td>string</td><td>是</td><td>完整 SKU 模型名，锁定收费规格。</td></tr><tr><td><code>messages</code></td><td>array</td><td>是</td><td>最后一条消息为提示词；content 可为文本或包含 text/image_url/video_url 的数组。</td></tr><tr><td><code>stream</code></td><td>boolean</td><td>否</td><td>默认 false；true 时等待成品后返回 SSE。</td></tr><tr><td><code>n</code></td><td>integer</td><td>否</td><td>只能 1。</td></tr><tr><td><code>generationConfig</code></td><td>object</td><td>否</td><td>imageConfig/videoConfig，允许比例/生成模式；编辑允许裁剪，锁定规格不能覆盖。</td></tr><tr><td><code>stream_options.include_usage</code></td><td>boolean</td><td>否</td><td>兼容标准字段；商务 SSE 总会包含最终结算用量。</td></tr></tbody></table></div><h2 id="business-chat-request">请求示例</h2><div class="example" data-path="/compat/v1/chat/completions" data-method="POST"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;flow-banana-pro-4k&quot;,
+  &quot;messages&quot;: [
+    {
+      &quot;role&quot;: &quot;user&quot;,
+      &quot;content&quot;: &quot;窗边的一只猫&quot;
+    }
+  ],
+  &quot;stream&quot;: false
+}</code></pre></div><h2 id="business-chat-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;id&quot;: &quot;chatcmpl_example&quot;,
+  &quot;object&quot;: &quot;chat.completion&quot;,
+  &quot;created&quot;: 1780000000,
+  &quot;model&quot;: &quot;flow-banana-pro-4k&quot;,
+  &quot;choices&quot;: [
+    {
+      &quot;index&quot;: 0,
+      &quot;message&quot;: {
+        &quot;role&quot;: &quot;assistant&quot;,
+        &quot;content&quot;: &quot;![Generated Image](https://your-lay4flow-host/tmp/example.png)&quot;,
+        &quot;media&quot;: {
+          &quot;type&quot;: &quot;image&quot;,
+          &quot;url&quot;: &quot;https://your-lay4flow-host/tmp/example.png&quot;
+        }
+      },
+      &quot;finish_reason&quot;: &quot;stop&quot;
+    }
+  ],
+  &quot;media&quot;: {
+    &quot;type&quot;: &quot;image&quot;,
+    &quot;url&quot;: &quot;https://your-lay4flow-host/tmp/example.png&quot;
+  },
+  &quot;usage&quot;: {
+    &quot;prompt_tokens&quot;: 1000,
+    &quot;completion_tokens&quot;: 0,
+    &quot;total_tokens&quot;: 1000
+  }
+}</code></pre></div><h2 id="business-chat-video">视频请求示例</h2><div class="example" data-path="/compat/v1/chat/completions" data-method="POST"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;flow-veo-3-1-fast-8s-720p&quot;,
+  &quot;messages&quot;: [
+    {
+      &quot;role&quot;: &quot;user&quot;,
+      &quot;content&quot;: &quot;海边日出，镜头缓慢推进&quot;
+    }
+  ]
+}</code></pre></div><h2 id="business-chat-reference">参考图 / 首尾帧</h2><div class="example" data-path="/compat/v1/chat/completions" data-method="POST"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;flow-veo-3-1-lite-8s-720p&quot;,
+  &quot;messages&quot;: [
+    {
+      &quot;role&quot;: &quot;user&quot;,
+      &quot;content&quot;: [
+        {
+          &quot;type&quot;: &quot;text&quot;,
+          &quot;text&quot;: &quot;从首帧过渡到尾帧&quot;
+        },
+        {
+          &quot;type&quot;: &quot;image_url&quot;,
+          &quot;image_url&quot;: {
+            &quot;url&quot;: &quot;data:image/png;base64,FIRST_IMAGE_BASE64&quot;
+          }
+        },
+        {
+          &quot;type&quot;: &quot;image_url&quot;,
+          &quot;image_url&quot;: {
+            &quot;url&quot;: &quot;data:image/png;base64,LAST_IMAGE_BASE64&quot;
+          }
+        }
+      ]
+    }
+  ],
+  &quot;generationConfig&quot;: {
+    &quot;videoConfig&quot;: {
+      &quot;mode&quot;: &quot;first_last_frame&quot;
+    }
+  }
+}</code></pre></div><p class="muted">把示例Base64换成真实图片。输出media.type为video时，content是video标签；URL受缓存期限限制。</p></section>
+
+<section class="doc-section" id="business-chat-stream" data-doc-mode="business"><p class="eyebrow">商务对接 / Chat SSE 与用量</p><h1>Chat SSE 与用量</h1><p class="lead">stream=true 等待完整成品后再发送，不提供实时生成进度。</p><div class="endpoint"><span class="method ">POST</span><code>/compat/v1/chat/completions</code></div><h2 id="business-chat-stream-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>model</code></td><td>string</td><td>是</td><td>完整 SKU 模型名，锁定收费规格。</td></tr><tr><td><code>messages</code></td><td>array</td><td>是</td><td>最后一条消息为提示词；content 可为文本或包含 text/image_url/video_url 的数组。</td></tr><tr><td><code>stream</code></td><td>boolean</td><td>否</td><td>默认 false；true 时等待成品后返回 SSE。</td></tr><tr><td><code>n</code></td><td>integer</td><td>否</td><td>只能 1。</td></tr><tr><td><code>generationConfig</code></td><td>object</td><td>否</td><td>imageConfig/videoConfig，允许比例/生成模式；编辑允许裁剪，锁定规格不能覆盖。</td></tr><tr><td><code>stream_options.include_usage</code></td><td>boolean</td><td>否</td><td>兼容标准字段；商务 SSE 总会包含最终结算用量。</td></tr></tbody></table></div><h2 id="business-chat-stream-request">请求示例</h2><div class="example" data-path="/compat/v1/chat/completions" data-method="POST" data-stream="true"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;flow-banana-pro-4k&quot;,
+  &quot;messages&quot;: [
+    {
+      &quot;role&quot;: &quot;user&quot;,
+      &quot;content&quot;: &quot;窗边的一只猫&quot;
+    }
+  ],
+  &quot;stream&quot;: true,
+  &quot;stream_options&quot;: {
+    &quot;include_usage&quot;: true
+  }
+}</code></pre></div><h2 id="business-chat-stream-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · JSON</span><button class="copy">复制</button></div><pre><code>data: {&quot;id&quot;: &quot;chatcmpl_example&quot;, &quot;object&quot;: &quot;chat.completion.chunk&quot;, &quot;created&quot;: 1780000000, &quot;model&quot;: &quot;flow-banana-pro-4k&quot;, &quot;choices&quot;: [{&quot;index&quot;: 0, &quot;delta&quot;: {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: &quot;![Generated Image](https://your-lay4flow-host/tmp/example.png)&quot;}, &quot;finish_reason&quot;: null}]}
+
+data: {&quot;id&quot;: &quot;chatcmpl_example&quot;, &quot;object&quot;: &quot;chat.completion.chunk&quot;, &quot;created&quot;: 1780000000, &quot;model&quot;: &quot;flow-banana-pro-4k&quot;, &quot;choices&quot;: [{&quot;index&quot;: 0, &quot;delta&quot;: {}, &quot;finish_reason&quot;: &quot;stop&quot;}]}
+
+data: {&quot;id&quot;: &quot;chatcmpl_example&quot;, &quot;object&quot;: &quot;chat.completion.chunk&quot;, &quot;created&quot;: 1780000000, &quot;model&quot;: &quot;flow-banana-pro-4k&quot;, &quot;choices&quot;: [], &quot;usage&quot;: {&quot;prompt_tokens&quot;: 1000, &quot;completion_tokens&quot;: 0, &quot;total_tokens&quot;: 1000}}
+
+data: [DONE]</code></pre></div><p>Content-Type: text/event-stream；终末choices=[]携带usage，再发送[DONE]。请求HTTP失败时响应仍为JSON错误，不先发送200。普通示例中的Python JSON读取器不解析SSE；下面Python流式示例直接打印事件行。</p><div class="example"><div class="example-bar"><span>Python · 读取 SSE</span><button class="copy">复制</button></div><pre><code>import httpx
+body = {"model":"flow-banana-pro-4k","messages":[{"role":"user","content":"窗边的一只猫"}],"stream":True}
+with httpx.stream("POST", "https://your-lay4flow-host/compat/v1/chat/completions", headers={"Authorization":"Bearer YOUR_API_KEY"}, json=body, timeout=2400) as response:
+    response.raise_for_status()
+    for line in response.iter_lines():
+        if line.startswith("data:"):
+            print(line)</code></pre></div></section>
+
+<section class="doc-section" id="business-images" data-doc-mode="business"><p class="eyebrow">商务对接 / Images 图片生成</p><h1>Images 图片生成</h1><p class="lead">标准单张图片响应，可选URL或Base64。</p><div class="endpoint"><span class="method ">POST</span><code>/compat/v1/images/generations</code></div><h2 id="business-images-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>model</code></td><td>string</td><td>是</td><td>图片SKU。</td></tr><tr><td><code>prompt</code></td><td>string</td><td>是</td><td>1–32000字符。</td></tr><tr><td><code>n</code></td><td>integer</td><td>否</td><td>只支持1。</td></tr><tr><td><code>response_format</code></td><td>string</td><td>否</td><td>url默认或b64_json。</td></tr><tr><td><code>size</code></td><td>string</td><td>否</td><td>auto默认或像素尺寸比例提示，不保证精确像素。</td></tr><tr><td><code>quality</code></td><td>string</td><td>否</td><td>auto/standard/high/hd兼容提示，分辨率由SKU锁定。</td></tr><tr><td><code>generationConfig</code></td><td>object</td><td>否</td><td>imageConfig.aspectRatio；imageSize若显式必须等于SKU。</td></tr></tbody></table></div><h2 id="business-images-request">请求示例</h2><div class="example" data-path="/compat/v1/images/generations" data-method="POST"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;flow-banana-flash-2k&quot;,
+  &quot;prompt&quot;: &quot;窗边的一只猫&quot;,
+  &quot;n&quot;: 1,
+  &quot;response_format&quot;: &quot;url&quot;
+}</code></pre></div><h2 id="business-images-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;created&quot;: 1780000000,
+  &quot;data&quot;: [
+    {
+      &quot;url&quot;: &quot;https://your-lay4flow-host/tmp/example.png&quot;
+    }
+  ],
+  &quot;usage&quot;: {
+    &quot;prompt_tokens&quot;: 1000,
+    &quot;completion_tokens&quot;: 0,
+    &quot;total_tokens&quot;: 1000
+  }
+}</code></pre></div><p>response_format=b64_json时，data[0]提供b64_json字段。放大失败返回502，不返回原图成功。</p></section>
+
+<section class="doc-section" id="business-image-edits" data-doc-mode="business"><p class="eyebrow">商务对接 / Images 图片编辑</p><h1>Images 图片编辑</h1><p class="lead">multipart 参考图编辑；不是像素蒙版修复接口。</p><div class="endpoint"><span class="method ">POST</span><code>/compat/v1/images/edits</code></div><h2 id="business-image-edits-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>model / prompt</code></td><td>string</td><td>是</td><td>图片SKU和提示词。</td></tr><tr><td><code>image / image[]</code></td><td>file / repeated files</td><td>是</td><td>1–10个PNG/JPEG/WebP，单张≤20MiB，总≤100MiB。</td></tr><tr><td><code>generationConfig</code></td><td>JSON string</td><td>否</td><td>multipart字段中传JSON字符串。</td></tr><tr><td><code>n / response_format</code></td><td>string</td><td>否</td><td>n=1；url或b64_json。</td></tr><tr><td><code>size / quality</code></td><td>string</td><td>否</td><td>规则同生成；mask、background、output_format不支持。</td></tr></tbody></table></div><h2 id="business-image-edits-request">请求示例</h2><div class="example" data-path="/compat/v1/images/edits" data-method="POST" data-form="true"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">表单字段</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;flow-banana-pro-2k&quot;,
+  &quot;prompt&quot;: &quot;把背景改成樱花庭院&quot;,
+  &quot;image&quot;: &quot;@reference.png&quot;,
+  &quot;n&quot;: &quot;1&quot;,
+  &quot;generationConfig&quot;: {
+    &quot;imageConfig&quot;: {
+      &quot;aspectRatio&quot;: &quot;1:1&quot;
+    }
+  },
+  &quot;response_format&quot;: &quot;url&quot;
+}</code></pre></div><h2 id="business-image-edits-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;created&quot;: 1780000000,
+  &quot;data&quot;: [
+    {
+      &quot;url&quot;: &quot;https://your-lay4flow-host/tmp/example.png&quot;
+    }
+  ],
+  &quot;usage&quot;: {
+    &quot;prompt_tokens&quot;: 1000,
+    &quot;completion_tokens&quot;: 0,
+    &quot;total_tokens&quot;: 1000
+  }
+}</code></pre></div><p>表单字段页中的 @reference.png 是本机文件占位；切换cURL/Python会生成真实multipart上传。不要手动填写Content-Type boundary。原版One API不支持此路由，可用Chat附参考图销售编辑服务。</p></section>
+
+<section class="doc-section" id="business-videos" data-doc-mode="business"><p class="eyebrow">商务对接 / Videos 创建任务</p><h1>Videos 创建任务</h1><p class="lead">快速返回queued任务；完整成品通过查询和下载取得。</p><div class="endpoint"><span class="method ">POST</span><code>/compat/v1/videos</code></div><h2 id="business-videos-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>model</code></td><td>string</td><td>是</td><td>生成或编辑视频SKU。</td></tr><tr><td><code>prompt</code></td><td>string</td><td>是</td><td>1–32000字符。</td></tr><tr><td><code>seconds</code></td><td>string / integer</td><td>否</td><td>省略使用SKU；显式必须匹配，编辑不接受。</td></tr><tr><td><code>size</code></td><td>string</td><td>否</td><td>640x360/1280x720/1920x1080/3840x2160及转置，分辨率必须匹配SKU。</td></tr><tr><td><code>input_reference</code></td><td>object / array / file</td><td>否</td><td>JSON {image_url:URL}或其数组；multipart可用重复input_reference[]。</td></tr><tr><td><code>generationConfig</code></td><td>object / JSON string</td><td>否</td><td>videoConfig.mode/aspectRatio；首尾帧显式指定mode。</td></tr><tr><td><code>Idempotency-Key</code></td><td>header string</td><td>否</td><td>1–200字符；同Key/同请求返回同任务，冲突返回409。</td></tr></tbody></table></div><h2 id="business-videos-request">请求示例</h2><div class="example" data-path="/compat/v1/videos" data-method="POST" data-idempotency="true"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;flow-veo-3-1-fast-8s-720p&quot;,
+  &quot;prompt&quot;: &quot;海边日出，镜头缓慢推进&quot;,
+  &quot;seconds&quot;: &quot;8&quot;,
+  &quot;size&quot;: &quot;1280x720&quot;
+}</code></pre></div><h2 id="business-videos-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;id&quot;: &quot;video_example&quot;,
+  &quot;object&quot;: &quot;video&quot;,
+  &quot;created_at&quot;: 1780000000,
+  &quot;status&quot;: &quot;queued&quot;,
+  &quot;progress&quot;: 0,
+  &quot;model&quot;: &quot;flow-veo-3-1-fast-8s-720p&quot;,
+  &quot;prompt&quot;: &quot;海边日出&quot;,
+  &quot;seconds&quot;: &quot;8&quot;,
+  &quot;size&quot;: &quot;1280x720&quot;,
+  &quot;completed_at&quot;: null,
+  &quot;error&quot;: null,
+  &quot;expires_at&quot;: null
+}</code></pre></div><h2 id="business-videos-frames">首尾帧上传示例</h2><div class="example" data-path="/compat/v1/videos" data-method="POST" data-form="true" data-idempotency="true"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">表单字段</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;flow-veo-3-1-lite-8s-720p&quot;,
+  &quot;prompt&quot;: &quot;首帧过渡到尾帧&quot;,
+  &quot;input_reference[]&quot;: [
+    &quot;@first.png&quot;,
+    &quot;@last.png&quot;
+  ],
+  &quot;generationConfig&quot;: {
+    &quot;videoConfig&quot;: {
+      &quot;mode&quot;: &quot;first_last_frame&quot;
+    }
+  }
+}</code></pre></div><div class="callout">任务创建成功不是生成成功，不返回usage，也不应当作一次已完成扣费。原版One API不支持Videos；New API需要已配置能处理这些SKU的任务适配，普通OpenAI渠道不会自动获得异步结算。对方不适配时使用Chat。</div></section>
+
+<section class="doc-section" id="business-video-query" data-doc-mode="business"><p class="eyebrow">商务对接 / Videos 查询与列表</p><h1>Videos 查询与列表</h1><p class="lead">按任务归属查询状态，完成后下载；失败读取error。</p><div class="endpoint"><span class="method get">GET</span><code>/compat/v1/videos/video_example</code></div><h2 id="business-video-query-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>video_id</code></td><td>path string</td><td>是</td><td>创建返回的id。</td></tr><tr><td><code>limit</code></td><td>query integer</td><td>否</td><td>列表1–100，默认20。</td></tr><tr><td><code>after</code></td><td>query string</td><td>否</td><td>上一页last_id。</td></tr><tr><td><code>order</code></td><td>query string</td><td>否</td><td>asc/desc，默认desc。</td></tr></tbody></table></div><h2 id="business-video-query-request">请求示例</h2><div class="example" data-path="/compat/v1/videos/video_example" data-method="GET"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{}</code></pre></div><h2 id="business-video-query-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;id&quot;: &quot;video_example&quot;,
+  &quot;object&quot;: &quot;video&quot;,
+  &quot;created_at&quot;: 1780000000,
+  &quot;status&quot;: &quot;completed&quot;,
+  &quot;progress&quot;: 100,
+  &quot;model&quot;: &quot;flow-veo-3-1-fast-8s-720p&quot;,
+  &quot;prompt&quot;: &quot;海边日出&quot;,
+  &quot;seconds&quot;: &quot;8&quot;,
+  &quot;size&quot;: &quot;1280x720&quot;,
+  &quot;completed_at&quot;: 1780000120,
+  &quot;error&quot;: null,
+  &quot;expires_at&quot;: 1780007320
+}</code></pre></div><h2 id="business-video-query-list">分页列表</h2><div class="example" data-path="/compat/v1/videos?limit=20&order=desc" data-method="GET"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{}</code></pre></div><div class="example"><div class="example-bar"><span>200 OK · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;object&quot;: &quot;list&quot;,
+  &quot;data&quot;: [
+    {
+      &quot;id&quot;: &quot;video_example&quot;,
+      &quot;object&quot;: &quot;video&quot;,
+      &quot;created_at&quot;: 1780000000,
+      &quot;status&quot;: &quot;completed&quot;,
+      &quot;progress&quot;: 100,
+      &quot;model&quot;: &quot;flow-veo-3-1-fast-8s-720p&quot;,
+      &quot;prompt&quot;: &quot;海边日出&quot;,
+      &quot;seconds&quot;: &quot;8&quot;,
+      &quot;size&quot;: &quot;1280x720&quot;,
+      &quot;completed_at&quot;: 1780000120,
+      &quot;error&quot;: null,
+      &quot;expires_at&quot;: 1780007320
+    }
+  ],
+  &quot;has_more&quot;: false,
+  &quot;first_id&quot;: &quot;video_example&quot;,
+  &quot;last_id&quot;: &quot;video_example&quot;
+}</code></pre></div><h2 id="business-video-query-status">状态</h2><p>queued → in_progress → completed / failed。progress是0–100；failed时error为{code,message}。请求和轮询不返回成功结算usage。服务重启后未完成任务标记失败，不自动再次提交。</p></section>
+
+<section class="doc-section" id="business-video-download" data-doc-mode="business"><p class="eyebrow">商务对接 / Videos 下载成品</p><h1>Videos 下载成品</h1><p class="lead">使用相同Bearer Key，下载完整MP4；不是公开无鉴权URL。</p><div class="endpoint"><span class="method get">GET</span><code>/compat/v1/videos/video_example/content</code></div><h2 id="business-video-download-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>video_id</code></td><td>path string</td><td>是</td><td>completed任务。</td></tr><tr><td><code>variant</code></td><td>query string</td><td>否</td><td>只支持video默认。</td></tr></tbody></table></div><h2 id="business-video-download-request">请求示例</h2><div class="example" data-path="/compat/v1/videos/video_example/content" data-method="GET" data-download="output.mp4"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{}</code></pre></div><h2 id="business-video-download-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · JSON</span><button class="copy">复制</button></div><pre><code>HTTP/1.1 200 OK
+Content-Type: video/mp4
+Content-Disposition: attachment; filename=&quot;video_example.mp4&quot;
+
+&lt;MP4 binary&gt;</code></pre></div><p>任务未完成返回409 video_not_ready；文件不存在或缓存过期返回410 asset_expired。下载和重复下载不增加固定结算单位。</p></section>
+
+<section class="doc-section" id="business-video-delete" data-doc-mode="business"><p class="eyebrow">商务对接 / Videos 删除任务</p><h1>Videos 删除任务</h1><p class="lead">删除终态记录，不支持把删除当作取消正在执行的任务。</p><div class="endpoint"><span class="method ">DELETE</span><code>/compat/v1/videos/video_example</code></div><h2 id="business-video-delete-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>video_id</code></td><td>path string</td><td>是</td><td>completed/failed任务ID。</td></tr></tbody></table></div><h2 id="business-video-delete-request">请求示例</h2><div class="example" data-path="/compat/v1/videos/video_example" data-method="DELETE"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{}</code></pre></div><h2 id="business-video-delete-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;id&quot;: &quot;video_example&quot;,
+  &quot;object&quot;: &quot;video.deleted&quot;,
+  &quot;deleted&quot;: true
+}</code></pre></div><p>queued/in_progress返回409 video_in_progress；不存在或其他Key的任务返回404。缓存文件可能被任务共用，按缓存策略清理；删除记录不代表退款。</p></section>
+
+<section class="doc-section" id="business-video-edit" data-doc-mode="business"><p class="eyebrow">商务对接 / Omni 视频编辑</p><h1>Omni 视频编辑</h1><p class="lead">复用Videos创建路由，编辑SKU固定分辨率，成片时长来自所选源片段。</p><div class="endpoint"><span class="method ">POST</span><code>/compat/v1/videos</code></div><h2 id="business-video-edit-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>model</code></td><td>string</td><td>是</td><td>flow-omni-1-1-flash-edit-{360p|720p|1080p|4k}。</td></tr><tr><td><code>prompt</code></td><td>string</td><td>是</td><td>编辑指令。</td></tr><tr><td><code>input_video</code></td><td>multipart file</td><td>是</td><td>上传源视频≤100MiB；不是任意视频URL或任务ID。</td></tr><tr><td><code>input_reference[]</code></td><td>repeated files</td><td>否</td><td>最多5张参考图，单张20MiB，所有上传合计100MiB。</td></tr><tr><td><code>generationConfig</code></td><td>JSON string</td><td>否</td><td>videoConfig trimStartMs/trimEndMs（毫秒），片段≤10秒且不超过源视频。</td></tr><tr><td><code>seconds / durationSeconds</code></td><td>—</td><td>不接受</td><td>编辑时长由源片段决定。</td></tr><tr><td><code>Idempotency-Key</code></td><td>header string</td><td>否</td><td>重复请求保护，同创建接口。</td></tr></tbody></table></div><h2 id="business-video-edit-request">请求示例</h2><div class="example" data-path="/compat/v1/videos" data-method="POST" data-form="true" data-idempotency="true"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">表单字段</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;flow-omni-1-1-flash-edit-720p&quot;,
+  &quot;prompt&quot;: &quot;把画面中的猫换成兔子&quot;,
+  &quot;input_video&quot;: &quot;@source.mp4&quot;,
+  &quot;generationConfig&quot;: {
+    &quot;videoConfig&quot;: {
+      &quot;trimStartMs&quot;: 0,
+      &quot;trimEndMs&quot;: 8000,
+      &quot;aspectRatio&quot;: &quot;16:9&quot;
+    }
+  }
+}</code></pre></div><h2 id="business-video-edit-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;id&quot;: &quot;video_example&quot;,
+  &quot;object&quot;: &quot;video&quot;,
+  &quot;created_at&quot;: 1780000000,
+  &quot;status&quot;: &quot;queued&quot;,
+  &quot;progress&quot;: 0,
+  &quot;model&quot;: &quot;flow-omni-1-1-flash-edit-720p&quot;,
+  &quot;prompt&quot;: &quot;把画面中的猫换成兔子&quot;,
+  &quot;seconds&quot;: &quot;8&quot;,
+  &quot;size&quot;: &quot;1280x720&quot;,
+  &quot;completed_at&quot;: null,
+  &quot;error&quot;: null,
+  &quot;expires_at&quot;: null
+}</code></pre></div><p>响应为queued任务，后续使用同一查询/下载/删除接口。默认编辑0–10秒；短于10秒的MP4请显式设置trimEndMs。输入视频处理、编辑和放大都失败时任务标记failed。当前不提供 /videos/{id}/remix；Veo续写仍通过聚合API，不能冒充编辑。</p><h2 id="business-video-edit-chat">普通网关同步编辑</h2><div class="example" data-path="/compat/v1/chat/completions" data-method="POST"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;flow-omni-1-1-flash-edit-720p&quot;,
+  &quot;messages&quot;: [
+    {
+      &quot;role&quot;: &quot;user&quot;,
+      &quot;content&quot;: [
+        {
+          &quot;type&quot;: &quot;text&quot;,
+          &quot;text&quot;: &quot;把猫换成兔子&quot;
+        },
+        {
+          &quot;type&quot;: &quot;video_url&quot;,
+          &quot;video_url&quot;: {
+            &quot;url&quot;: &quot;data:video/mp4;base64,SOURCE_VIDEO_BASE64&quot;
+          }
+        }
+      ]
+    }
+  ],
+  &quot;generationConfig&quot;: {
+    &quot;videoConfig&quot;: {
+      &quot;trimStartMs&quot;: 0,
+      &quot;trimEndMs&quot;: 8000
+    }
+  }
+}</code></pre></div><p>Chat 编辑完成后返回视频链接和一次1000结算单位，适合不支持原生Videos的下游。</p></section>
+
+<section class="doc-section" id="business-billing" data-doc-mode="business"><p class="eyebrow">商务对接 / 独立定价与结算</p><h1>独立定价与结算</h1><p class="lead">下游管理零售价，我们提供锁定规格、成功事实和固定结算单位。</p><h2 id="business-billing-units">Chat 固定单位</h2><div class="example"><div class="example-bar"><span>200 OK · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;usage&quot;: {
+    &quot;prompt_tokens&quot;: 1000,
+    &quot;completion_tokens&quot;: 0,
+    &quot;total_tokens&quot;: 1000
+  }
+}</code></pre></div><p>1000是一次合格媒体成品的兼容结算单位，不是Google实际token，不是金额。同SKU不随提示词或媒体链接长度变化。Omni编辑按次，一个片段最多10秒。</p><h2 id="business-billing-settings">网关价格设置</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td>New API</td><td>model price</td><td>是</td><td>每个SKU设置固定按次价/固定表达式，或输入用量倍率。</td></tr><tr><td>One API</td><td>model ratio</td><td>是</td><td>Chat最终ceil(1000×模型倍率×分组倍率)。</td></tr><tr><td>Images</td><td>per image</td><td>是</td><td>每次n=1，遵循网关按张规则，单独验证。</td></tr><tr><td>Videos</td><td>async task</td><td>适配后</td><td>创建/轮询/下载/删除不返回usage；任务计费由网关按完成/失败状态结算。</td></tr></tbody></table></div><h2 id="business-billing-example">倍率示例</h2><p>若下游500000 quota=1 USD、分组倍率1，要收0.10 USD/次，One API输入倍率设50。实际换算由下游额度配置决定。长提示词/max_tokens可能影响旧网关预扣门槛，建议不填写max_tokens。</p><h2 id="business-billing-verification">已验证范围</h2><p>One API v0.6.10 / New API rc.43官方容器的4个图片/视频SKU、普通/流式/图片不同定价和HTTP失败零消费已用合成生成对账；不等于所有版本或原生异步Videos网关适配已通过。</p></section>
+
+<section class="doc-section" id="business-errors" data-doc-mode="business"><p class="eyebrow">商务对接 / 错误与边界</p><h1>错误与边界</h1><p class="lead">错误不会伪装成高规格成功；网络故障的退款取决于下游实现。</p><h2 id="business-errors-table">状态码</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td>400</td><td>invalid_request</td><td>—</td><td>SKU不存在、锁定规格冲突、素材/trim不合法。</td></tr><tr><td>401</td><td>invalid_api_key</td><td>—</td><td>Bearer认证失败。</td></tr><tr><td>404</td><td>not_found</td><td>—</td><td>模型/任务不存在或不属于此Key。</td></tr><tr><td>409</td><td>video_not_ready / video_in_progress / idempotency_conflict</td><td>—</td><td>任务状态或幂等请求冲突。</td></tr><tr><td>410</td><td>asset_expired</td><td>—</td><td>缓存文件已过期。</td></tr><tr><td>413 / 415</td><td>request_too_large / invalid_request</td><td>—</td><td>大小或Content-Type不支持。</td></tr><tr><td>502</td><td>upscale_failed / output_size_mismatch / output_duration_mismatch</td><td>—</td><td>放大或交付规格检查失败。</td></tr><tr><td>503</td><td>video_unavailable / no capacity</td><td>—</td><td>任务服务不可用或没有可用账号。</td></tr></tbody></table></div><h2 id="business-errors-response">错误响应示例</h2><div class="example"><div class="example-bar"><span>400 · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;error&quot;: {
+    &quot;message&quot;: &quot;Requested parameters conflict with SKU resolution&quot;,
+    &quot;type&quot;: &quot;invalid_request_error&quot;,
+    &quot;code&quot;: &quot;invalid_request&quot;,
+    &quot;param&quot;: &quot;resolution&quot;
+  }
+}</code></pre></div><h2 id="business-errors-wait">等待、重试和能力限制</h2><p>Chat/Images同步等待，视频可能数分钟；stream=true也不提前推生成进度。Videos有Idempotency-Key，其它创建接口没有同等跨请求幂等，超时后不盲目重试。客户端断线、网络故障、代理超时由网关决定退款，不能保证所有情况自动退费。</p><p>本服务适配原生Video并不使旧网关新增路由：原版One API不支持异步Videos；New API需匹配SKU/协议的任务适配。所有成品链接与下载受缓存期限影响，请及时保存。</p></section>
+
+<section class="doc-section" id="models"><p class="eyebrow">接入说明 / 模型列表</p><h1>模型列表</h1><p class="lead">model 填调用名称，不填展示名称。实际能力以 GET /v1/models 为准。</p>
+<div class="table-wrap"><table><thead><tr><th>模型</th><th>调用名称（model）</th><th>能力</th></tr></thead><tbody><tr><td>Nano Banana 2.1</td><td><code>gemini-3.1-flash-image</code></td><td>图片；1k / 2k / 4k；最多 10 张参考图</td></tr>
+<tr><td>Nano Banana Pro</td><td><code>gemini-3.0-pro-image</code></td><td>图片；1k / 2k / 4k；最多 10 张参考图</td></tr>
+<tr><td>Nano Banana Lite</td><td><code>gemini-3.1-flash-image-lite</code></td><td>图片；1k；最多 10 张参考图</td></tr>
+<tr><td>Imagen 4.0</td><td><code>imagen-4.0-generate-preview</code></td><td>图片；1k；16:9 / 9:16</td></tr>
+<tr><td>Veo 3.1</td><td><code>veo_3_1</code></td><td>视频；8 秒；文生、图生、首尾帧、参考图、续写</td></tr>
+<tr><td>Omni 1.1 Flash</td><td><code>omni_1.1_flash</code></td><td>视频；4 / 6 / 8 / 10 秒；支持视频编辑</td></tr></tbody></table></div><h2 id="models-request">查询模型目录</h2><div class="endpoint"><span class="method get">GET</span><code>/v1/models</code></div><div class="example" data-path="/v1/models" data-method="GET"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="curl" aria-pressed="true">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code>curl 'https://your-lay4flow-host/v1/models' -H 'Authorization: Bearer YOUR_API_KEY'</code></pre></div><p>响应 <code>data[]</code> 包含 id、capabilities、defaults、supported_endpoints。加 <code>?include_legacy=true</code> 查看旧兼容名；<code>GET /v1/models/{model}</code> 查询单个模型；<code>GET /v1/models/aliases</code> 查询别名目录。</p><div class="callout"><code>veo_3_1_remix</code> 是历史兼容名，不代表独立重写能力。当前没有 <code>/v1/videos/{id}/remix</code>。</div>
+</section>
+
+<section class="doc-section" id="parameters"><p class="eyebrow">接入说明 / 模型参数</p><h1>模型参数</h1><p class="lead">比例、清晰度和模式通过字段设置，不追加在 model 名称后面。</p>
+<h2 id="parameters-image">图片参数</h2><p>放在 <code>generationConfig.imageConfig</code> 中；multipart 把 generationConfig 填成 JSON 字符串。</p><div class="table-wrap"><table><thead><tr><th>参数</th><th>取值</th><th>默认值 / 适用范围</th></tr></thead><tbody><tr><td><code>aspectRatio</code></td><td>16:9、9:16、1:1、4:3、3:4</td><td>默认 16:9；Imagen 仅前两种</td></tr>
+<tr><td><code>imageSize</code></td><td>1k、2k、4k</td><td>默认 1k；Lite / Imagen 仅 1k</td></tr></tbody></table></div><div class="example"><div class="example-bar"><span>图片配置示例 · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;generationConfig&quot;: {
+    &quot;imageConfig&quot;: {
+      &quot;aspectRatio&quot;: &quot;1:1&quot;,
+      &quot;imageSize&quot;: &quot;2k&quot;
+    }
+  }
+}</code></pre></div><p class="muted">2k / 4k 会额外放大；原生档位不保证精确像素。Images 顶层 size 仅支持 auto。</p><h2 id="parameters-video">视频参数</h2><p>放在 <code>generationConfig.videoConfig</code> 中。专用 Videos 也可通过顶层 seconds / size 设置时长和尺寸，不能与 videoConfig 冲突。</p><div class="table-wrap"><table><thead><tr><th>参数</th><th>取值</th><th>默认值 / 适用范围</th></tr></thead><tbody><tr><td><code>mode</code></td><td>text_to_video / image_to_video / first_last_frame / reference_to_video / extend / edit</td><td>默认按素材选择；extend 仅 Veo，edit 仅 Omni</td></tr>
+<tr><td><code>aspectRatio</code></td><td>16:9 / 9:16</td><td>默认 16:9</td></tr>
+<tr><td><code>durationSeconds</code></td><td>Veo：8；Omni：4 / 6 / 8 / 10</td><td>默认 8；编辑不能传</td></tr>
+<tr><td><code>resolution</code></td><td>720p / 1080p / 4k；Omni 另有 360p</td><td>默认 720p；高清受模式和账号等级限制</td></tr>
+<tr><td><code>quality</code></td><td>quality / fast / lite</td><td>Veo 默认 fast；Omni 不支持</td></tr>
+<tr><td><code>priority</code></td><td>standard / relaxed</td><td>Veo 默认 standard；relaxed 有组合和等级限制</td></tr>
+<tr><td><code>videoMediaId</code></td><td>已有 Flow 视频的媒体 ID</td><td>续写必填；不是 video_ 任务 ID</td></tr>
+<tr><td><code>trimStartMs</code> / <code>trimEndMs</code></td><td>整数毫秒</td><td>上传编辑默认 0 / 10000；片段≤10 秒且不超出源视频</td></tr></tbody></table></div><div class="example"><div class="example-bar"><span>视频配置示例 · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;generationConfig&quot;: {
+    &quot;videoConfig&quot;: {
+      &quot;mode&quot;: &quot;text_to_video&quot;,
+      &quot;durationSeconds&quot;: 8,
+      &quot;resolution&quot;: &quot;720p&quot;,
+      &quot;aspectRatio&quot;: &quot;16:9&quot;,
+      &quot;quality&quot;: &quot;fast&quot;
+    }
+  }
+}</code></pre></div><h2 id="parameters-size">Videos 尺寸取值</h2><div class="table-wrap"><table><thead><tr><th>分辨率</th><th>横屏 / 竖屏 size</th><th>范围</th></tr></thead><tbody><tr><td>360p</td><td>640x360 / 360x640</td><td>仅 Omni</td></tr>
+<tr><td>720p</td><td>1280x720 / 720x1280</td><td>Veo / Omni</td></tr>
+<tr><td>1080p</td><td>1920x1080 / 1080x1920</td><td>模式和账号受限</td></tr>
+<tr><td>4k</td><td>3840x2160 / 2160x3840</td><td>模式和账号受限</td></tr></tbody></table></div><h2 id="parameters-material">各模式需要什么素材</h2><div class="table-wrap"><table><thead><tr><th>模式</th><th>素材数量</th><th>调用入口</th></tr></thead><tbody><tr><td>文生视频</td><td>不传图片或视频</td><td>Videos / Chat / Gemini</td></tr>
+<tr><td>首帧图生视频</td><td>1 张图片</td><td>Videos / Chat / Gemini</td></tr>
+<tr><td>首尾帧</td><td>2 张图，依次为首帧、尾帧</td><td>Chat / Gemini</td></tr>
+<tr><td>参考图视频</td><td>Veo 1–3 张；Omni 1–7 张</td><td>Chat / Gemini；Videos 仅一个 input_reference</td></tr>
+<tr><td>编辑视频</td><td>Omni 1 个视频，可附最多 5 张图</td><td>Videos；附多图用 Chat / Gemini</td></tr>
+<tr><td>续写视频</td><td>可访问的 Flow 媒体 ID</td><td>Videos / Chat / Gemini</td></tr></tbody></table></div><div class="callout">并不是任意参数都能组合。以目录 capabilities.combinations 为准；部分模式 / 高清需要对应账号等级，上游权限不足仍会生成失败。</div>
+</section>
+
+<section class="doc-section" id="endpoints"><p class="eyebrow">接入说明 / 接口概览</p><h1>接口支持概览</h1><p class="lead">只列本服务实际实现的接口。</p>
+<div class="table-wrap"><table><thead><tr><th>接口</th><th>支持</th><th>格式 / 返回</th></tr></thead><tbody><tr><td><a href="#images">POST /v1/images/generations</a></td><td>支持</td><td>JSON / 图片 URL 或 Base64</td></tr>
+<tr><td><a href="#image-edits">POST /v1/images/edits</a></td><td>支持</td><td>multipart / 图片 URL 或 Base64</td></tr>
+<tr><td><a href="#videos">POST /v1/videos</a></td><td>支持</td><td>JSON 或 multipart / 任务对象</td></tr>
+<tr><td><a href="#video-query">GET /v1/videos/{video_id}</a></td><td>支持</td><td>任务状态</td></tr>
+<tr><td><a href="#video-download">GET /v1/videos/{video_id}/content</a></td><td>支持</td><td>MP4 文件</td></tr>
+<tr><td><a href="#chat">POST /v1/chat/completions</a></td><td>支持</td><td>JSON / choices 或 SSE</td></tr>
+<tr><td><a href="#gemini">POST /v1beta/models/{model}:generateContent</a></td><td>支持</td><td>JSON / candidates</td></tr>
+<tr><td><a href="#responses">POST /v1/responses</a></td><td>基础兼容</td><td>JSON / output 或 SSE</td></tr>
+<tr><td>/v1/messages、/v1/videos/{id}/remix</td><td>不支持</td><td>不要照搬其他服务的接口</td></tr>
+<tr><td>Audio、Embeddings、Files、Batches、Realtime</td><td>不支持</td><td>没有对应资源</td></tr></tbody></table></div>
+</section>
+
+<section class="doc-section" id="images"><p class="eyebrow">图片接口 / 生成图片</p><h1>生成图片</h1><p class="lead">Images：专用图片接口。提交提示词，同步返回一张图片。</p>
+<div class="endpoint"><span class="method post">POST</span><code>/v1/images/generations</code></div><p class="muted">Content-Type: application/json · Authorization: Bearer YOUR_API_KEY</p><h2 id="images-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>prompt</code></td><td>string</td><td><span class="required">是</span></td><td>图片描述，1–32000 字符</td></tr>
+<tr><td><code>model</code></td><td>string</td><td>否</td><td>图片模型；默认 gemini-3.1-flash-image</td></tr>
+<tr><td><code>response_format</code></td><td>string</td><td>否</td><td>url（默认）或 b64_json</td></tr>
+<tr><td><code>generationConfig</code></td><td>object</td><td>否</td><td>imageConfig 设置比例、清晰度；<a href="#parameters-image">查看取值</a></td></tr>
+<tr><td><code>n / size / quality</code></td><td>integer / string</td><td>否</td><td>n 仅 1；size 仅 auto；quality 为 auto / standard</td></tr></tbody></table></div><h2 id="images-request">请求示例</h2><div class="example" data-path="/v1/images/generations" data-method="POST"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;gemini-3.0-pro-image&quot;,
+  &quot;prompt&quot;: &quot;一只橘猫趴在窗台上晒太阳&quot;,
+  &quot;response_format&quot;: &quot;url&quot;,
+  &quot;generationConfig&quot;: {
+    &quot;imageConfig&quot;: {
+      &quot;aspectRatio&quot;: &quot;1:1&quot;,
+      &quot;imageSize&quot;: &quot;1k&quot;
+    }
+  }
+}</code></pre></div><h2 id="images-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · URL 响应</span><button class="copy">复制</button></div><pre><code>{
+  &quot;created&quot;: 1791504000,
+  &quot;data&quot;: [
+    {
+      &quot;url&quot;: &quot;https://your-lay4flow-host/tmp/image.jpg&quot;
+    }
+  ]
+}</code></pre></div><p>读取 <code>data[0].url</code>。b64_json 模式读取 data[0].b64_json，值不带 data:image 前缀。URL 也可能是 data URI；长期保留请保存文件。</p>
+</section>
+
+<section class="doc-section" id="image-edits"><p class="eyebrow">图片接口 / 编辑图片</p><h1>编辑图片 / 参考图</h1><p class="lead">上传参考图和修改要求，返回新图片。</p>
+<div class="endpoint"><span class="method post">POST</span><code>/v1/images/edits</code></div><p class="muted">Content-Type: multipart/form-data · Authorization: Bearer YOUR_API_KEY</p><h2 id="image-edits-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>image / image[]</code></td><td>file</td><td><span class="required">是</span></td><td>1–10 张 PNG / JPEG / WebP；单张≤20 MiB，总计≤100 MiB。多图重复字段。</td></tr>
+<tr><td><code>prompt</code></td><td>string</td><td><span class="required">是</span></td><td>编辑要求，1–32000 字符</td></tr>
+<tr><td><code>model</code></td><td>string</td><td>否</td><td>图片模型；默认 gemini-3.1-flash-image</td></tr>
+<tr><td><code>generationConfig</code></td><td>JSON 字符串</td><td>否</td><td>填写 imageConfig；其他字段与<a href="#images">图片生成</a>相同</td></tr></tbody></table></div><p class="muted">仅接受文件表单；不支持 JSON 编辑、mask 或 file_id。不手动设置 boundary，cURL 自动生成。</p><h2 id="image-edits-request">请求示例</h2><div class="example"><div class="example-bar"><span>cURL · 本地文件上传（Bash）</span><button class="copy">复制</button></div><pre><code>curl 'https://your-lay4flow-host/v1/images/edits' \
+  -H 'Authorization: Bearer YOUR_API_KEY' \
+  -F 'model=gemini-3.0-pro-image' \
+  -F 'prompt=保留这只猫，把背景改成樱花树' \
+  -F 'image=@input.png' \
+  -F 'generationConfig={&quot;imageConfig&quot;:{&quot;aspectRatio&quot;:&quot;1:1&quot;,&quot;imageSize&quot;:&quot;1k&quot;}}'</code></pre></div><h2 id="image-edits-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;created&quot;: 1791504000,
+  &quot;data&quot;: [
+    {
+      &quot;url&quot;: &quot;https://your-lay4flow-host/tmp/image.jpg&quot;
+    }
+  ]
+}</code></pre></div><p>返回 data[0].url；response_format=b64_json 时返回 Base64。</p>
+</section>
+
+<section class="doc-section" id="videos"><p class="eyebrow">视频接口 / 生成视频</p><h1>生成视频</h1><p class="lead">Videos：可恢复的异步视频任务。返回任务 ID，不直接返回视频。</p>
+<div class="endpoint"><span class="method post">POST</span><code>/v1/videos</code></div><p class="muted">JSON 或 multipart/form-data · Authorization: Bearer YOUR_API_KEY</p><div class="status-line"><span>创建任务</span> → <span><a href="#video-query">查询状态</a></span> → <span><a href="#video-download">下载 MP4</a></span></div><h2 id="videos-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>prompt</code></td><td>string</td><td><span class="required">是</span></td><td>视频描述，1–32000 字符</td></tr>
+<tr><td><code>model</code></td><td>string</td><td>否</td><td>veo_3_1（默认）或 omni_1.1_flash</td></tr>
+<tr><td><code>seconds</code></td><td>string / integer</td><td>否</td><td>默认 8；Veo 仅 8；Omni 支持 4 / 6 / 8 / 10</td></tr>
+<tr><td><code>size</code></td><td>string</td><td>否</td><td>默认 1280x720；竖屏 720x1280；<a href="#parameters-size">全部尺寸</a></td></tr>
+<tr><td><code>input_reference</code></td><td>object / file</td><td>否</td><td>首帧图片：JSON 为 {"image_url":"图片 URL 或 data URI"}；表单上传单个 PNG/JPEG/WebP，≤20 MiB</td></tr>
+<tr><td><code>generationConfig</code></td><td>object / JSON 字符串</td><td>否</td><td>videoConfig 指定模式、档位；<a href="#parameters-video">全部取值</a></td></tr>
+<tr><td><code>Idempotency-Key</code></td><td>请求头 string</td><td>否</td><td>推荐；1–200 字符。相同键和相同请求重放原任务，不同请求返回 409。</td></tr></tbody></table></div><h2 id="videos-request">请求示例</h2><p class="muted">文字生成视频。切换 cURL / Python 查看完整请求；cURL 使用 Bash 语法。</p><div class="example" data-path="/v1/videos" data-method="POST" data-idempotency="true"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;veo_3_1&quot;,
+  &quot;prompt&quot;: &quot;海边日落，镜头缓慢推进&quot;,
+  &quot;seconds&quot;: &quot;8&quot;,
+  &quot;size&quot;: &quot;1280x720&quot;
+}</code></pre></div><h3 id="videos-image">用一张图片生成视频</h3><div class="example"><div class="example-bar"><span>cURL · 上传首帧（Bash）</span><button class="copy">复制</button></div><pre><code>curl 'https://your-lay4flow-host/v1/videos' \
+  -H 'Authorization: Bearer YOUR_API_KEY' \
+  -H 'Idempotency-Key: image-demo-001' \
+  -F 'model=veo_3_1' \
+  -F 'prompt=让画面里的猫缓慢转头' \
+  -F 'input_reference=@input.png' \
+  -F 'seconds=8' \
+  -F 'size=1280x720'</code></pre></div><p class="muted">传图片时自动选首帧模式。首尾帧 / 多参考图用 <a href="#chat">Chat</a> 或 <a href="#gemini">Gemini</a>，不要传多个 input_reference。</p><h2 id="videos-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · 任务对象</span><button class="copy">复制</button></div><pre><code>{
+  &quot;id&quot;: &quot;video_example&quot;,
+  &quot;object&quot;: &quot;video&quot;,
+  &quot;created_at&quot;: 1791504000,
+  &quot;status&quot;: &quot;queued&quot;,
+  &quot;progress&quot;: 0,
+  &quot;model&quot;: &quot;veo_3_1&quot;,
+  &quot;prompt&quot;: &quot;海边日落，镜头缓慢推进&quot;,
+  &quot;seconds&quot;: &quot;8&quot;,
+  &quot;size&quot;: &quot;1280x720&quot;,
+  &quot;completed_at&quot;: null,
+  &quot;error&quot;: null,
+  &quot;expires_at&quot;: null
+}</code></pre></div><p>保存 <code>id</code>，用它<a href="#video-query">查询任务</a>。任务对象没有下载 URL。</p><div class="callout">每个新任务换一个 Idempotency-Key。断线后用已保存的 ID 查询；如未收到 ID，用同一个键和相同请求重放，不盲目创建新任务。</div>
+</section>
+
+<section class="doc-section" id="video-query"><p class="eyebrow">视频接口 / 查询任务</p><h1>查询视频任务</h1><p class="lead">创建成功不代表生成完成。约每 5 秒查询一次，直到 completed 或 failed。</p>
+<div class="endpoint"><span class="method get">GET</span><code>/v1/videos/{video_id}</code></div><h2 id="video-query-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>video_id</code></td><td>路径 string</td><td><span class="required">是</span></td><td>创建响应的 id；把示例 video_example 换成实际值</td></tr></tbody></table></div><h2 id="video-query-request">请求示例</h2><div class="example" data-path="/v1/videos/video_example" data-method="GET"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="curl" aria-pressed="true">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code>curl 'https://your-lay4flow-host/v1/videos/video_example' -H 'Authorization: Bearer YOUR_API_KEY'</code></pre></div><h2 id="video-query-response">响应与状态</h2><p>返回与创建相同的完整任务对象。下面仅展示完成时的关键字段。</p><div class="example"><div class="example-bar"><span>200 OK · 关键字段</span><button class="copy">复制</button></div><pre><code>{
+  &quot;id&quot;: &quot;video_example&quot;,
+  &quot;status&quot;: &quot;completed&quot;,
+  &quot;progress&quot;: 100,
+  &quot;completed_at&quot;: 1791504100,
+  &quot;error&quot;: null
+}</code></pre></div><div class="table-wrap"><table><thead><tr><th>status</th><th>含义</th><th>下一步</th></tr></thead><tbody><tr><td><code>queued</code></td><td>排队中</td><td>5 秒后再查询</td></tr>
+<tr><td><code>in_progress</code></td><td>生成中</td><td>5 秒后再查询</td></tr>
+<tr><td><code>completed</code></td><td>完成</td><td><a href="#video-download">下载视频</a></td></tr>
+<tr><td><code>failed</code></td><td>失败</td><td>读取 error，停止轮询</td></tr></tbody></table></div><h2 id="video-query-list">列表与删除</h2><div class="table-wrap"><table><thead><tr><th>接口</th><th>参数 / 返回</th></tr></thead><tbody><tr><td><code>GET /v1/videos</code></td><td>limit 默认 20、范围 1–100；order 为 asc / desc；after 填上一页 last_id。返回 data、has_more、first_id、last_id。</td></tr>
+<tr><td><code>DELETE /v1/videos/{video_id}</code></td><td>仅删除终态任务；运行中返回 409 / video_in_progress。成功返回 {"id":"…","object":"video.deleted","deleted":true}。</td></tr></tbody></table></div><p class="muted">查询、列表、下载与删除都需要创建时的同一 API Key。</p>
+</section>
+
+<section class="doc-section" id="video-download"><p class="eyebrow">视频接口 / 下载</p><h1>下载视频</h1><p class="lead">仅 completed 任务可下载；返回 MP4 文件，不是 JSON。</p>
+<div class="endpoint"><span class="method get">GET</span><code>/v1/videos/{video_id}/content</code></div><h2 id="video-download-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>video_id</code></td><td>路径 string</td><td><span class="required">是</span></td><td>已完成的任务 ID</td></tr>
+<tr><td><code>variant</code></td><td>查询 string</td><td>否</td><td>仅支持 video（默认）</td></tr></tbody></table></div><h2 id="video-download-request">请求示例</h2><div class="example" data-path="/v1/videos/video_example/content" data-method="GET" data-download="output.mp4"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="curl" aria-pressed="true">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code>curl 'https://your-lay4flow-host/v1/videos/video_example/content' -H 'Authorization: Bearer YOUR_API_KEY'</code></pre></div><h2 id="video-download-response">响应</h2><div class="table-wrap"><table><thead><tr><th>状态</th><th>结果</th></tr></thead><tbody><tr><td>200</td><td>Content-Type: video/mp4，保存为 output.mp4</td></tr>
+<tr><td>409 / video_not_ready</td><td>任务尚未完成，继续查状态</td></tr>
+<tr><td>410 / asset_expired</td><td>视频缓存已过期</td></tr>
+<tr><td>404</td><td>任务不存在或不属于此 API Key</td></tr></tbody></table></div><p>下载后保存到自己的存储；缓存期限由管理员配置。</p>
+</section>
+
+<section class="doc-section" id="video-edit"><p class="eyebrow">视频接口 / 编辑</p><h1>编辑视频</h1><p class="lead">使用 Omni 修改上传视频片段，同样创建异步视频任务。</p>
+<div class="endpoint"><span class="method post">POST</span><code>/v1/videos</code></div><p class="muted">Content-Type: multipart/form-data · Authorization: Bearer YOUR_API_KEY</p><h2 id="video-edit-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>model</code></td><td>string</td><td><span class="required">是</span></td><td>固定 omni_1.1_flash</td></tr>
+<tr><td><code>prompt</code></td><td>string</td><td><span class="required">是</span></td><td>编辑要求，1–32000 字符</td></tr>
+<tr><td><code>input_video</code></td><td>file</td><td><span class="required">是</span></td><td>1 个 MP4 / WebM / QuickTime，≤100 MiB</td></tr>
+<tr><td><code>generationConfig</code></td><td>JSON 字符串</td><td>否，建议填</td><td>videoConfig.mode=edit；trimStartMs / trimEndMs 选择片段，最多 10 秒</td></tr></tbody></table></div><div class="callout">编辑不能传 seconds / durationSeconds。例子编辑第 0–8 秒，源视频至少有 8 秒。</div><h2 id="video-edit-request">请求示例</h2><div class="example"><div class="example-bar"><span>cURL · 本地视频上传（Bash）</span><button class="copy">复制</button></div><pre><code>curl 'https://your-lay4flow-host/v1/videos' \
+  -H 'Authorization: Bearer YOUR_API_KEY' \
+  -H 'Idempotency-Key: edit-demo-001' \
+  -F 'model=omni_1.1_flash' \
+  -F 'prompt=把视频里的猫改成兔子，保留原背景' \
+  -F 'input_video=@input.mp4;type=video/mp4' \
+  -F 'generationConfig={&quot;videoConfig&quot;:{&quot;mode&quot;:&quot;edit&quot;,&quot;resolution&quot;:&quot;720p&quot;,&quot;trimStartMs&quot;:0,&quot;trimEndMs&quot;:8000}}'</code></pre></div><h2 id="video-edit-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · 关键字段</span><button class="copy">复制</button></div><pre><code>{
+  &quot;id&quot;: &quot;video_edit_example&quot;,
+  &quot;status&quot;: &quot;queued&quot;,
+  &quot;progress&quot;: 0,
+  &quot;model&quot;: &quot;omni_1.1_flash&quot;
+}</code></pre></div><p>完整结构与视频生成任务相同。随后<a href="#video-query">查询任务</a>，完成后<a href="#video-download">下载</a>；当前没有单独 /remix 接口。</p>
+</section>
+
+<section class="doc-section" id="chat"><p class="eyebrow">兼容接口 / Chat</p><h1>Chat Completions：统一生成入口</h1><p class="lead">沿用 messages 格式，适合已有 Chat 客户端、首尾帧和多参考图。</p>
+<div class="endpoint"><span class="method post">POST</span><code>/v1/chat/completions</code></div><h2 id="chat-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>model</code></td><td>string</td><td><span class="required">是</span></td><td>公开模型调用名</td></tr>
+<tr><td><code>messages</code></td><td>array</td><td><span class="required">是</span></td><td>user 消息；content 为文字或 text / image_url / video_url 数组</td></tr>
+<tr><td><code>stream</code></td><td>boolean</td><td>否</td><td>false（默认）或 true（SSE）</td></tr>
+<tr><td><code>generationConfig</code></td><td>object</td><td>否</td><td>imageConfig / videoConfig；<a href="#parameters">查看取值</a></td></tr></tbody></table></div><h2 id="chat-request">请求示例</h2><div class="example" data-path="/v1/chat/completions" data-method="POST"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;gemini-3.0-pro-image&quot;,
+  &quot;messages&quot;: [
+    {
+      &quot;role&quot;: &quot;user&quot;,
+      &quot;content&quot;: &quot;一只橘猫&quot;
+    }
+  ],
+  &quot;generationConfig&quot;: {
+    &quot;imageConfig&quot;: {
+      &quot;aspectRatio&quot;: &quot;1:1&quot;,
+      &quot;imageSize&quot;: &quot;1k&quot;
+    }
+  },
+  &quot;stream&quot;: false
+}</code></pre></div><h3 id="chat-frames">首尾帧视频：按顺序放两张图</h3><div class="example" data-path="/v1/chat/completions" data-method="POST"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;veo_3_1&quot;,
+  &quot;messages&quot;: [
+    {
+      &quot;role&quot;: &quot;user&quot;,
+      &quot;content&quot;: [
+        {
+          &quot;type&quot;: &quot;text&quot;,
+          &quot;text&quot;: &quot;从晴天过渡到日落&quot;
+        },
+        {
+          &quot;type&quot;: &quot;image_url&quot;,
+          &quot;image_url&quot;: {
+            &quot;url&quot;: &quot;data:image/png;base64,FIRST_FRAME_BASE64&quot;
+          }
+        },
+        {
+          &quot;type&quot;: &quot;image_url&quot;,
+          &quot;image_url&quot;: {
+            &quot;url&quot;: &quot;data:image/png;base64,LAST_FRAME_BASE64&quot;
+          }
+        }
+      ]
+    }
+  ],
+  &quot;generationConfig&quot;: {
+    &quot;videoConfig&quot;: {
+      &quot;mode&quot;: &quot;first_last_frame&quot;,
+      &quot;durationSeconds&quot;: 8,
+      &quot;resolution&quot;: &quot;720p&quot;,
+      &quot;quality&quot;: &quot;fast&quot;
+    }
+  }
+}</code></pre></div><p class="muted">占位 Base64 换成真实图片编码，也可填可下载 URL。参考图模式改成 reference_to_video，素材数量见模型参数。</p><h2 id="chat-response">响应与读取方式</h2><div class="example"><div class="example-bar"><span>200 OK · 关键字段</span><button class="copy">复制</button></div><pre><code>{
+  &quot;choices&quot;: [
+    {
+      &quot;message&quot;: {
+        &quot;role&quot;: &quot;assistant&quot;,
+        &quot;content&quot;: &quot;![Generated Image](https://your-lay4flow-host/tmp/image.jpg)&quot;
+      }
+    }
+  ],
+  &quot;media&quot;: {
+    &quot;type&quot;: &quot;image&quot;,
+    &quot;url&quot;: &quot;https://your-lay4flow-host/tmp/image.jpg&quot;,
+    &quot;mime_type&quot;: &quot;image/jpeg&quot;
+  }
+}</code></pre></div><p>读取 choices[0].message.content 或 media.url。视频 content 为视频 HTML，不是 Images 的 data[].url。SSE 读取 choices[0].delta，最终块可能带 delta.media；遇到 error 需处理，流以 data: [DONE] 结束。</p>
+</section>
+
+<section class="doc-section" id="gemini"><p class="eyebrow">兼容接口 / Gemini</p><h1>Gemini 原生格式</h1><p class="lead">model 写在路径中；请求体用 contents / parts，不用 messages。</p>
+<div class="endpoint"><span class="method post">POST</span><code>/v1beta/models/{model}:generateContent</code></div><h2 id="gemini-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>model</code></td><td>路径 string</td><td><span class="required">是</span></td><td>公开模型调用名</td></tr>
+<tr><td><code>contents</code></td><td>array</td><td><span class="required">是</span></td><td>parts 放 text、inlineData 或 fileData</td></tr>
+<tr><td><code>generationConfig</code></td><td>object</td><td>否</td><td><a href="#parameters">查看图片 / 视频参数</a></td></tr></tbody></table></div><p class="muted">认证可用 Bearer、x-goog-api-key 或 ?key=。建议请求头，避免密钥进入 URL 日志。也支持 /models/{model}:generateContent。</p><h2 id="gemini-request">请求示例</h2><div class="example" data-path="/v1beta/models/gemini-3.0-pro-image:generateContent" data-method="POST"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;contents&quot;: [
+    {
+      &quot;role&quot;: &quot;user&quot;,
+      &quot;parts&quot;: [
+        {
+          &quot;text&quot;: &quot;一只橘猫&quot;
+        }
+      ]
+    }
+  ],
+  &quot;generationConfig&quot;: {
+    &quot;imageConfig&quot;: {
+      &quot;aspectRatio&quot;: &quot;1:1&quot;,
+      &quot;imageSize&quot;: &quot;1k&quot;
+    }
+  }
+}</code></pre></div><p>参考图 part：<code>{&quot;inlineData&quot;:{&quot;mimeType&quot;:&quot;image/png&quot;,&quot;data&quot;:&quot;BASE64_IMAGE&quot;}}</code>。data 为纯 Base64，不加 data:image 前缀。</p><h2 id="gemini-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · 文件引用示例</span><button class="copy">复制</button></div><pre><code>{
+  &quot;candidates&quot;: [
+    {
+      &quot;content&quot;: {
+        &quot;role&quot;: &quot;model&quot;,
+        &quot;parts&quot;: [
+          {
+            &quot;fileData&quot;: {
+              &quot;mimeType&quot;: &quot;image/jpeg&quot;,
+              &quot;fileUri&quot;: &quot;https://your-lay4flow-host/tmp/image.jpg&quot;
+            }
+          }
+        ]
+      },
+      &quot;finishReason&quot;: &quot;STOP&quot;,
+      &quot;index&quot;: 0
+    }
+  ],
+  &quot;modelVersion&quot;: &quot;gemini-3.0-pro-image&quot;
+}</code></pre></div><p>读 candidates[0].content.parts；图片可能为 inlineData 或 fileData。流式使用 :streamGenerateContent，按 Gemini candidates / error 解析 SSE，不套用 Chat choices 解析器。</p>
+</section>
+
+<section class="doc-section" id="responses"><p class="eyebrow">兼容接口 / Responses</p><h1>Responses</h1><p class="lead">基础媒体输入输出兼容，不是完整的 Responses 资源。</p>
+<div class="endpoint"><span class="method post">POST</span><code>/v1/responses</code></div><h2 id="responses-params">请求参数</h2><div class="table-wrap"><table><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明 / 默认值</th></tr></thead><tbody><tr><td><code>model</code></td><td>string</td><td><span class="required">是</span></td><td>公开模型调用名</td></tr>
+<tr><td><code>input</code></td><td>string / array</td><td><span class="required">是</span></td><td>提示词，或含 input_text / input_image 的消息数组</td></tr>
+<tr><td><code>instructions</code></td><td>string</td><td>否</td><td>系统指令</td></tr>
+<tr><td><code>stream</code></td><td>boolean</td><td>否</td><td>false（默认）或 true（基础 SSE）</td></tr></tbody></table></div><div class="callout">不支持 generationConfig、tools、temperature、max_output_tokens、previous_response_id、background。需要指定画幅、时长或视频编辑请用 <a href="#chat">Chat</a>、<a href="#gemini">Gemini</a> 或专用接口。</div><h2 id="responses-request">请求示例</h2><div class="example" data-path="/v1/responses" data-method="POST"><div class="example-bar"><div class="example-options" role="group" aria-label="请求示例"><button data-language="json" aria-pressed="true">JSON</button><button data-language="curl" aria-pressed="false">cURL</button><button data-language="python" aria-pressed="false">Python</button></div><button class="copy">复制</button></div><pre><code data-json>{
+  &quot;model&quot;: &quot;gemini-3.0-pro-image&quot;,
+  &quot;input&quot;: &quot;生成一张蓝色玻璃杯的产品图&quot;,
+  &quot;stream&quot;: false
+}</code></pre></div><h2 id="responses-response">响应示例</h2><div class="example"><div class="example-bar"><span>200 OK · 关键字段</span><button class="copy">复制</button></div><pre><code>{
+  &quot;id&quot;: &quot;resp_example&quot;,
+  &quot;object&quot;: &quot;response&quot;,
+  &quot;status&quot;: &quot;completed&quot;,
+  &quot;output&quot;: [
+    {
+      &quot;id&quot;: &quot;ig_example&quot;,
+      &quot;type&quot;: &quot;image_generation_call&quot;,
+      &quot;status&quot;: &quot;completed&quot;,
+      &quot;result&quot;: &quot;https://your-lay4flow-host/tmp/image.jpg&quot;
+    }
+  ]
+}</code></pre></div><p>按 output[].type 查媒体项，读取 result；视频项为 video_generation_call。输出也可能含文本 message / output_text，不假定媒体总在 output[0]。</p>
+</section>
+
+<section class="doc-section" id="errors"><p class="eyebrow">接入说明 / 错误</p><h1>错误与限制</h1><p class="lead">客户端应同时处理非 2xx 响应和流式 error 事件。</p>
+<div class="table-wrap"><table><thead><tr><th>HTTP 状态</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>400 / 422</td><td>参数、素材或类型错误</td><td>查看 error.message 或 detail</td></tr>
+<tr><td>401</td><td>API Key 无效</td><td>后台 API Key，不是 Google 凭据</td></tr>
+<tr><td>404</td><td>未实现接口 / 任务不存在</td><td>核对路径、ID 和 Key 归属</td></tr>
+<tr><td>409</td><td>任务未完成 / 幂等键冲突</td><td>查询任务或核对同键请求</td></tr>
+<tr><td>410</td><td>媒体缓存过期</td><td>自行保存已下载文件</td></tr>
+<tr><td>413 / 415</td><td>素材超限 / 格式不支持</td><td>缩小素材或换正确 Content-Type</td></tr>
+<tr><td>503</td><td>无可用账号 / 并发等待失败</td><td>退避重试</td></tr>
+<tr><td>500 / 502 / 504</td><td>上游失败 / 超时</td><td>任务先查状态，创建请求不盲目重发</td></tr></tbody></table></div><h2 id="errors-response">错误示例</h2><div class="example"><div class="example-bar"><span>401 · JSON</span><button class="copy">复制</button></div><pre><code>{
+  &quot;error&quot;: {
+    &quot;message&quot;: &quot;Invalid API key&quot;,
+    &quot;type&quot;: &quot;authentication_error&quot;,
+    &quot;code&quot;: &quot;invalid_api_key&quot;
+  }
+}</code></pre></div><p>部分请求边界可能返回 FastAPI detail。Gemini 错误为 {error:{code,message,status}}；SSE 开始后可能通过 error 报错，不能只看初始 HTTP 200。</p><div class="callout">仅 Videos 创建支持 Idempotency-Key。Chat、Images、Responses 没有相同幂等保障；关闭客户端自动重试，避免重复生成。</div>
+</section>
+<footer>lay4flow · <a href="/api-docs" data-doc-swagger>Swagger</a> · <a href="/v1/openapi.json" data-doc-schema>OpenAPI JSON</a> · 响应示例为结构示意，不代表真实生成结果。</footer>
+</main>
+<aside class="toc" aria-label="本页目录"><p>本页目录</p><nav id="pageToc"></nav></aside>
+</div>
+<script src="/static/js/media_skus.js?v=20261011-02"></script>
+<script src="/static/js/api-guide.js?v=lay4flow-20261011"></script>
+<script>if(window.location?.search?.includes('embedded=')){document.querySelector('header')?.remove();document.body?.classList?.add?.('embedded');}</script>
+</body>
+</html>

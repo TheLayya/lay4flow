@@ -1,0 +1,103 @@
+[global]
+api_key = "__configure_api_key__"
+admin_username = "admin"
+admin_password = "admin"
+
+[flow]
+# Fallback sent to the captcha service; returned browser/captcha UA takes precedence.
+# Set this to the UA used by your captcha environment. Reload/restart after editing.
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.250 Safari/537.36"
+# Flow frontend URL used for page context, Origin, and Referer headers.
+base_url = "https://flow.google.com"
+# Legacy Labs API URL kept for Session Token and compatibility endpoints.
+labs_base_url = "https://labs.google/fx/api"
+api_base_url = "https://aisandbox-pa.googleapis.com/v1"
+timeout = 120
+max_retries = 3
+image_request_timeout = 40
+image_timeout_retry_count = 1
+image_timeout_retry_delay = 0.8
+image_timeout_use_media_proxy_fallback = true
+image_prefer_media_proxy = false
+image_slot_wait_timeout = 480
+image_launch_soft_limit = 20
+image_launch_wait_timeout = 480
+image_launch_stagger_ms = 0
+video_slot_wait_timeout = 480
+video_launch_soft_limit = 20
+video_launch_wait_timeout = 480
+video_launch_stagger_ms = 0
+poll_interval = 3.0
+max_poll_attempts = 200
+
+[server]
+host = "0.0.0.0"
+port = 8000
+# Optional public origin for links served behind a reverse proxy.
+public_base_url = ""
+# Per-token metrics are high-cardinality; enable only on an access-controlled endpoint.
+metrics_include_token_labels = false
+
+[debug]
+enabled = false
+log_requests = true
+log_responses = true
+mask_token = true
+
+[public_api]
+# One process owns video jobs per database. These limits do not override per-account slots.
+video_workers = 4
+video_pending_jobs = 100
+video_pending_media_mib = 256
+
+[proxy]
+proxy_enabled = false
+proxy_url = ""
+
+
+[generation]
+image_timeout = 300
+video_timeout = 1500
+
+[call_logic]
+call_mode = "default"  # default=随机轮询策略, polling=顺序轮询策略
+
+[admin]
+error_ban_threshold = 3
+
+[cache]
+enabled = false
+timeout = 7200  # 缓存超时时间(秒), 默认2小时; 设置为0表示不自动删除缓存
+base_url = ""   # 缓存文件访问的基础URL, 留空则使用服务器地址
+
+[captcha]
+# Fixed captcha provider. Apply for an API Key at https://cap.tk218.top/.
+captcha_method = "remote_browser"
+remote_browser_base_url = "https://cap.tk218.top"
+remote_browser_api_key = ""
+remote_browser_timeout = 60
+browser_captcha_generation_retries = 6
+# Per-account Flow project rotation, independent from captcha worker capacity.
+personal_project_pool_size = 4
+
+[browser_profile]
+# Cloak login and session JSON imports use a dedicated persistent Profile.
+# Existing accounts with browser_profile_source = "cookies" keep the HTTP-only path.
+# Cloak maintenance follows AT expiry instead of periodic ST polling.
+# Final browser close prunes regenerable caches while preserving all site state.
+enabled = true
+root = "data/browser_profiles"
+headless = false
+max_concurrent = 1
+# Optional: keep a very small number of imported Profiles warm between refreshes.
+# 0 keeps the current cold, on-demand behavior; do not set this per account.
+warm_slots = 0
+warm_idle_seconds = 300
+
+[vids]
+registry_path = "data/vids/bindings.json"
+# Explicit Vids accounts are restored from existing encrypted sessions only.
+# Each entry needs token_id, identity_hash, canonical editor_url, runtime_dir,
+# session_key_env (external Fernet key), and optional proxy override.
+# Leave empty until those account bindings are deliberately configured.
+accounts = []

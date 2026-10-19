@@ -1,0 +1,1702 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-09-26",
+  "models": {
+    "gemini-3.0-pro-image-landscape": "1298dfc28823cc40f4cc08c2db3f1a3525d571bfa5cd5447c4a75e43af39847d",
+    "gemini-3.0-pro-image-portrait": "fa364e967e6be289c51c42852a81ba74570237461ccc0b95499ba7e498433114",
+    "gemini-3.0-pro-image-square": "d18e73848ba41732978706069dde88c534d1a2b09d731c65850e18a4afae0b1b",
+    "gemini-3.0-pro-image-four-three": "91d9986247b815641d8f7475b6e3a0568cf01cb55ca517b2ead34eb04cebb0ce",
+    "gemini-3.0-pro-image-three-four": "bef85d6bf998ff1d8a76a3e6de4b52a24a8d1e2e3c5baa2484dce46ae95dd1c3",
+    "gemini-3.0-pro-image-landscape-2k": "362565ddce03215e6fa3427b5b15fda099aefbad2224eeabc3e42456d3a7dcfe",
+    "gemini-3.0-pro-image-portrait-2k": "3a5fd2c5e3c24fe53d4003925db55ff43faed1034f9acc5916bc5c8f5d9e885f",
+    "gemini-3.0-pro-image-square-2k": "64e4f33571a8324246c221ee3679e0428cba298ce642e49b8d2ffcfa32f614ac",
+    "gemini-3.0-pro-image-four-three-2k": "b8f0dab676c0b3ef7ca10d2bc51227b4a4772f2208fee073bd0186660d298b52",
+    "gemini-3.0-pro-image-three-four-2k": "66375bc19e11e9d5d7e9565266af42fc748c36de8c62379cb4e13bf9de9dd5fc",
+    "gemini-3.0-pro-image-landscape-4k": "29b000efea854551e393c01d25bc751b0e8ea68d3a7dfaab4dbe0c68dec52577",
+    "gemini-3.0-pro-image-portrait-4k": "41fa884487474026aad8a1f30628718ab795b7986d35535fdd869d121cf2e5e2",
+    "gemini-3.0-pro-image-square-4k": "062de5dd45f380b8b8c9d10dc400cf88352d51228adc83d2077ab815cd84a989",
+    "gemini-3.0-pro-image-four-three-4k": "dc0fcf2c61fde598626eadde1be9a533d65cb10050f9a49b98702649dea0170e",
+    "gemini-3.0-pro-image-three-four-4k": "b7fd49fd510d82691da4d0f65bfd409bf53483830f75babed7e6b608fad6d0c6",
+    "imagen-4.0-generate-preview-landscape": "dca58365151a6a20ff81f3cce2f00de803202a82c10445a830249b9df9f8dfc3",
+    "imagen-4.0-generate-preview-portrait": "59ff775389e726d49f3159d974817334683c6ca9e59b0685188f0afd7f99eddf",
+    "gemini-3.1-flash-image-landscape": "f1e7db403e6664d9a81bdcbbaea72ca28452f610faec870505c1ec285edb0de5",
+    "gemini-3.1-flash-image-portrait": "b5448c4d56831517f16deff48824efe47084ae5541578825d73d97082468624c",
+    "gemini-3.1-flash-image-square": "9ebc71ac4462275426b91dd0eeeb7db516ec016e16afcff20f17f71823dc3d3e",
+    "gemini-3.1-flash-image-four-three": "2160ebd586be100fd07d786c0995b3c47a0c53287020ec868d454fc0cf4e9b94",
+    "gemini-3.1-flash-image-three-four": "5e377b62f08a9c39046b11c167653d5a7ebc8190241e63cb45432a41077c60f6",
+    "gemini-3.1-flash-image-landscape-2k": "94db68b221940adee84a9356897fc59bc0d6bcecac8befd549299acc6d73b16e",
+    "gemini-3.1-flash-image-portrait-2k": "a36e637a4f9c5d44e500ecaecc4c87eb8cadd9f3325792f1da6682a4c3f35587",
+    "gemini-3.1-flash-image-square-2k": "79b2bd014378a2668cdd8daf908da2b253db38c12eeb9d971170043d46566f45",
+    "gemini-3.1-flash-image-four-three-2k": "0f1bbdac13af1ad2e53a0d689fd04b49d248b46d73baf15fb75e0e7cbbbb34fd",
+    "gemini-3.1-flash-image-three-four-2k": "b46f2958467fe6170707b25cb3d028e8b1dd7e45c32a6854aafdc85f16b44f70",
+    "gemini-3.1-flash-image-landscape-4k": "42153f53a96fe452b9a4bb424ca8daf2bf8c6493ee8305bf39eed996c1eb6ae5",
+    "gemini-3.1-flash-image-portrait-4k": "5c020af764322e04a4bed835735954ae8f89131dd608f4ef473a3221fa989cca",
+    "gemini-3.1-flash-image-square-4k": "d798f0342536cc472aa9f1666ebbfecd02a6f046c3fe65a21e26a8e5ffef0a29",
+    "gemini-3.1-flash-image-four-three-4k": "7589f253a60750cc91b2a80c9678df00536861b9513fe40e8cc5f94c14ac70ba",
+    "gemini-3.1-flash-image-three-four-4k": "c763fc9bf986e63215c9e78001b6e9817a08577dd617c5fe43c8fac187e092c2",
+    "veo_3_1_t2v_fast_portrait": "1efc2dd352c13f06fa38d89117eb80ceaf2ab86a57d2b3ae95fa8b97007b0c14",
+    "veo_3_1_t2v_fast_landscape": "82a31de24c2beab32dd4679c7d9e9ec9ac59de19ab62d827bc8a82ef78c57e57",
+    "veo_3_1_t2v_fast_portrait_ultra": "6085bcee5ae370a2f1b90dc0eb7c9eb2bf9dc2daa68806c570da6bb4bfbc1d45",
+    "veo_3_1_t2v_fast_ultra": "bedd4a25ca6fc9904afa50cda7f6cb963429708bdbbc63395ba6bc49259e23af",
+    "veo_3_1_t2v_fast_portrait_ultra_relaxed": "05665c5587a017cd9d5c362e84a2673630d80e4413cdbefd0ac15396b89b3813",
+    "veo_3_1_t2v_fast_ultra_relaxed": "d983e95887a87219cb774e851dc3f27ff323897ef838149d7639476b6e539dab",
+    "veo_3_1_t2v_portrait": "f1edb440c3882ec76b3dadb21553d14dcad95e44ca09e8fb09003225848b825a",
+    "veo_3_1_t2v_landscape": "fd45cfc552803d6f4153c5df7bcd8657ac6cde9f114b6eb1275580ed09bd19f4",
+    "veo_3_1_t2v_lite_portrait": "89fbf001000ddb37c2a6e8b96f396108f4ac6f527afd0a6d3c659b474017b0f9",
+    "veo_3_1_t2v_lite_landscape": "9d65f005b14763b45c05b9f5ecec49548f3fa86b235fa9b3ad21976fb3635256",
+    "veo_3_1_i2v_s_fast_portrait_fl": "3e0504f48fe59b078ee8c91319f7eedd829848f844ff3394c55554efd4ca1dcd",
+    "veo_3_1_i2v_s_fast_fl": "d96dc4f5a85d4f31dfbb9d85a9a4e21ab412a5881cf98546770f52bb15567246",
+    "veo_3_1_i2v_s_fast_portrait_ultra_fl": "7195f13057ebea38824c14683c2975c7130de7c197e926a110bd47467b235f26",
+    "veo_3_1_i2v_s_fast_ultra_fl": "29a6909d5dea09cfd7c923a22b793e60556ebb317ca1a58421c46673b891d1a1",
+    "veo_3_1_i2v_s_fast_portrait_ultra_relaxed": "cfc63eea965d69ab07f7262d2b1c83394865c91cc0bf4c8713c80f0141193fea",
+    "veo_3_1_i2v_s_fast_ultra_relaxed": "0042885c241f8c63eaf5270e3bee295977c81a6075ba8f2bf0b3df7621e7815c",
+    "veo_3_1_i2v_s_portrait": "5018f02e9fa274816a3521ada6ebae7a65effc5d576eebeee306b8790f755f8e",
+    "veo_3_1_i2v_s_landscape": "cb7e05e8b1ff2d4bfbbd142f1cc1fdf6d388c7c59b4ef7aaeac1d6466dba78b2",
+    "veo_3_1_i2v_lite_portrait": "3f859e345981444d658478a21744446f0ad0f0e13d904e2be1744261d630aa42",
+    "veo_3_1_i2v_lite_landscape": "4d264a4df10c13a6a009c0ea4579bbcdcca2bcc6078ac39ac357062bb742eaec",
+    "veo_3_1_interpolation_lite_portrait": "7e183f663515b590396e60310133f7bf6e03634a8caa7b5526e419104270442e",
+    "veo_3_1_interpolation_lite_landscape": "d2276fc59ba50a6b4b64bc79b7dd28732ee24e39d396424e7ccf2817170d19d7",
+    "veo_3_1_r2v_fast_portrait": "62ffee347de8b933d929ca2c431393328c315b5b856be9fde9cecf87d86da6a5",
+    "veo_3_1_r2v_fast": "4f4f7411101957a6dbca51f29f45018caa1b018b062ea514e7d548bcc10e3998",
+    "veo_3_1_r2v_fast_portrait_ultra": "3a13e22f479c83dfabb42a10a4ff80be315e14c013c77900f413cab6a311fed4",
+    "veo_3_1_r2v_fast_ultra": "c29a41138b95d01a078f49cdd88607ef70e15a3d7e4dfc8013984b649bb7bf01",
+    "veo_3_1_r2v_fast_portrait_ultra_relaxed": "e9c3b40c444b7d61ee9dbab1e9f3329edc409421863f35c3ad59ab9402421a90",
+    "veo_3_1_r2v_fast_ultra_relaxed": "232667ec315699747cdb59b1d4303f397d531de9d573c505930ee9e98b91d556",
+    "veo_3_1_t2v_fast_portrait_4k": "22b88da59df1382b23c4f20935316dc3df2068a10451ea6dc4a077b9d48c9cbf",
+    "veo_3_1_t2v_fast_4k": "ccc89e551fa95acca4e147fa300c54a58a2548a29fd57702e9a77ec3521908de",
+    "veo_3_1_t2v_fast_portrait_ultra_4k": "2a22c38a477fd6b4e5285760f6937bb30c746c8ec469f144a96d510ba6d2f9c5",
+    "veo_3_1_t2v_fast_ultra_4k": "0f2e2a66b911a4bde6645fe7be7f7b774dd8ea4f0b4f199adbd31242b70054cb",
+    "veo_3_1_t2v_fast_portrait_1080p": "28b99fed8e41ba5aaac76a5e09100b4e2a8761f8a3e2d772a8ffb02ae938af52",
+    "veo_3_1_t2v_fast_1080p": "ff0e686cdbb2e3fa31f84baa49199dfea32ce761c79ef3a621db8fa026b415ac",
+    "veo_3_1_t2v_fast_portrait_ultra_1080p": "5edbe8e35cbf71b7a2bf63850e57588fa06b9c10b8547e459c23beebc7f7f83f",
+    "veo_3_1_t2v_fast_ultra_1080p": "c564d53e241a72764cd3f56daa49f32bde2769da4ed9abb912493ed9b9378001",
+    "veo_3_1_i2v_s_fast_portrait_ultra_fl_4k": "b3cd740c88c10759aa6e68270f66b944b73bf43320fc58018e48986f08c43c1f",
+    "veo_3_1_i2v_s_fast_ultra_fl_4k": "a49ce11f88acb8b6ac538b7c5d776557b7ee24d89d15c066eab38104d84ff466",
+    "veo_3_1_i2v_s_fast_portrait_ultra_fl_1080p": "1b7390a441946b577247faa16542a5ad8e13e9f623f6a12540419fb45b18d09f",
+    "veo_3_1_i2v_s_fast_ultra_fl_1080p": "3350ea03a9039454bd1e02334879c9485176d4ac1431da8034fd343ae8166024",
+    "veo_3_1_r2v_fast_portrait_ultra_4k": "0251fd6b0de9e92f5888573c506e588ace561397fc823d645db5510f706a8e94",
+    "veo_3_1_r2v_fast_ultra_4k": "fd02957fb77a5fa7dabad2319144564e7c4cf984cc3181b884c660e1acb0e0c7",
+    "veo_3_1_r2v_fast_portrait_ultra_1080p": "4ffebf4513397dbae5dfab0fb66f920469b9c4c6716e73590558c19a4ba6e7bc",
+    "veo_3_1_r2v_fast_ultra_1080p": "b7eaa46eee2a32f64913c81b263112285be368f79bab9fe96173b53e1c6cb9e9",
+    "veo_3_1_extend_portrait": "4573d2bbe8118da853c3d9f6e883c75c203b7fd64b92c1e98bfabd96209fd2ea",
+    "veo_3_1_extend": "da97062c98dce800214e2ae99fe8edc3b1a9b75d34eb673f25620f8ef9475a43",
+    "omni": "609ba6ca71dc59d602bb90d8b673e39acb918aab078a1ca5b3156ea8facc38de",
+    "omni_portrait": "2849ca199e8b7cfe7f9af5287d42ef27ebf3c4daa8cc22fa35ade9b83242c03f",
+    "omni_4s": "7d6491ae685e27b086afd9d4533ffe95332f8265728dd1f0bb64319d75c5428e",
+    "omni_portrait_4s": "140fb13d723e1c992140b3773b5e55dd11ed0cb9ec51bcb2834f17c41a960c75",
+    "omni_r2v_4s": "161a2398ba9a050034c13953e400183f158a8fae415ab756e849af5495a4c64d",
+    "omni_r2v_portrait_4s": "9200e1d746e30442c0d94183ee90ece2edbe1b592c3320a0c21d714f46e5f3f7",
+    "omni_i2v_4s_first_last": "5973c1a8a3f5da816d0c219b57f73759d5aa1d19b8481dd9f4543b25052a03ee",
+    "omni_i2v_portrait_4s_first_last": "9e003c4b4b96014627efd6ef66f5828aa152db3e085dd15235c788bc57765b34",
+    "omni_i2v_4s": "2bf868f69fe03ea65981543df1badf87763b68eeaef34872ebe3ef28e55c7049",
+    "omni_i2v_portrait_4s": "03d4f00aecb14fdbc7795971426f48575cf9f6ceaf1debf0263ab7c8d1e497aa",
+    "omni_4s_360p": "7340e3b4318af133baf70bc337508dfc83e1d334cef16cff32df3a39575bca7c",
+    "omni_portrait_4s_360p": "ed2f7ee4033a82c5a278e1210425fb808d8b0dc2a172c26d8a922cf7b97f1106",
+    "omni_r2v_4s_360p": "f48ed04edba12ada441876aa85601896508c73944058752bbba6443b88c680e0",
+    "omni_r2v_portrait_4s_360p": "95d12af0a167ab1b3a14783d2a1fb31991217c450ca7ff63203bde67f51025b8",
+    "omni_i2v_4s_first_last_360p": "adba88e5814712ae8e3e27d40b3594f1abf6693fe2846d6500b116009d5bda53",
+    "omni_i2v_portrait_4s_first_last_360p": "c5a28373441719bba682fa227f588e0e6942818bde66dd2805f5240ea061241a",
+    "omni_i2v_4s_360p": "c4b9f74593a3f7c74c378daa1f878f8ddb3da79162fbf31f62e0adbb23a1ac59",
+    "omni_i2v_portrait_4s_360p": "696ef54edc8d2ff98023e50a8fa91904afa97c374af2923b3cbcfd05e98d5e92",
+    "omni_6s": "4fdca47ebe8dc977e7f20ab169e6ef9684f3be8d5845bec4051af14bc2d63031",
+    "omni_portrait_6s": "1183aaf534d305dd9d48d756d58c868dbc6ff8ceec527d648abc2cfdd9e7b86b",
+    "omni_r2v_6s": "10b6f0ec7358c0ef25ad0a31ddc083948396b361a98a60f006a668f96e32779d",
+    "omni_r2v_portrait_6s": "f71611b1109213ec27d86b8ecfda77941752c31759bcbf636cccb0b4dfa8a141",
+    "omni_i2v_6s_first_last": "c4a5f5dbad1bcf4c384afc7ccce5aff86272640dc957f3822916017650fcc26e",
+    "omni_i2v_portrait_6s_first_last": "d8cdf53d8bfffa80359c40364bacee1a0e90c98bc9e759cf80b635b6ae13d884",
+    "omni_i2v_6s": "e2f0b6eda26195e20389b8d0d4aada92944cdf60ffd68665f1717e6eb8cee710",
+    "omni_i2v_portrait_6s": "e06930cf5216fc8e1691b92cba343e02161e90959efecb6613eb5c3329e0c14f",
+    "omni_6s_360p": "2d52868fe94a73463540081b8e50d0d0c537ef27cfd7d405e6aa9038f2367921",
+    "omni_portrait_6s_360p": "3c38125cd2cb44c3d0209b6357df02037c132235deb6d9150c806c66489e4ae0",
+    "omni_r2v_6s_360p": "97bd3c12978ae159385479998359f3cd1be2ff29da65faba9f0d24ae867638a9",
+    "omni_r2v_portrait_6s_360p": "434ccea35bb212d9e2f24db26d74da967e78d338c3bf5ab657ef019c84b467a5",
+    "omni_i2v_6s_first_last_360p": "e78ec28607e0aaf6e63819db5e8936f1587de573a36835cd9740b4c124307ff8",
+    "omni_i2v_portrait_6s_first_last_360p": "1da078080a56364a672e946364745b697bbbce67f466171008b7fe7d9bd39f8f",
+    "omni_i2v_6s_360p": "ff574f8408e9c58469002dda7c808b29ceaafc3672d15bf5fa3ae3e07c5af03d",
+    "omni_i2v_portrait_6s_360p": "cfc0971d06beb0c10df53f0e15781090809e3713fba6ff454f9e1d2fec80ae40",
+    "omni_8s": "b1766efbe0e88050a0a12f85d8da59216d40b833739558c5feb26282ebec2a29",
+    "omni_portrait_8s": "c272259478fc37449f9b703f83890a5d45bd0e597d1523f66bc288c09c80d6d3",
+    "omni_r2v_8s": "43321eb2624a48cf0ceb7ac15aa10fcac92e8bb874b714d204611bfab66cfe60",
+    "omni_r2v_portrait_8s": "4d84ebf80741970be8d52d14e0390e60d7e41f21ecdd89d07b3add5d4b2384f5",
+    "omni_i2v_8s_first_last": "9f646d5321422e662df80b9a87269de59b4cfec8dac4a8a7d69e3307f2c44906",
+    "omni_i2v_portrait_8s_first_last": "63f2d4eaf186cb472e1b0b07c26f7306a64e260017b24534e49a0a21921bf112",
+    "omni_i2v_8s": "22139c4e74ea385a2efef0ae14efca753c4db039483cf067e0cafd9d63d86530",
+    "omni_i2v_portrait_8s": "3137f900645df8788353edbf3d22dbd8401f6e58b4886c34e21103b76d5d9edf",
+    "omni_8s_360p": "e1acdaee3888d8779f82b7e3cb01454fe51175a28432b478f1351d05ba52851b",
+    "omni_portrait_8s_360p": "233cfec9328480fb5795e5b7d658d563df84791d389ce26b51d0377f414bd0dd",
+    "omni_r2v_8s_360p": "721b55e38d6f6d73c673c8e33337046cf6d57ae5c780cf4a614fd86018a5d0bd",
+    "omni_r2v_portrait_8s_360p": "297f4cdc2a3241fe8c8fc776315f79dc25429f8aae4b14c24857e5c91fb2fb38",
+    "omni_i2v_8s_first_last_360p": "838140a98ee64c356e63b7170958cb49921d6543d6843ef17fb0cd61e9b75fd2",
+    "omni_i2v_portrait_8s_first_last_360p": "4d1f742662f80ecd51631ced2015762ffd441c94ce1817997254d1425647f3c9",
+    "omni_i2v_8s_360p": "f697228b223beb8fa0565fbc152bdab7901dc588b1e4cf920d11883bf8ea113a",
+    "omni_i2v_portrait_8s_360p": "9bc22862461c0f63575d2a724cc7530d59d43bda2098a95d351ae2b3d6c7f047",
+    "omni_10s": "676dfb4280c38e31b3240f717423e148d082464dc38b8a023828a5cab71d25dd",
+    "omni_portrait_10s": "d18a972b835439ea5ba3334aef7a9a691d001b9f8f847cd415f0d2a0b6ea0f00",
+    "omni_r2v_10s": "c7a7ee521100f83bab763e052609ac4b8d5e9bfb6c23618ad90dd67f4fb1ab76",
+    "omni_r2v_portrait_10s": "9db2e48c32c9720cfa623aa7de15317a712b22426618d2e35d22649a01ef1044",
+    "omni_i2v_10s_first_last": "5a4b5a26b59f2a9c78d80dbebef0984be5ce23d0434a68a9758e1deb92bda078",
+    "omni_i2v_portrait_10s_first_last": "0fe1d135c8f5f2185490c46348f90f820419f8bd54cf0cf0ddc06363a507200d",
+    "omni_i2v_10s": "39e2c0f3cac33ebef1dc60614eadea1f5a425312e08221739db058fa64f3a589",
+    "omni_i2v_portrait_10s": "a1c5ac2ee02d9e87d87c68417b1573cd2de4b5aa0ee930b724b9b8d42b1e13ad",
+    "omni_10s_360p": "d9d2d350dde8fd93234941b59c5bb5e67e4e01d1c9c154cf77d5c4e1df734d3a",
+    "omni_portrait_10s_360p": "38583b20358e0db1fc861e35c2f428adc214c61a311c590fae893808ebf6653f",
+    "omni_r2v_10s_360p": "f8e1cf997ba884f426922e07468edd86dae9309b33416f4e032e2c30fc97a78a",
+    "omni_r2v_portrait_10s_360p": "fb3db1d781e0f7f966ea8fb515456667cc33c4613533522a0193fea4c0b1db46",
+    "omni_i2v_10s_first_last_360p": "81ce2bede74188f24524a81f67660fce6889b61c5ea4e3ab4e6f3aba9b679f00",
+    "omni_i2v_portrait_10s_first_last_360p": "92d0429f7a9fe31268281e31f7ece9ceba018217684ea3e51134d9f5ab6763db",
+    "omni_i2v_10s_360p": "6b8f6de8f216a520881e99a90e4e095137d29b2a79b3d05471121d2fb5e0be4c",
+    "omni_i2v_portrait_10s_360p": "63dad1600fd69e9bf45941ae06be823d1f78db03e9a0dbc5e2c5d3905480bac5",
+    "omni_edit": "73e0456413a966f008c06fe8c397fbff39d9e7b7ff7f8a29214f3818eb19fafc",
+    "omni_edit_portrait": "262eb4694d5b10b92d186d44f3a669e43eebbc07225f1e2aa1d5eceeca7dec8f",
+    "omni_edit_360p": "7e67d5e782751337b86e3650e78da148352816e0e671e699745a362a740f5067",
+    "omni_edit_portrait_360p": "2ad8b132823ac8c4d2889829eb7e15d3e09a5d495ee9c7829cd01d1d2d05baca",
+    "omni_1080p": "08cd8d11da51eed0280acb07dac0c20a968553805213017dcfccf53e6f672ba2",
+    "omni_4k": "b430c5429c63c846a32bb0dbb3ac5ce940a93db5d68194d287e9d3fd258f08d1",
+    "omni_portrait_1080p": "713b38cd948d1de442e7f9d802ef30b74abd8d618453dbad56988fdf41fac7c5",
+    "omni_portrait_4k": "8515d9491db8f0e054788931fe5c3589407833070f902929059a083c83f48fc1",
+    "omni_4s_1080p": "13d79dba659b563c3f1d58e548742c34eb503e78046d1b2ca481f406bbbfaf2e",
+    "omni_4s_4k": "9d548f46566f1c661e78a2530a01a0b8d78f47dc05afeebf043e779076c64852",
+    "omni_portrait_4s_1080p": "27258cfbddc1c8e5dd32a99397fc9421531ebe757af12afccc51db0e7967b82e",
+    "omni_portrait_4s_4k": "c2a638c1ecc58992d4843ec550adc2a12db360d299752047bf8c626dcbad0700",
+    "omni_r2v_4s_1080p": "cff48ca788b2ae8fe9fa951f8022c619219aaf70c41bcdcfc7e2f2d0ec0727b9",
+    "omni_r2v_4s_4k": "cd26c1f445979ddbde0b91943be479b188c81806b7c835931b3023c4488ede5c",
+    "omni_r2v_portrait_4s_1080p": "68c9746e37b614beb6756371b0078daa19dd01a0b8b57d918d3360f9027226ae",
+    "omni_r2v_portrait_4s_4k": "c8c5d724df857be7254ba068be4800a83b9b48e6462d2113961ea31fec796f95",
+    "omni_i2v_4s_first_last_1080p": "119a2dc9fb1f2fefac1c5ee7b6313dac41f1e60f104b92bb19c36a7f1ce23ebe",
+    "omni_i2v_4s_first_last_4k": "455e08f377eca00a8c612b4d87f29d539db393f383a86a97f48afaa0b6135c0f",
+    "omni_i2v_portrait_4s_first_last_1080p": "e5f898f097dac8012b36dd7a64be5b0125071a6aa21542a54e17dedfab6f4af0",
+    "omni_i2v_portrait_4s_first_last_4k": "326bc3b69c54b964e1fbe4a98f5179e07f0dbacdef1af17fc2d89dad6246bfbe",
+    "omni_i2v_4s_1080p": "8a944e81248c563f1e6c533d351e59995d97cb388d5dad5c97553e461368e71a",
+    "omni_i2v_4s_4k": "a4a9d56d37e3f0227415e8b8e5e2bc9d7a5566144f3825121c8fdf45aab1ef5f",
+    "omni_i2v_portrait_4s_1080p": "559712f738bc108bd4352499cfda2d72e193d5268e7eee07de5a96c84682ecaf",
+    "omni_i2v_portrait_4s_4k": "6354982090c23fbd212042d96e4ec92647939ac24f8494d0445dc71919789c27",
+    "omni_6s_1080p": "7d6fd08ac5dfc03b1044989bc201c6005d944e5764bc6b8246221ba61231231d",
+    "omni_6s_4k": "3ccd82c0afb6bba7f99a08ec2bbb3779148c6ae9f72e14e18f2245bf6a4dd14e",
+    "omni_portrait_6s_1080p": "2626710d6e23da122780b2a21b719799f181ab7102b75d8690c8fafd0c2a8b27",
+    "omni_portrait_6s_4k": "a6bf74790451eb37a3e85969f8ef0598a0639613e8ace2f26a737238e6db8d8b",
+    "omni_r2v_6s_1080p": "7fbbb904735320a1827a9bd442c840c893c2034980fdf126d75056006fde2cd4",
+    "omni_r2v_6s_4k": "15687a069e4f185a1f217483029cba18e2b573b8d0212645724357d0c40f064d",
+    "omni_r2v_portrait_6s_1080p": "fed9bcbb461614c1f4214f9463e993a4d087a0614b4e0a0527f73417eaffb360",
+    "omni_r2v_portrait_6s_4k": "d5b4a6f3cf6d76c87d7818294b78b4ae094fd00eb4f84113069dc8af994d0a63",
+    "omni_i2v_6s_first_last_1080p": "273d72aba28c8db046eb27485846b60dbdb0854034f1113339078164cfb91726",
+    "omni_i2v_6s_first_last_4k": "b174f8de37c5b8eb9af01981e83b6b92b763417d76c91ba1438790eac9457227",
+    "omni_i2v_portrait_6s_first_last_1080p": "92126baa478d8654a4ea7418985db601201ee5a20cc6cabe2e35478f0a8a874a",
+    "omni_i2v_portrait_6s_first_last_4k": "d301b6deed05fb5c121ecbcb6b8c1d51bb54035f8d51615f163fa611ca96b8c5",
+    "omni_i2v_6s_1080p": "5614c6b753ed5feed67b3d0fb8a2209df92dff6b5e5e2eb3d5d000d7e53e7810",
+    "omni_i2v_6s_4k": "9773defea6cd2b54083883d5fa48925760cf464af1ee5aaf9cdf46aa6168dbe2",
+    "omni_i2v_portrait_6s_1080p": "f335fdde6203cb58e88856e4ee68894dedbce23390a2f6bed774651061ed1453",
+    "omni_i2v_portrait_6s_4k": "b86b92b7e20020768d87248a1453135d436e7066f292cd66c9528325bf7eb7b4",
+    "omni_8s_1080p": "c44fea59cae66b064f25978439ecd66faecb81a00f52a0bb3cb6152fe6f09bbb",
+    "omni_8s_4k": "8584c6bf5d78b20ecc645c80f5e8352a0d87b83d978f9494a409376d4853ee68",
+    "omni_portrait_8s_1080p": "54a511a8355d09753ef198ceea241d58cbe97ce53a5ccbc0640058fd37739409",
+    "omni_portrait_8s_4k": "d9169c7a827db386e8389c7ef3fb05efbf3245ef42721b67944f07fc28dd9822",
+    "omni_r2v_8s_1080p": "062e62f6eee75b51b165b859d1c78a06bde6863dec0700714bb48cd1fff720ac",
+    "omni_r2v_8s_4k": "d0b511fa7ab3bcbef5fd683ee30b2c28324c0cfde4b80a6aae880362c946545d",
+    "omni_r2v_portrait_8s_1080p": "892ec04c6c4f9915d68cb47073e18e0c3f7e43cf6a7927537cdba34ddd450633",
+    "omni_r2v_portrait_8s_4k": "50fdfb4f90a13d2f7c03ccb40d417bb0a47a8f3d57632e85702047d9622703a2",
+    "omni_i2v_8s_first_last_1080p": "e430468ae8850e6cddd139e717f19b05924e42718b7218be0941acb968083725",
+    "omni_i2v_8s_first_last_4k": "0b4b2f2d1e6cd82f7b6e79ce283ee69e39087058736ad0e8b2dac348dfc059e3",
+    "omni_i2v_portrait_8s_first_last_1080p": "7697da6a648ee7a40c3bef2bb3043b4b11b27b7fd1e0512e89d72b9c228d8057",
+    "omni_i2v_portrait_8s_first_last_4k": "9b4c5773a7013dd195f59b8f50c02aa690add6916bd6b47c7642d0f1df08500a",
+    "omni_i2v_8s_1080p": "9a36764dab0f94ead3f85aa6720f6519f23cbdcc36ed9d5b12be1504541055d8",
+    "omni_i2v_8s_4k": "5575bc20d400c5891650eb54be8849b69658be8dcbd0a4191c79ff4208a38de4",
+    "omni_i2v_portrait_8s_1080p": "b3dd7ba90a037b70acd8ee47c72ba42caa3a12bdaa3c998bb4e6fb36ade2607b",
+    "omni_i2v_portrait_8s_4k": "5c2c39da86a420c6ae88105a63e322a9b93157b843068a62ee88958716d6c843",
+    "omni_10s_1080p": "ccc7ad2addac85b04e33a7409f44600caba95fad3dea52e61779ee80896cfbc4",
+    "omni_10s_4k": "8f46d4dd6e2e07131cf69befa63cfb14864a16ccbf5f207353373d3512c8907a",
+    "omni_portrait_10s_1080p": "ed6b0af7dc540cf4bc6c61db5b720ebce0f340e3884835859d17bcd0ff1cb003",
+    "omni_portrait_10s_4k": "a5e413cc4ffceadcc8545071e02dd57f0c29a8991059db38ebbcb4a670b4011d",
+    "omni_r2v_10s_1080p": "c7d18fbc73a09c7739fba5e70df9e4720ddd851d71df76fb5aecace181e22bf1",
+    "omni_r2v_10s_4k": "3b02d08fdb7cc6903172b576223b2f8ff71b8ec6701186c8a2e52197b440cd66",
+    "omni_r2v_portrait_10s_1080p": "830f46a9cce2a53984fdd2b6c18330b2d822cec2cac167ab66f23e3caa668f3a",
+    "omni_r2v_portrait_10s_4k": "134be07220cc6355240a311e42b1c7a53b3e92bc1740852791a899b5ef64a7be",
+    "omni_i2v_10s_first_last_1080p": "6303f92c902ba75bba731e7631ad5fa6e6f984ed00a9f4a01528dc044392f55b",
+    "omni_i2v_10s_first_last_4k": "c54711e1f36ccc18b939f3e153c3b909a1c0585a1a4861a229bd90f68a4db61e",
+    "omni_i2v_portrait_10s_first_last_1080p": "b7695b225c8e14b3cbe6fe7dd1468bc9ea4bbf56d3c02399ef482073750f758f",
+    "omni_i2v_portrait_10s_first_last_4k": "3d485a90498e20e2101c5cfa315efcd110983235e2382c1c1c9bd50270f0f7cb",
+    "omni_i2v_10s_1080p": "e07c0fe0847172902447e3261c2c235df5b77cc9976e5dd59439f58088ab3b3c",
+    "omni_i2v_10s_4k": "d03327e49597b12607ab6557eae7bb2424d99893e6d7f8f514cedff03843c04f",
+    "omni_i2v_portrait_10s_1080p": "a9410962ea9d938ebcc776b4e4f3c16199da25cf2f89a19b5078c9493411fca5",
+    "omni_i2v_portrait_10s_4k": "bf6d8f5733c0e3af0cae34b72eb653b8ceedd6bee492a148469560fb6c79a53a",
+    "omni_edit_1080p": "1f4dd5654f8f1191babb9cee1a88f9cc385a5862700e54e547e7489733065093",
+    "omni_edit_4k": "38bc3470fdadeea813180497c5305f39b8b2a5085ee8d2e5d2c47db02aff0df3",
+    "omni_edit_portrait_1080p": "7c4811740365cf3d545e8ccd31289f719796a37cb43b773c850daa257ada4ab3",
+    "omni_edit_portrait_4k": "7b8d0bdcaa7c7da7f1f0a304c71ceaf29e054e7b7050c2691e2bf20449f06a9f",
+    "gemini-3.1-flash-image-lite-landscape": "d10671edcdcc6b113c392928ccfe14cc0b62a572f15f4b1ff2c1936f502d6d78",
+    "gemini-3.1-flash-image-lite-portrait": "345d2afdf08c8fe20951b55d697bc46761a60b656812f0c3c57d331686066dc8",
+    "gemini-3.1-flash-image-lite-square": "073db511ac35742decc102fa9df16a3042e88c6533bb0e57dc6304421248bcd8",
+    "gemini-3.1-flash-image-lite-four-three": "a7917f2b4d3b1437ccb2e52a75cd5a3c2da3c8a2a8d0e16b28e4ce9caddedebf",
+    "gemini-3.1-flash-image-lite-three-four": "73ff96889f3de698c89cd88cd72a34b7b0eff86f2172eee322674610fe35dd5b",
+    "veo_3_1_r2v_lite_landscape": "13ccaf5dc8137fa5d84b58ec881b48f78a7adaeb4c8047a0ac964341429a286c",
+    "veo_3_1_r2v_lite_portrait": "d0e1e704a52ca45caea3862e90812c3dcaa61515c2f940a11e3850715503f9e8",
+    "veo_3_1_extend_fast_landscape": "1cbd24d4fbd5bb2e36166435c39efad0e1405848a1e1565efd881f25a1757162",
+    "veo_3_1_extend_fast_landscape_ultra": "32238536d54cd1381cf9b7a8850f274f44603ab8e32d2c430e6faad30b2e4796",
+    "veo_3_1_extension_lite_landscape": "aa5d7a5f9dea0af862fcdcfe37be09e8ec0d7c2c1f9930386cd36abec7f58e49",
+    "veo_3_1_extend_fast_portrait": "0cefe8738871db2b4b26cf70ea1a79304b72e82d44cbdd8cd63023ddcda399a2",
+    "veo_3_1_extend_fast_portrait_ultra": "defc01bda740cb38f294be9f2732fd09548c2a035b619e018b1c1be00e4fac13",
+    "veo_3_1_extension_lite_portrait": "970b45564cc337ff87d789f49eac2963f7e64a998d84e5989ea0b9eedd3faa61",
+    "veo_3_1_t2v_fast_4s": "064c2b305f0ccbd4212f08ec9db05777950c7a5e05f08ecb8a5f449807096141",
+    "veo_3_1_t2v_fast_portrait_4s": "df6f01e1dfb01a25fb6202d3d7b9d56caad7687d0b254db16a37dd8cf8191734",
+    "veo_3_1_t2v_lite_4s_landscape": "fa48813888875e4770b0b7fbfe3b66ea8c5d461a107763b1f5a10ae64c180136",
+    "veo_3_1_t2v_lite_4s_portrait": "c8c5e5b927725ed5b95ae9affb1575018e66ff89d1c238100f5b48da5a60bc55",
+    "veo_3_1_t2v_4s": "af61c4c204469a73feef3d1153d30038d77b72ba43292054fc25bc499d48d2ca",
+    "veo_3_1_t2v_portrait_4s": "ac9e8f83d26718a1642bc10007c868ffffccb84efa4413ab33a00900deb5e751",
+    "veo_3_1_i2v_s_fast_4s_fl": "a86dd514d0ece79cd7c0975a04c27ed18a7fc66bd7383278c9cd3bd364e82ee8",
+    "veo_3_1_i2v_s_fast_portrait_4s_fl": "8d64f8bd4f5caf096dcb04c4cf2be5fa8fe10fed3ee598ac563702b4b8dbee0c",
+    "veo_3_1_i2v_lite_4s_landscape": "e33019f890de89483d18e45aee4152a7f44a6e2726d65b7b2faed970fa575eba",
+    "veo_3_1_i2v_lite_4s_portrait": "4e0b49b8c38971b912f5a21d56b3dbbbaa1199fd24774eac0ac24227b47ae430",
+    "veo_3_1_interpolation_lite_4s_landscape": "89d1528f0ec1d1b98e1dc8415c621f9e8f993acae674468b79c17981f5ec0a8c",
+    "veo_3_1_interpolation_lite_4s_portrait": "b32d0c0c80249d854b1b5a8a542791b0ec1d91757895ff1a3081571dc6b2162c",
+    "veo_3_1_i2v_s_4s": "e3a03e74d23bc018a70cc67834120ee17c0e6fa570417004cc526dde6cd84d27",
+    "veo_3_1_i2v_s_portrait_4s": "36bd92063e3bc341868bd5996e5f2c30acf1f30243daaf71a977b27b4d26ceaa",
+    "veo_3_1_t2v_4s_4k": "a6f2e07fc0f60de43572a8f37d7b6dd6ff7905ca75c5fee6ad053868763072d9",
+    "veo_3_1_t2v_portrait_4s_4k": "3a6f3a0e9f8d88f755cec6e4d9651be88db498b52c466ecf6eaec2cd1c0980b0",
+    "veo_3_1_i2v_s_4s_4k": "050a5398900108cfdb9d3e76f215ad390041ebd6eae56f36baf9a614507b2b81",
+    "veo_3_1_i2v_s_portrait_4s_4k": "39899234bcc7c9283e2a1e857353d39f84f159c95fe288a6d880f5569298dfd2",
+    "veo_3_1_t2v_4s_1080p": "73ac380144b9f82722ca0c84a89957a5e7123a703adb1d96ca6461f5e1db45c3",
+    "veo_3_1_t2v_portrait_4s_1080p": "81f104aec2a4584f330d3fd93d84f1be2ab7d7360fc1a835ff5ea1955adc1c1c",
+    "veo_3_1_i2v_s_4s_1080p": "79033ccb6c24f51b1bd778c81c3aef76edcbdd877e3d9ca9687984b28c464a0b",
+    "veo_3_1_i2v_s_portrait_4s_1080p": "09aeea1b1163ba1a5453730e7932939f371959e7929e08abc6a6225e6c86cfa3",
+    "veo_3_1_t2v_fast_6s": "f9db92c7b411e8f8a9dc5b9eae984ef584a135f8271f51293510efb8a4d6d54c",
+    "veo_3_1_t2v_fast_portrait_6s": "1bf4ef87d73971efdd4afd941e9a9fb19ca6887a7e432ef995e288062953f5e7",
+    "veo_3_1_t2v_lite_6s_landscape": "1e11c9f11cbf48fe66cd5a2b183f917a685557856ce345d798d517e71f6dca49",
+    "veo_3_1_t2v_lite_6s_portrait": "b3339611f7cc385b8107faaaf5131f9bcd16945e5c50948fc88ea57a1770d0f6",
+    "veo_3_1_t2v_6s": "435a1f82972147424d1a54c9fb7dcb5aacc4eb400ea8ccb2497d8b0d94e85286",
+    "veo_3_1_t2v_portrait_6s": "0cdf08e12f1f147ef04f0b12889aea5c342f8d922d917d589160a6ca3e0c92c7",
+    "veo_3_1_i2v_s_fast_6s_fl": "34c698e092f809031933806409293b630e43e775e19f65e75cd6990136927808",
+    "veo_3_1_i2v_s_fast_portrait_6s_fl": "fdb40f9124d6c27dc4bd0023d5d03e25854f0d78982c45d789ab7e4b8c902d70",
+    "veo_3_1_i2v_lite_6s_landscape": "84a63c99797927acac4b23190102ff6f18b57e9cad6a06381145658d1340ccfc",
+    "veo_3_1_i2v_lite_6s_portrait": "046e96c8b5f6167214ea9f6c996beee094548298ce1d85dabcdcbef172d84629",
+    "veo_3_1_interpolation_lite_6s_landscape": "66bd28f333ff1998f31a4d71a2d88e4dc3977e6a562b4a2296e1cb4bf87d95f7",
+    "veo_3_1_interpolation_lite_6s_portrait": "9bb197d2861b7e2f85968be3e70d2a54204729e09dfbc38e07ba992c5bf1fd7a",
+    "veo_3_1_i2v_s_6s": "c8e8a1f916f1bd1101fde5ae210b5f02ac8ada02415f9a0236554b0be044970b",
+    "veo_3_1_i2v_s_portrait_6s": "90ad633941b51ebf78b992dce70d835c474d42134ff6dad98ee47eaa0a6a6a66",
+    "veo_3_1_t2v_6s_4k": "db6d73fa2450f2de7bbf3bf64b4f58471821ad215ba149954d96234e732c355e",
+    "veo_3_1_t2v_portrait_6s_4k": "2132ad7a68e711473a6378affcfbbc66d337964a2a2bc49d9facaa57088d4ba6",
+    "veo_3_1_i2v_s_6s_4k": "269eb1e9d9b107325e61d2851ffc9156426fb86726e147a530b8379611c51f49",
+    "veo_3_1_i2v_s_portrait_6s_4k": "935cd48cafd9d21ecd5b311ddbd3fbafcbc1cbadadae521bdd4f653520feee2e",
+    "veo_3_1_t2v_6s_1080p": "12a5e9b63400ecb10ac8c8d1c7095217e90fa11aa17dd5d01138a8864f1182c8",
+    "veo_3_1_t2v_portrait_6s_1080p": "099c9ccef502d44bfd81f90a751de4033647f78be12ed745581787027b761345",
+    "veo_3_1_i2v_s_6s_1080p": "c0b6c3bcad61d9bfa733cb1cabdcc5a86c952ad7335948767f35726a7977eb51",
+    "veo_3_1_i2v_s_portrait_6s_1080p": "21de980f172959547a5587fb82ecb76190953b1123db986f68dd8051f28300b0",
+    "veo_3_1_t2v_4k": "c1f980ac4c6c365f2d2f57bc75758635632402eff010de6a3b2d1e607f278140",
+    "veo_3_1_t2v_portrait_4k": "68983f0b01de99d4087a28acfec2007504695afd863262882af507a40b5fab7f",
+    "veo_3_1_i2v_s_4k": "0f07d26ad5d24ca36e0e76d0d8aec9e8ac4c0af8bd19258d5cd29068130f4ce2",
+    "veo_3_1_i2v_s_portrait_4k": "47c20c86ce1251f6cbe69950cd090cbd076a8fa78c16ffaee754b40a71860fc1",
+    "veo_3_1_t2v_1080p": "e3615cb2032b1f2a8378c61b3c97c31f4dda4f3b914adfbb0d015a6296ca598c",
+    "veo_3_1_t2v_portrait_1080p": "969d5061ffe32d018c7ca316e498625a6ca14780a37e7fa7dbc8ad8a7efa527e",
+    "veo_3_1_i2v_s_1080p": "97ef9628ce6ecbd0033b280e087afce53ee75b5286b3f2dce22f29446d53c228",
+    "veo_3_1_i2v_s_portrait_1080p": "cd212b53aa98cbf1d9eef07265cfa5ea99799f550f5c6c4cf405694eb829e4f4",
+    "veo_3_1_t2v_fast_landscape_4s": "064c2b305f0ccbd4212f08ec9db05777950c7a5e05f08ecb8a5f449807096141",
+    "veo_3_1_t2v_landscape_4s": "af61c4c204469a73feef3d1153d30038d77b72ba43292054fc25bc499d48d2ca",
+    "veo_3_1_i2v_s_fast_landscape_4s_fl": "a86dd514d0ece79cd7c0975a04c27ed18a7fc66bd7383278c9cd3bd364e82ee8",
+    "veo_3_1_i2v_s_landscape_4s": "e3a03e74d23bc018a70cc67834120ee17c0e6fa570417004cc526dde6cd84d27",
+    "veo_3_1_t2v_lite_landscape_4s": "fa48813888875e4770b0b7fbfe3b66ea8c5d461a107763b1f5a10ae64c180136",
+    "veo_3_1_t2v_lite_portrait_4s": "c8c5e5b927725ed5b95ae9affb1575018e66ff89d1c238100f5b48da5a60bc55",
+    "veo_3_1_i2v_lite_landscape_4s": "e33019f890de89483d18e45aee4152a7f44a6e2726d65b7b2faed970fa575eba",
+    "veo_3_1_i2v_lite_portrait_4s": "4e0b49b8c38971b912f5a21d56b3dbbbaa1199fd24774eac0ac24227b47ae430",
+    "veo_3_1_interpolation_lite_landscape_4s": "89d1528f0ec1d1b98e1dc8415c621f9e8f993acae674468b79c17981f5ec0a8c",
+    "veo_3_1_interpolation_lite_portrait_4s": "b32d0c0c80249d854b1b5a8a542791b0ec1d91757895ff1a3081571dc6b2162c",
+    "veo_3_1_t2v_landscape_4s_4k": "a6f2e07fc0f60de43572a8f37d7b6dd6ff7905ca75c5fee6ad053868763072d9",
+    "veo_3_1_i2v_s_landscape_4s_4k": "050a5398900108cfdb9d3e76f215ad390041ebd6eae56f36baf9a614507b2b81",
+    "veo_3_1_t2v_landscape_4s_1080p": "73ac380144b9f82722ca0c84a89957a5e7123a703adb1d96ca6461f5e1db45c3",
+    "veo_3_1_i2v_s_landscape_4s_1080p": "79033ccb6c24f51b1bd778c81c3aef76edcbdd877e3d9ca9687984b28c464a0b",
+    "veo_3_1_t2v_fast_landscape_6s": "f9db92c7b411e8f8a9dc5b9eae984ef584a135f8271f51293510efb8a4d6d54c",
+    "veo_3_1_t2v_landscape_6s": "435a1f82972147424d1a54c9fb7dcb5aacc4eb400ea8ccb2497d8b0d94e85286",
+    "veo_3_1_i2v_s_fast_landscape_6s_fl": "34c698e092f809031933806409293b630e43e775e19f65e75cd6990136927808",
+    "veo_3_1_i2v_s_landscape_6s": "c8e8a1f916f1bd1101fde5ae210b5f02ac8ada02415f9a0236554b0be044970b",
+    "veo_3_1_t2v_lite_landscape_6s": "1e11c9f11cbf48fe66cd5a2b183f917a685557856ce345d798d517e71f6dca49",
+    "veo_3_1_t2v_lite_portrait_6s": "b3339611f7cc385b8107faaaf5131f9bcd16945e5c50948fc88ea57a1770d0f6",
+    "veo_3_1_i2v_lite_landscape_6s": "84a63c99797927acac4b23190102ff6f18b57e9cad6a06381145658d1340ccfc",
+    "veo_3_1_i2v_lite_portrait_6s": "046e96c8b5f6167214ea9f6c996beee094548298ce1d85dabcdcbef172d84629",
+    "veo_3_1_interpolation_lite_landscape_6s": "66bd28f333ff1998f31a4d71a2d88e4dc3977e6a562b4a2296e1cb4bf87d95f7",
+    "veo_3_1_interpolation_lite_portrait_6s": "9bb197d2861b7e2f85968be3e70d2a54204729e09dfbc38e07ba992c5bf1fd7a",
+    "veo_3_1_t2v_landscape_6s_4k": "db6d73fa2450f2de7bbf3bf64b4f58471821ad215ba149954d96234e732c355e",
+    "veo_3_1_i2v_s_landscape_6s_4k": "269eb1e9d9b107325e61d2851ffc9156426fb86726e147a530b8379611c51f49",
+    "veo_3_1_t2v_landscape_6s_1080p": "12a5e9b63400ecb10ac8c8d1c7095217e90fa11aa17dd5d01138a8864f1182c8",
+    "veo_3_1_i2v_s_landscape_6s_1080p": "c0b6c3bcad61d9bfa733cb1cabdcc5a86c952ad7335948767f35726a7977eb51",
+    "veo_3_1_t2v_landscape_4k": "c1f980ac4c6c365f2d2f57bc75758635632402eff010de6a3b2d1e607f278140",
+    "veo_3_1_i2v_s_landscape_4k": "0f07d26ad5d24ca36e0e76d0d8aec9e8ac4c0af8bd19258d5cd29068130f4ce2",
+    "veo_3_1_t2v_landscape_1080p": "e3615cb2032b1f2a8378c61b3c97c31f4dda4f3b914adfbb0d015a6296ca598c",
+    "veo_3_1_i2v_s_landscape_1080p": "97ef9628ce6ecbd0033b280e087afce53ee75b5286b3f2dce22f29446d53c228",
+    "veo_3_1_r2v_fast_landscape": "4f4f7411101957a6dbca51f29f45018caa1b018b062ea514e7d548bcc10e3998",
+    "veo_3_1_r2v_fast_landscape_ultra": "c29a41138b95d01a078f49cdd88607ef70e15a3d7e4dfc8013984b649bb7bf01",
+    "veo_3_1_r2v_fast_landscape_ultra_relaxed": "232667ec315699747cdb59b1d4303f397d531de9d573c505930ee9e98b91d556",
+    "veo_3_1_r2v_fast_landscape_ultra_4k": "fd02957fb77a5fa7dabad2319144564e7c4cf984cc3181b884c660e1acb0e0c7",
+    "veo_3_1_r2v_fast_landscape_ultra_1080p": "b7eaa46eee2a32f64913c81b263112285be368f79bab9fe96173b53e1c6cb9e9",
+    "veo_3_1_t2v_fast_8s": "82a31de24c2beab32dd4679c7d9e9ec9ac59de19ab62d827bc8a82ef78c57e57",
+    "veo_3_1_t2v_fast_portrait_8s": "1efc2dd352c13f06fa38d89117eb80ceaf2ab86a57d2b3ae95fa8b97007b0c14",
+    "veo_3_1_t2v_fast_landscape_8s": "82a31de24c2beab32dd4679c7d9e9ec9ac59de19ab62d827bc8a82ef78c57e57",
+    "veo_3_1_t2v_8s": "fd45cfc552803d6f4153c5df7bcd8657ac6cde9f114b6eb1275580ed09bd19f4",
+    "veo_3_1_t2v_portrait_8s": "f1edb440c3882ec76b3dadb21553d14dcad95e44ca09e8fb09003225848b825a",
+    "veo_3_1_t2v_landscape_8s": "fd45cfc552803d6f4153c5df7bcd8657ac6cde9f114b6eb1275580ed09bd19f4",
+    "veo_3_1_i2v_s_fast_8s_fl": "d96dc4f5a85d4f31dfbb9d85a9a4e21ab412a5881cf98546770f52bb15567246",
+    "veo_3_1_i2v_s_fast_portrait_8s_fl": "3e0504f48fe59b078ee8c91319f7eedd829848f844ff3394c55554efd4ca1dcd",
+    "veo_3_1_i2v_s_fast_landscape_8s_fl": "d96dc4f5a85d4f31dfbb9d85a9a4e21ab412a5881cf98546770f52bb15567246",
+    "veo_3_1_i2v_s_8s": "cb7e05e8b1ff2d4bfbbd142f1cc1fdf6d388c7c59b4ef7aaeac1d6466dba78b2",
+    "veo_3_1_i2v_s_portrait_8s": "5018f02e9fa274816a3521ada6ebae7a65effc5d576eebeee306b8790f755f8e",
+    "veo_3_1_i2v_s_landscape_8s": "cb7e05e8b1ff2d4bfbbd142f1cc1fdf6d388c7c59b4ef7aaeac1d6466dba78b2",
+    "veo_3_1_r2v_fast_8s": "4f4f7411101957a6dbca51f29f45018caa1b018b062ea514e7d548bcc10e3998",
+    "veo_3_1_r2v_fast_portrait_8s": "62ffee347de8b933d929ca2c431393328c315b5b856be9fde9cecf87d86da6a5",
+    "veo_3_1_r2v_fast_landscape_8s": "4f4f7411101957a6dbca51f29f45018caa1b018b062ea514e7d548bcc10e3998",
+    "veo_3_1_r2v_fast_ultra_8s": "c29a41138b95d01a078f49cdd88607ef70e15a3d7e4dfc8013984b649bb7bf01",
+    "veo_3_1_r2v_fast_portrait_ultra_8s": "3a13e22f479c83dfabb42a10a4ff80be315e14c013c77900f413cab6a311fed4",
+    "veo_3_1_r2v_fast_landscape_ultra_8s": "c29a41138b95d01a078f49cdd88607ef70e15a3d7e4dfc8013984b649bb7bf01",
+    "veo_3_1_r2v_fast_ultra_relaxed_8s": "232667ec315699747cdb59b1d4303f397d531de9d573c505930ee9e98b91d556",
+    "veo_3_1_r2v_fast_portrait_ultra_relaxed_8s": "e9c3b40c444b7d61ee9dbab1e9f3329edc409421863f35c3ad59ab9402421a90",
+    "veo_3_1_r2v_fast_landscape_ultra_relaxed_8s": "232667ec315699747cdb59b1d4303f397d531de9d573c505930ee9e98b91d556",
+    "veo_3_1_t2v_lite_8s_landscape": "9d65f005b14763b45c05b9f5ecec49548f3fa86b235fa9b3ad21976fb3635256",
+    "veo_3_1_t2v_lite_8s_portrait": "89fbf001000ddb37c2a6e8b96f396108f4ac6f527afd0a6d3c659b474017b0f9",
+    "veo_3_1_t2v_lite_landscape_8s": "9d65f005b14763b45c05b9f5ecec49548f3fa86b235fa9b3ad21976fb3635256",
+    "veo_3_1_t2v_lite_portrait_8s": "89fbf001000ddb37c2a6e8b96f396108f4ac6f527afd0a6d3c659b474017b0f9",
+    "veo_3_1_i2v_lite_8s_landscape": "4d264a4df10c13a6a009c0ea4579bbcdcca2bcc6078ac39ac357062bb742eaec",
+    "veo_3_1_i2v_lite_8s_portrait": "3f859e345981444d658478a21744446f0ad0f0e13d904e2be1744261d630aa42",
+    "veo_3_1_i2v_lite_landscape_8s": "4d264a4df10c13a6a009c0ea4579bbcdcca2bcc6078ac39ac357062bb742eaec",
+    "veo_3_1_i2v_lite_portrait_8s": "3f859e345981444d658478a21744446f0ad0f0e13d904e2be1744261d630aa42",
+    "veo_3_1_interpolation_lite_8s_landscape": "d2276fc59ba50a6b4b64bc79b7dd28732ee24e39d396424e7ccf2817170d19d7",
+    "veo_3_1_interpolation_lite_8s_portrait": "7e183f663515b590396e60310133f7bf6e03634a8caa7b5526e419104270442e",
+    "veo_3_1_interpolation_lite_landscape_8s": "d2276fc59ba50a6b4b64bc79b7dd28732ee24e39d396424e7ccf2817170d19d7",
+    "veo_3_1_interpolation_lite_portrait_8s": "7e183f663515b590396e60310133f7bf6e03634a8caa7b5526e419104270442e",
+    "veo_3_1_t2v_8s_4k": "c1f980ac4c6c365f2d2f57bc75758635632402eff010de6a3b2d1e607f278140",
+    "veo_3_1_t2v_portrait_8s_4k": "68983f0b01de99d4087a28acfec2007504695afd863262882af507a40b5fab7f",
+    "veo_3_1_t2v_landscape_8s_4k": "c1f980ac4c6c365f2d2f57bc75758635632402eff010de6a3b2d1e607f278140",
+    "veo_3_1_i2v_s_8s_4k": "0f07d26ad5d24ca36e0e76d0d8aec9e8ac4c0af8bd19258d5cd29068130f4ce2",
+    "veo_3_1_i2v_s_portrait_8s_4k": "47c20c86ce1251f6cbe69950cd090cbd076a8fa78c16ffaee754b40a71860fc1",
+    "veo_3_1_i2v_s_landscape_8s_4k": "0f07d26ad5d24ca36e0e76d0d8aec9e8ac4c0af8bd19258d5cd29068130f4ce2",
+    "veo_3_1_t2v_8s_1080p": "e3615cb2032b1f2a8378c61b3c97c31f4dda4f3b914adfbb0d015a6296ca598c",
+    "veo_3_1_t2v_portrait_8s_1080p": "969d5061ffe32d018c7ca316e498625a6ca14780a37e7fa7dbc8ad8a7efa527e",
+    "veo_3_1_t2v_landscape_8s_1080p": "e3615cb2032b1f2a8378c61b3c97c31f4dda4f3b914adfbb0d015a6296ca598c",
+    "veo_3_1_i2v_s_8s_1080p": "97ef9628ce6ecbd0033b280e087afce53ee75b5286b3f2dce22f29446d53c228",
+    "veo_3_1_i2v_s_portrait_8s_1080p": "cd212b53aa98cbf1d9eef07265cfa5ea99799f550f5c6c4cf405694eb829e4f4",
+    "veo_3_1_i2v_s_landscape_8s_1080p": "97ef9628ce6ecbd0033b280e087afce53ee75b5286b3f2dce22f29446d53c228"
+  },
+  "public_models": {
+    "gemini-3.1-flash-image": {
+      "type": "image",
+      "description": "Nano Banana 2",
+      "capabilities": {
+        "aspectRatios": [
+          "16:9",
+          "9:16",
+          "1:1",
+          "4:3",
+          "3:4"
+        ],
+        "imageSizes": [
+          "1k",
+          "2k",
+          "4k"
+        ],
+        "minImages": 0,
+        "maxImages": 10
+      },
+      "defaults": {
+        "aspectRatio": "16:9",
+        "imageSize": "1k"
+      }
+    },
+    "gemini-3.1-flash-image-lite": {
+      "type": "image",
+      "description": "Nano Banana 2 Lite",
+      "capabilities": {
+        "aspectRatios": [
+          "16:9",
+          "9:16",
+          "1:1",
+          "4:3",
+          "3:4"
+        ],
+        "imageSizes": [
+          "1k"
+        ],
+        "minImages": 0,
+        "maxImages": 10
+      },
+      "defaults": {
+        "aspectRatio": "16:9",
+        "imageSize": "1k"
+      }
+    },
+    "gemini-3.0-pro-image": {
+      "type": "image",
+      "description": "Nano Banana Pro",
+      "capabilities": {
+        "aspectRatios": [
+          "16:9",
+          "9:16",
+          "1:1",
+          "4:3",
+          "3:4"
+        ],
+        "imageSizes": [
+          "1k",
+          "2k",
+          "4k"
+        ],
+        "minImages": 0,
+        "maxImages": 10
+      },
+      "defaults": {
+        "aspectRatio": "16:9",
+        "imageSize": "1k"
+      }
+    },
+    "imagen-4.0-generate-preview": {
+      "type": "image",
+      "description": "Imagen 4.0",
+      "capabilities": {
+        "aspectRatios": [
+          "16:9",
+          "9:16"
+        ],
+        "imageSizes": [
+          "1k"
+        ],
+        "minImages": 0,
+        "maxImages": 10
+      },
+      "defaults": {
+        "aspectRatio": "16:9",
+        "imageSize": "1k"
+      }
+    },
+    "veo_3_1": {
+      "type": "video",
+      "description": "Veo 3.1",
+      "capabilities": {
+        "aspectRatios": [
+          "16:9",
+          "9:16"
+        ],
+        "qualities": [
+          "quality",
+          "fast",
+          "lite"
+        ],
+        "priorities": [
+          "standard",
+          "relaxed"
+        ],
+        "modes": {
+          "text_to_video": {
+            "minImages": 0,
+            "maxImages": 0,
+            "videoInput": false,
+            "mediaId": false
+          },
+          "image_to_video": {
+            "minImages": 1,
+            "maxImages": 1,
+            "videoInput": false,
+            "mediaId": false
+          },
+          "first_last_frame": {
+            "minImages": 2,
+            "maxImages": 2,
+            "videoInput": false,
+            "mediaId": false
+          },
+          "reference_to_video": {
+            "minImages": 1,
+            "maxImages": 3,
+            "videoInput": false,
+            "mediaId": false
+          },
+          "extend": {
+            "minImages": 0,
+            "maxImages": 0,
+            "videoInput": false,
+            "mediaId": true
+          }
+        },
+        "combinations": [
+          {
+            "mode": "text_to_video",
+            "quality": "quality",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p",
+              "1080p",
+              "4k"
+            ]
+          },
+          {
+            "mode": "image_to_video",
+            "quality": "quality",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p",
+              "1080p",
+              "4k"
+            ]
+          },
+          {
+            "mode": "first_last_frame",
+            "quality": "quality",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p",
+              "1080p",
+              "4k"
+            ]
+          },
+          {
+            "mode": "text_to_video",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "text_to_video",
+            "quality": "lite",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "image_to_video",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "image_to_video",
+            "quality": "lite",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "first_last_frame",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "first_last_frame",
+            "quality": "lite",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "text_to_video",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "1080p",
+              "4k"
+            ]
+          },
+          {
+            "mode": "reference_to_video",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "reference_to_video",
+            "quality": "lite",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "extend",
+            "quality": "quality",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "extend",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "extend",
+            "quality": "lite",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "image_to_video",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "1080p",
+              "4k"
+            ],
+            "minTier": "ultra"
+          },
+          {
+            "mode": "first_last_frame",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "1080p",
+              "4k"
+            ],
+            "minTier": "ultra"
+          },
+          {
+            "mode": "reference_to_video",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "1080p",
+              "4k"
+            ],
+            "minTier": "ultra"
+          },
+          {
+            "mode": "text_to_video",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ],
+            "priority": "relaxed",
+            "minTier": "ultra"
+          },
+          {
+            "mode": "image_to_video",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ],
+            "priority": "relaxed",
+            "minTier": "ultra"
+          },
+          {
+            "mode": "first_last_frame",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ],
+            "priority": "relaxed",
+            "minTier": "ultra"
+          },
+          {
+            "mode": "reference_to_video",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ],
+            "priority": "relaxed",
+            "minTier": "ultra"
+          }
+        ]
+      },
+      "defaults": {
+        "mode": "auto",
+        "quality": "fast",
+        "priority": "standard",
+        "durationSeconds": 8,
+        "resolution": "720p",
+        "aspectRatio": "16:9"
+      }
+    },
+    "veo_3_1_interpolation_lite": {
+      "legacy": true,
+      "type": "video",
+      "description": "Veo 3.1 Interpolation Lite",
+      "capabilities": {
+        "aspectRatios": [
+          "16:9",
+          "9:16"
+        ],
+        "qualities": [
+          "lite"
+        ],
+        "modes": {
+          "first_last_frame": {
+            "minImages": 2,
+            "maxImages": 2,
+            "videoInput": false,
+            "mediaId": false
+          }
+        },
+        "combinations": [
+          {
+            "mode": "first_last_frame",
+            "quality": "lite",
+            "durations": [
+              4,
+              6,
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          }
+        ]
+      },
+      "defaults": {
+        "mode": "first_last_frame",
+        "quality": "lite",
+        "durationSeconds": 8,
+        "resolution": "720p",
+        "aspectRatio": "16:9"
+      }
+    },
+    "veo_3_1_remix": {
+      "legacy": true,
+      "type": "video",
+      "description": "Veo 3.1 Extend (legacy Remix alias)",
+      "capabilities": {
+        "aspectRatios": [
+          "16:9",
+          "9:16"
+        ],
+        "qualities": [
+          "quality",
+          "fast",
+          "lite"
+        ],
+        "modes": {
+          "extend": {
+            "minImages": 0,
+            "maxImages": 0,
+            "videoInput": false,
+            "mediaId": true
+          }
+        },
+        "combinations": [
+          {
+            "mode": "extend",
+            "quality": "quality",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "extend",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "extend",
+            "quality": "lite",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          }
+        ]
+      },
+      "defaults": {
+        "mode": "extend",
+        "quality": "quality",
+        "durationSeconds": 8,
+        "resolution": "720p",
+        "aspectRatio": "16:9"
+      }
+    },
+    "veo_3_1_extend": {
+      "legacy": true,
+      "type": "video",
+      "description": "Veo 3.1 Extend",
+      "capabilities": {
+        "aspectRatios": [
+          "16:9",
+          "9:16"
+        ],
+        "qualities": [
+          "quality",
+          "fast",
+          "lite"
+        ],
+        "modes": {
+          "extend": {
+            "minImages": 0,
+            "maxImages": 0,
+            "videoInput": false,
+            "mediaId": true
+          }
+        },
+        "combinations": [
+          {
+            "mode": "extend",
+            "quality": "quality",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "extend",
+            "quality": "fast",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          },
+          {
+            "mode": "extend",
+            "quality": "lite",
+            "durations": [
+              8
+            ],
+            "resolutions": [
+              "720p"
+            ]
+          }
+        ]
+      },
+      "defaults": {
+        "mode": "extend",
+        "quality": "quality",
+        "durationSeconds": 8,
+        "resolution": "720p",
+        "aspectRatio": "16:9"
+      }
+    },
+    "omni_1.1_flash": {
+      "type": "video",
+      "description": "Gemini Omni 1.1 Flash",
+      "capabilities": {
+        "aspectRatios": [
+          "16:9",
+          "9:16"
+        ],
+        "qualities": [],
+        "modes": {
+          "text_to_video": {
+            "minImages": 0,
+            "maxImages": 0,
+            "videoInput": false,
+            "mediaId": false
+          },
+          "image_to_video": {
+            "minImages": 1,
+            "maxImages": 1,
+            "videoInput": false,
+            "mediaId": false
+          },
+          "first_last_frame": {
+            "minImages": 2,
+            "maxImages": 2,
+            "videoInput": false,
+            "mediaId": false
+          },
+          "reference_to_video": {
+            "minImages": 1,
+            "maxImages": 7,
+            "videoInput": false,
+            "mediaId": false
+          },
+          "edit": {
+            "minImages": 0,
+            "maxImages": 5,
+            "videoInput": true,
+            "mediaId": true
+          }
+        },
+        "combinations": [
+          {
+            "mode": "text_to_video",
+            "quality": null,
+            "durations": [
+              4,
+              6,
+              8,
+              10
+            ],
+            "resolutions": [
+              "720p",
+              "360p"
+            ]
+          },
+          {
+            "mode": "image_to_video",
+            "quality": null,
+            "durations": [
+              4,
+              6,
+              8,
+              10
+            ],
+            "resolutions": [
+              "720p",
+              "360p"
+            ]
+          },
+          {
+            "mode": "first_last_frame",
+            "quality": null,
+            "durations": [
+              4,
+              6,
+              8,
+              10
+            ],
+            "resolutions": [
+              "720p",
+              "360p"
+            ]
+          },
+          {
+            "mode": "reference_to_video",
+            "quality": null,
+            "durations": [
+              4,
+              6,
+              8,
+              10
+            ],
+            "resolutions": [
+              "720p",
+              "360p"
+            ]
+          },
+          {
+            "mode": "edit",
+            "quality": null,
+            "durations": [],
+            "resolutions": [
+              "720p",
+              "360p"
+            ]
+          },
+          {
+            "mode": "text_to_video",
+            "quality": null,
+            "durations": [
+              4,
+              6,
+              8,
+              10
+            ],
+            "resolutions": [
+              "1080p"
+            ],
+            "minTier": "pro"
+          },
+          {
+            "mode": "text_to_video",
+            "quality": null,
+            "durations": [
+              4,
+              6,
+              8,
+              10
+            ],
+            "resolutions": [
+              "4k"
+            ],
+            "minTier": "ultra"
+          },
+          {
+            "mode": "image_to_video",
+            "quality": null,
+            "durations": [
+              4,
+              6,
+              8,
+              10
+            ],
+            "resolutions": [
+              "1080p"
+            ],
+            "minTier": "pro"
+          },
+          {
+            "mode": "image_to_video",
+            "quality": null,
+            "durations": [
+              4,
+              6,
+              8,
+              10
+            ],
+            "resolutions": [
+              "4k"
+            ],
+            "minTier": "ultra"
+          },
+          {
+            "mode": "first_last_frame",
+            "quality": null,
+            "durations": [
+              4,
+              6,
+              8,
+              10
+            ],
+            "resolutions": [
+              "1080p"
+            ],
+            "minTier": "pro"
+          },
+          {
+            "mode": "first_last_frame",
+            "quality": null,
+            "durations": [
+              4,
+              6,
+              8,
+              10
+            ],
+            "resolutions": [
+              "4k"
+            ],
+            "minTier": "ultra"
+          },
+          {
+            "mode": "reference_to_video",
+            "quality": null,
+            "durations": [
+              4,
+              6,
+              8,
+              10
+            ],
+            "resolutions": [
+              "1080p"
+            ],
+            "minTier": "pro"
+          },
+          {
+            "mode": "reference_to_video",
+            "quality": null,
+            "durations": [
+              4,
+              6,
+              8,
+              10
+            ],
+            "resolutions": [
+              "4k"
+            ],
+            "minTier": "ultra"
+          },
+          {
+            "mode": "edit",
+            "quality": null,
+            "durations": [],
+            "resolutions": [
+              "1080p"
+            ],
+            "minTier": "pro"
+          },
+          {
+            "mode": "edit",
+            "quality": null,
+            "durations": [],
+            "resolutions": [
+              "4k"
+            ],
+            "minTier": "ultra"
+          }
+        ]
+      },
+      "defaults": {
+        "mode": "auto",
+        "durationSeconds": 8,
+        "resolution": "720p",
+        "aspectRatio": "16:9"
+      }
+    }
+  },
+  "video_aliases": {
+    "veo_3_1_t2v_fast": {
+      "landscape": "veo_3_1_t2v_fast_landscape",
+      "portrait": "veo_3_1_t2v_fast_portrait"
+    },
+    "veo_3_1_t2v_fast_4s": {
+      "landscape": "veo_3_1_t2v_fast_4s",
+      "portrait": "veo_3_1_t2v_fast_portrait_4s"
+    },
+    "veo_3_1_t2v_fast_6s": {
+      "landscape": "veo_3_1_t2v_fast_6s",
+      "portrait": "veo_3_1_t2v_fast_portrait_6s"
+    },
+    "veo_3_1_t2v_fast_8s": {
+      "landscape": "veo_3_1_t2v_fast_8s",
+      "portrait": "veo_3_1_t2v_fast_portrait_8s"
+    },
+    "veo_3_1_t2v_fast_ultra": {
+      "landscape": "veo_3_1_t2v_fast_ultra",
+      "portrait": "veo_3_1_t2v_fast_portrait_ultra"
+    },
+    "veo_3_1_t2v_fast_ultra_relaxed": {
+      "landscape": "veo_3_1_t2v_fast_ultra_relaxed",
+      "portrait": "veo_3_1_t2v_fast_portrait_ultra_relaxed"
+    },
+    "veo_3_1_t2v": {
+      "landscape": "veo_3_1_t2v_landscape",
+      "portrait": "veo_3_1_t2v_portrait"
+    },
+    "veo_3_1_t2v_4s": {
+      "landscape": "veo_3_1_t2v_4s",
+      "portrait": "veo_3_1_t2v_portrait_4s"
+    },
+    "veo_3_1_t2v_6s": {
+      "landscape": "veo_3_1_t2v_6s",
+      "portrait": "veo_3_1_t2v_portrait_6s"
+    },
+    "veo_3_1_t2v_8s": {
+      "landscape": "veo_3_1_t2v_8s",
+      "portrait": "veo_3_1_t2v_portrait_8s"
+    },
+    "veo_3_1_t2v_4s_4k": {
+      "landscape": "veo_3_1_t2v_4s_4k",
+      "portrait": "veo_3_1_t2v_portrait_4s_4k"
+    },
+    "veo_3_1_t2v_4s_1080p": {
+      "landscape": "veo_3_1_t2v_4s_1080p",
+      "portrait": "veo_3_1_t2v_portrait_4s_1080p"
+    },
+    "veo_3_1_t2v_6s_4k": {
+      "landscape": "veo_3_1_t2v_6s_4k",
+      "portrait": "veo_3_1_t2v_portrait_6s_4k"
+    },
+    "veo_3_1_t2v_6s_1080p": {
+      "landscape": "veo_3_1_t2v_6s_1080p",
+      "portrait": "veo_3_1_t2v_portrait_6s_1080p"
+    },
+    "veo_3_1_t2v_8s_4k": {
+      "landscape": "veo_3_1_t2v_8s_4k",
+      "portrait": "veo_3_1_t2v_portrait_8s_4k"
+    },
+    "veo_3_1_t2v_8s_1080p": {
+      "landscape": "veo_3_1_t2v_8s_1080p",
+      "portrait": "veo_3_1_t2v_portrait_8s_1080p"
+    },
+    "veo_3_1_t2v_4k": {
+      "landscape": "veo_3_1_t2v_4k",
+      "portrait": "veo_3_1_t2v_portrait_4k"
+    },
+    "veo_3_1_t2v_1080p": {
+      "landscape": "veo_3_1_t2v_1080p",
+      "portrait": "veo_3_1_t2v_portrait_1080p"
+    },
+    "veo_3_1_t2v_lite": {
+      "landscape": "veo_3_1_t2v_lite_landscape",
+      "portrait": "veo_3_1_t2v_lite_portrait"
+    },
+    "veo_3_1_t2v_lite_4s": {
+      "landscape": "veo_3_1_t2v_lite_4s_landscape",
+      "portrait": "veo_3_1_t2v_lite_4s_portrait"
+    },
+    "veo_3_1_t2v_lite_6s": {
+      "landscape": "veo_3_1_t2v_lite_6s_landscape",
+      "portrait": "veo_3_1_t2v_lite_6s_portrait"
+    },
+    "veo_3_1_t2v_lite_8s": {
+      "landscape": "veo_3_1_t2v_lite_8s_landscape",
+      "portrait": "veo_3_1_t2v_lite_8s_portrait"
+    },
+    "omni": {
+      "landscape": "omni",
+      "portrait": "omni_portrait"
+    },
+    "veo_3_1_i2v_s_fast_fl": {
+      "landscape": "veo_3_1_i2v_s_fast_fl",
+      "portrait": "veo_3_1_i2v_s_fast_portrait_fl"
+    },
+    "veo_3_1_i2v_s_fast_4s_fl": {
+      "landscape": "veo_3_1_i2v_s_fast_4s_fl",
+      "portrait": "veo_3_1_i2v_s_fast_portrait_4s_fl"
+    },
+    "veo_3_1_i2v_s_fast_6s_fl": {
+      "landscape": "veo_3_1_i2v_s_fast_6s_fl",
+      "portrait": "veo_3_1_i2v_s_fast_portrait_6s_fl"
+    },
+    "veo_3_1_i2v_s_fast_8s_fl": {
+      "landscape": "veo_3_1_i2v_s_fast_8s_fl",
+      "portrait": "veo_3_1_i2v_s_fast_portrait_8s_fl"
+    },
+    "veo_3_1_i2v_s_fast_ultra_fl": {
+      "landscape": "veo_3_1_i2v_s_fast_ultra_fl",
+      "portrait": "veo_3_1_i2v_s_fast_portrait_ultra_fl"
+    },
+    "veo_3_1_i2v_s_fast_ultra_relaxed": {
+      "landscape": "veo_3_1_i2v_s_fast_ultra_relaxed",
+      "portrait": "veo_3_1_i2v_s_fast_portrait_ultra_relaxed"
+    },
+    "veo_3_1_i2v_s": {
+      "landscape": "veo_3_1_i2v_s_landscape",
+      "portrait": "veo_3_1_i2v_s_portrait"
+    },
+    "veo_3_1_i2v_s_4s": {
+      "landscape": "veo_3_1_i2v_s_4s",
+      "portrait": "veo_3_1_i2v_s_portrait_4s"
+    },
+    "veo_3_1_i2v_s_6s": {
+      "landscape": "veo_3_1_i2v_s_6s",
+      "portrait": "veo_3_1_i2v_s_portrait_6s"
+    },
+    "veo_3_1_i2v_s_8s": {
+      "landscape": "veo_3_1_i2v_s_8s",
+      "portrait": "veo_3_1_i2v_s_portrait_8s"
+    },
+    "veo_3_1_i2v_s_4s_4k": {
+      "landscape": "veo_3_1_i2v_s_4s_4k",
+      "portrait": "veo_3_1_i2v_s_portrait_4s_4k"
+    },
+    "veo_3_1_i2v_s_4s_1080p": {
+      "landscape": "veo_3_1_i2v_s_4s_1080p",
+      "portrait": "veo_3_1_i2v_s_portrait_4s_1080p"
+    },
+    "veo_3_1_i2v_s_6s_4k": {
+      "landscape": "veo_3_1_i2v_s_6s_4k",
+      "portrait": "veo_3_1_i2v_s_portrait_6s_4k"
+    },
+    "veo_3_1_i2v_s_6s_1080p": {
+      "landscape": "veo_3_1_i2v_s_6s_1080p",
+      "portrait": "veo_3_1_i2v_s_portrait_6s_1080p"
+    },
+    "veo_3_1_i2v_s_8s_4k": {
+      "landscape": "veo_3_1_i2v_s_8s_4k",
+      "portrait": "veo_3_1_i2v_s_portrait_8s_4k"
+    },
+    "veo_3_1_i2v_s_8s_1080p": {
+      "landscape": "veo_3_1_i2v_s_8s_1080p",
+      "portrait": "veo_3_1_i2v_s_portrait_8s_1080p"
+    },
+    "veo_3_1_i2v_s_4k": {
+      "landscape": "veo_3_1_i2v_s_4k",
+      "portrait": "veo_3_1_i2v_s_portrait_4k"
+    },
+    "veo_3_1_i2v_s_1080p": {
+      "landscape": "veo_3_1_i2v_s_1080p",
+      "portrait": "veo_3_1_i2v_s_portrait_1080p"
+    },
+    "veo_3_1_i2v_lite": {
+      "landscape": "veo_3_1_i2v_lite_landscape",
+      "portrait": "veo_3_1_i2v_lite_portrait"
+    },
+    "veo_3_1_i2v_lite_4s": {
+      "landscape": "veo_3_1_i2v_lite_4s_landscape",
+      "portrait": "veo_3_1_i2v_lite_4s_portrait"
+    },
+    "veo_3_1_i2v_lite_6s": {
+      "landscape": "veo_3_1_i2v_lite_6s_landscape",
+      "portrait": "veo_3_1_i2v_lite_6s_portrait"
+    },
+    "veo_3_1_i2v_lite_8s": {
+      "landscape": "veo_3_1_i2v_lite_8s_landscape",
+      "portrait": "veo_3_1_i2v_lite_8s_portrait"
+    },
+    "veo_3_1_interpolation_lite": {
+      "landscape": "veo_3_1_interpolation_lite_landscape",
+      "portrait": "veo_3_1_interpolation_lite_portrait"
+    },
+    "veo_3_1_interpolation_lite_4s": {
+      "landscape": "veo_3_1_interpolation_lite_4s_landscape",
+      "portrait": "veo_3_1_interpolation_lite_4s_portrait"
+    },
+    "veo_3_1_interpolation_lite_6s": {
+      "landscape": "veo_3_1_interpolation_lite_6s_landscape",
+      "portrait": "veo_3_1_interpolation_lite_6s_portrait"
+    },
+    "veo_3_1_interpolation_lite_8s": {
+      "landscape": "veo_3_1_interpolation_lite_8s_landscape",
+      "portrait": "veo_3_1_interpolation_lite_8s_portrait"
+    },
+    "veo_3_1_r2v_lite": {
+      "landscape": "veo_3_1_r2v_lite_landscape",
+      "portrait": "veo_3_1_r2v_lite_portrait"
+    },
+    "veo_3_1_r2v_fast": {
+      "landscape": "veo_3_1_r2v_fast",
+      "portrait": "veo_3_1_r2v_fast_portrait"
+    },
+    "veo_3_1_r2v_fast_8s": {
+      "landscape": "veo_3_1_r2v_fast_8s",
+      "portrait": "veo_3_1_r2v_fast_portrait_8s"
+    },
+    "veo_3_1_r2v_fast_ultra": {
+      "landscape": "veo_3_1_r2v_fast_ultra",
+      "portrait": "veo_3_1_r2v_fast_portrait_ultra"
+    },
+    "veo_3_1_r2v_fast_ultra_8s": {
+      "landscape": "veo_3_1_r2v_fast_ultra_8s",
+      "portrait": "veo_3_1_r2v_fast_portrait_ultra_8s"
+    },
+    "veo_3_1_r2v_fast_ultra_relaxed": {
+      "landscape": "veo_3_1_r2v_fast_ultra_relaxed",
+      "portrait": "veo_3_1_r2v_fast_portrait_ultra_relaxed"
+    },
+    "veo_3_1_r2v_fast_ultra_relaxed_8s": {
+      "landscape": "veo_3_1_r2v_fast_ultra_relaxed_8s",
+      "portrait": "veo_3_1_r2v_fast_portrait_ultra_relaxed_8s"
+    },
+    "veo_3_1_extend": {
+      "landscape": "veo_3_1_extend",
+      "portrait": "veo_3_1_extend_portrait"
+    },
+    "omni_edit": {
+      "landscape": "omni_edit",
+      "portrait": "omni_edit_portrait"
+    },
+    "omni_edit_360p": {
+      "landscape": "omni_edit_360p",
+      "portrait": "omni_edit_portrait_360p"
+    },
+    "omni_1080p": {
+      "landscape": "omni_1080p",
+      "portrait": "omni_portrait_1080p"
+    },
+    "omni_edit_1080p": {
+      "landscape": "omni_edit_1080p",
+      "portrait": "omni_edit_portrait_1080p"
+    },
+    "omni_4k": {
+      "landscape": "omni_4k",
+      "portrait": "omni_portrait_4k"
+    },
+    "omni_edit_4k": {
+      "landscape": "omni_edit_4k",
+      "portrait": "omni_edit_portrait_4k"
+    },
+    "omni_4s": {
+      "landscape": "omni_4s",
+      "portrait": "omni_portrait_4s"
+    },
+    "omni_r2v_4s": {
+      "landscape": "omni_r2v_4s",
+      "portrait": "omni_r2v_portrait_4s"
+    },
+    "omni_i2v_4s": {
+      "landscape": "omni_i2v_4s",
+      "portrait": "omni_i2v_portrait_4s"
+    },
+    "omni_i2v_4s_first_last": {
+      "landscape": "omni_i2v_4s_first_last",
+      "portrait": "omni_i2v_portrait_4s_first_last"
+    },
+    "omni_4s_360p": {
+      "landscape": "omni_4s_360p",
+      "portrait": "omni_portrait_4s_360p"
+    },
+    "omni_r2v_4s_360p": {
+      "landscape": "omni_r2v_4s_360p",
+      "portrait": "omni_r2v_portrait_4s_360p"
+    },
+    "omni_i2v_4s_360p": {
+      "landscape": "omni_i2v_4s_360p",
+      "portrait": "omni_i2v_portrait_4s_360p"
+    },
+    "omni_i2v_4s_first_last_360p": {
+      "landscape": "omni_i2v_4s_first_last_360p",
+      "portrait": "omni_i2v_portrait_4s_first_last_360p"
+    },
+    "omni_4s_1080p": {
+      "landscape": "omni_4s_1080p",
+      "portrait": "omni_portrait_4s_1080p"
+    },
+    "omni_r2v_4s_1080p": {
+      "landscape": "omni_r2v_4s_1080p",
+      "portrait": "omni_r2v_portrait_4s_1080p"
+    },
+    "omni_i2v_4s_1080p": {
+      "landscape": "omni_i2v_4s_1080p",
+      "portrait": "omni_i2v_portrait_4s_1080p"
+    },
+    "omni_i2v_4s_first_last_1080p": {
+      "landscape": "omni_i2v_4s_first_last_1080p",
+      "portrait": "omni_i2v_portrait_4s_first_last_1080p"
+    },
+    "omni_4s_4k": {
+      "landscape": "omni_4s_4k",
+      "portrait": "omni_portrait_4s_4k"
+    },
+    "omni_r2v_4s_4k": {
+      "landscape": "omni_r2v_4s_4k",
+      "portrait": "omni_r2v_portrait_4s_4k"
+    },
+    "omni_i2v_4s_4k": {
+      "landscape": "omni_i2v_4s_4k",
+      "portrait": "omni_i2v_portrait_4s_4k"
+    },
+    "omni_i2v_4s_first_last_4k": {
+      "landscape": "omni_i2v_4s_first_last_4k",
+      "portrait": "omni_i2v_portrait_4s_first_last_4k"
+    },
+    "omni_6s": {
+      "landscape": "omni_6s",
+      "portrait": "omni_portrait_6s"
+    },
+    "omni_r2v_6s": {
+      "landscape": "omni_r2v_6s",
+      "portrait": "omni_r2v_portrait_6s"
+    },
+    "omni_i2v_6s": {
+      "landscape": "omni_i2v_6s",
+      "portrait": "omni_i2v_portrait_6s"
+    },
+    "omni_i2v_6s_first_last": {
+      "landscape": "omni_i2v_6s_first_last",
+      "portrait": "omni_i2v_portrait_6s_first_last"
+    },
+    "omni_6s_360p": {
+      "landscape": "omni_6s_360p",
+      "portrait": "omni_portrait_6s_360p"
+    },
+    "omni_r2v_6s_360p": {
+      "landscape": "omni_r2v_6s_360p",
+      "portrait": "omni_r2v_portrait_6s_360p"
+    },
+    "omni_i2v_6s_360p": {
+      "landscape": "omni_i2v_6s_360p",
+      "portrait": "omni_i2v_portrait_6s_360p"
+    },
+    "omni_i2v_6s_first_last_360p": {
+      "landscape": "omni_i2v_6s_first_last_360p",
+      "portrait": "omni_i2v_portrait_6s_first_last_360p"
+    },
+    "omni_6s_1080p": {
+      "landscape": "omni_6s_1080p",
+      "portrait": "omni_portrait_6s_1080p"
+    },
+    "omni_r2v_6s_1080p": {
+      "landscape": "omni_r2v_6s_1080p",
+      "portrait": "omni_r2v_portrait_6s_1080p"
+    },
+    "omni_i2v_6s_1080p": {
+      "landscape": "omni_i2v_6s_1080p",
+      "portrait": "omni_i2v_portrait_6s_1080p"
+    },
+    "omni_i2v_6s_first_last_1080p": {
+      "landscape": "omni_i2v_6s_first_last_1080p",
+      "portrait": "omni_i2v_portrait_6s_first_last_1080p"
+    },
+    "omni_6s_4k": {
+      "landscape": "omni_6s_4k",
+      "portrait": "omni_portrait_6s_4k"
+    },
+    "omni_r2v_6s_4k": {
+      "landscape": "omni_r2v_6s_4k",
+      "portrait": "omni_r2v_portrait_6s_4k"
+    },
+    "omni_i2v_6s_4k": {
+      "landscape": "omni_i2v_6s_4k",
+      "portrait": "omni_i2v_portrait_6s_4k"
+    },
+    "omni_i2v_6s_first_last_4k": {
+      "landscape": "omni_i2v_6s_first_last_4k",
+      "portrait": "omni_i2v_portrait_6s_first_last_4k"
+    },
+    "omni_8s": {
+      "landscape": "omni_8s",
+      "portrait": "omni_portrait_8s"
+    },
+    "omni_r2v_8s": {
+      "landscape": "omni_r2v_8s",
+      "portrait": "omni_r2v_portrait_8s"
+    },
+    "omni_i2v_8s": {
+      "landscape": "omni_i2v_8s",
+      "portrait": "omni_i2v_portrait_8s"
+    },
+    "omni_i2v_8s_first_last": {
+      "landscape": "omni_i2v_8s_first_last",
+      "portrait": "omni_i2v_portrait_8s_first_last"
+    },
+    "omni_8s_360p": {
+      "landscape": "omni_8s_360p",
+      "portrait": "omni_portrait_8s_360p"
+    },
+    "omni_r2v_8s_360p": {
+      "landscape": "omni_r2v_8s_360p",
+      "portrait": "omni_r2v_portrait_8s_360p"
+    },
+    "omni_i2v_8s_360p": {
+      "landscape": "omni_i2v_8s_360p",
+      "portrait": "omni_i2v_portrait_8s_360p"
+    },
+    "omni_i2v_8s_first_last_360p": {
+      "landscape": "omni_i2v_8s_first_last_360p",
+      "portrait": "omni_i2v_portrait_8s_first_last_360p"
+    },
+    "omni_8s_1080p": {
+      "landscape": "omni_8s_1080p",
+      "portrait": "omni_portrait_8s_1080p"
+    },
+    "omni_r2v_8s_1080p": {
+      "landscape": "omni_r2v_8s_1080p",
+      "portrait": "omni_r2v_portrait_8s_1080p"
+    },
+    "omni_i2v_8s_1080p": {
+      "landscape": "omni_i2v_8s_1080p",
+      "portrait": "omni_i2v_portrait_8s_1080p"
+    },
+    "omni_i2v_8s_first_last_1080p": {
+      "landscape": "omni_i2v_8s_first_last_1080p",
+      "portrait": "omni_i2v_portrait_8s_first_last_1080p"
+    },
+    "omni_8s_4k": {
+      "landscape": "omni_8s_4k",
+      "portrait": "omni_portrait_8s_4k"
+    },
+    "omni_r2v_8s_4k": {
+      "landscape": "omni_r2v_8s_4k",
+      "portrait": "omni_r2v_portrait_8s_4k"
+    },
+    "omni_i2v_8s_4k": {
+      "landscape": "omni_i2v_8s_4k",
+      "portrait": "omni_i2v_portrait_8s_4k"
+    },
+    "omni_i2v_8s_first_last_4k": {
+      "landscape": "omni_i2v_8s_first_last_4k",
+      "portrait": "omni_i2v_portrait_8s_first_last_4k"
+    },
+    "omni_10s": {
+      "landscape": "omni_10s",
+      "portrait": "omni_portrait_10s"
+    },
+    "omni_r2v_10s": {
+      "landscape": "omni_r2v_10s",
+      "portrait": "omni_r2v_portrait_10s"
+    },
+    "omni_i2v_10s": {
+      "landscape": "omni_i2v_10s",
+      "portrait": "omni_i2v_portrait_10s"
+    },
+    "omni_i2v_10s_first_last": {
+      "landscape": "omni_i2v_10s_first_last",
+      "portrait": "omni_i2v_portrait_10s_first_last"
+    },
+    "omni_10s_360p": {
+      "landscape": "omni_10s_360p",
+      "portrait": "omni_portrait_10s_360p"
+    },
+    "omni_r2v_10s_360p": {
+      "landscape": "omni_r2v_10s_360p",
+      "portrait": "omni_r2v_portrait_10s_360p"
+    },
+    "omni_i2v_10s_360p": {
+      "landscape": "omni_i2v_10s_360p",
+      "portrait": "omni_i2v_portrait_10s_360p"
+    },
+    "omni_i2v_10s_first_last_360p": {
+      "landscape": "omni_i2v_10s_first_last_360p",
+      "portrait": "omni_i2v_portrait_10s_first_last_360p"
+    },
+    "omni_10s_1080p": {
+      "landscape": "omni_10s_1080p",
+      "portrait": "omni_portrait_10s_1080p"
+    },
+    "omni_r2v_10s_1080p": {
+      "landscape": "omni_r2v_10s_1080p",
+      "portrait": "omni_r2v_portrait_10s_1080p"
+    },
+    "omni_i2v_10s_1080p": {
+      "landscape": "omni_i2v_10s_1080p",
+      "portrait": "omni_i2v_portrait_10s_1080p"
+    },
+    "omni_i2v_10s_first_last_1080p": {
+      "landscape": "omni_i2v_10s_first_last_1080p",
+      "portrait": "omni_i2v_portrait_10s_first_last_1080p"
+    },
+    "omni_10s_4k": {
+      "landscape": "omni_10s_4k",
+      "portrait": "omni_portrait_10s_4k"
+    },
+    "omni_r2v_10s_4k": {
+      "landscape": "omni_r2v_10s_4k",
+      "portrait": "omni_r2v_portrait_10s_4k"
+    },
+    "omni_i2v_10s_4k": {
+      "landscape": "omni_i2v_10s_4k",
+      "portrait": "omni_i2v_portrait_10s_4k"
+    },
+    "omni_i2v_10s_first_last_4k": {
+      "landscape": "omni_i2v_10s_first_last_4k",
+      "portrait": "omni_i2v_portrait_10s_first_last_4k"
+    }
+  },
+  "migrations": [
+    {
+      "date": "2026-10-07",
+      "prefix": "gemini-3.1-flash-image-",
+      "exclude_prefix": "gemini-3.1-flash-image-lite-",
+      "old_upstream_key": "NARWHAL",
+      "new_upstream_key": "BELUGA",
+      "variant_count": 15,
+      "evidence": "docs/evidence/flash-beluga-20261007.json"
+    }
+  ]
+}

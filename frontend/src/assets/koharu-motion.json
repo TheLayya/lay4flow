@@ -1,0 +1,449 @@
+{
+  "canvas": [
+    772,
+    1680
+  ],
+  "layers": {
+    "base": {
+      "asset": "koharu-motion-base.webp"
+    },
+    "head": {
+      "asset": "koharu-motion-head.webp",
+      "polygon": [
+        [
+          0,
+          0
+        ],
+        [
+          772,
+          0
+        ],
+        [
+          772,
+          309
+        ],
+        [
+          585,
+          309
+        ],
+        [
+          561,
+          294
+        ],
+        [
+          544,
+          310
+        ],
+        [
+          535,
+          333
+        ],
+        [
+          508,
+          353
+        ],
+        [
+          472,
+          366
+        ],
+        [
+          433,
+          369
+        ],
+        [
+          391,
+          370
+        ],
+        [
+          350,
+          363
+        ],
+        [
+          312,
+          351
+        ],
+        [
+          278,
+          334
+        ],
+        [
+          252,
+          311
+        ],
+        [
+          239,
+          284
+        ],
+        [
+          228,
+          278
+        ],
+        [
+          220,
+          318
+        ],
+        [
+          208,
+          331
+        ],
+        [
+          180,
+          331
+        ],
+        [
+          175,
+          288
+        ],
+        [
+          180,
+          265
+        ],
+        [
+          0,
+          265
+        ]
+      ],
+      "pivot": [
+        388,
+        350
+      ],
+      "rotationDeg": [
+        -0.5,
+        0.5
+      ]
+    },
+    "wave": {
+      "asset": "koharu-motion-wave.webp",
+      "polygon": [
+        [
+          637,
+          474
+        ],
+        [
+          641,
+          450
+        ],
+        [
+          646,
+          365
+        ],
+        [
+          657,
+          337
+        ],
+        [
+          772,
+          337
+        ],
+        [
+          772,
+          462
+        ],
+        [
+          720,
+          470
+        ],
+        [
+          689,
+          500
+        ],
+        [
+          671,
+          520
+        ],
+        [
+          682,
+          541
+        ],
+        [
+          680,
+          557
+        ],
+        [
+          651,
+          597
+        ],
+        [
+          636,
+          600
+        ],
+        [
+          615,
+          595
+        ],
+        [
+          593,
+          583
+        ],
+        [
+          577,
+          568
+        ],
+        [
+          568,
+          550
+        ],
+        [
+          571,
+          536
+        ],
+        [
+          583,
+          518
+        ],
+        [
+          603,
+          492
+        ],
+        [
+          620,
+          480
+        ],
+        [
+          630,
+          478
+        ]
+      ],
+      "pivot": [
+        613,
+        584
+      ],
+      "rotationDeg": [
+        -3,
+        3
+      ]
+    },
+    "hairLeft": {
+      "asset": "koharu-motion-hair-left.webp",
+      "polygon": [
+        [
+          0,
+          490
+        ],
+        [
+          64,
+          493
+        ],
+        [
+          90,
+          505
+        ],
+        [
+          129,
+          519
+        ],
+        [
+          151,
+          534
+        ],
+        [
+          172,
+          546
+        ],
+        [
+          171,
+          581
+        ],
+        [
+          171,
+          622
+        ],
+        [
+          169,
+          655
+        ],
+        [
+          161,
+          688
+        ],
+        [
+          159,
+          721
+        ],
+        [
+          145,
+          742
+        ],
+        [
+          108,
+          753
+        ],
+        [
+          104,
+          781
+        ],
+        [
+          70,
+          795
+        ],
+        [
+          34,
+          791
+        ],
+        [
+          0,
+          753
+        ]
+      ],
+      "pivot": [
+        135,
+        516
+      ],
+      "rotationDeg": [
+        -0.6,
+        0.7
+      ]
+    },
+    "hairRight": {
+      "asset": "koharu-motion-hair-right.webp",
+      "polygon": [
+        [
+          506,
+          671
+        ],
+        [
+          532,
+          657
+        ],
+        [
+          553,
+          656
+        ],
+        [
+          570,
+          675
+        ],
+        [
+          597,
+          674
+        ],
+        [
+          623,
+          648
+        ],
+        [
+          653,
+          621
+        ],
+        [
+          685,
+          621
+        ],
+        [
+          703,
+          622
+        ],
+        [
+          727,
+          614
+        ],
+        [
+          772,
+          610
+        ],
+        [
+          772,
+          832
+        ],
+        [
+          570,
+          838
+        ],
+        [
+          539,
+          806
+        ],
+        [
+          530,
+          777
+        ],
+        [
+          515,
+          744
+        ],
+        [
+          510,
+          708
+        ]
+      ],
+      "pivot": [
+        630,
+        650
+      ],
+      "rotationDeg": [
+        -0.7,
+        0.6
+      ]
+    }
+  },
+  "eyes": {
+    "leftOpenBox": [
+      282,
+      198,
+      359,
+      249
+    ],
+    "rightOpenBox": [
+      398,
+      185,
+      476,
+      243
+    ],
+    "leftCenter": [
+      324,
+      225
+    ],
+    "rightCenter": [
+      434,
+      212
+    ],
+    "leftCoverPath": "M283 225 Q318 193 355 215 Q365 239 337 248 Q307 255 283 225 Z",
+    "rightCoverPath": "M398 217 Q428 184 472 199 Q475 224 448 237 Q421 242 398 217 Z",
+    "leftClosedLashPath": "M290 222 Q321 244 353 222",
+    "rightClosedLashPath": "M403 212 Q435 234 467 209",
+    "skin": "#fce8df",
+    "lash": "#4d3035"
+  },
+  "notes": "All layers retain approved source artwork, same 772x1680 coordinates. Composite hairLeft,hairRight,base,head,wave. Base has moving interiors removed and a 4-pixel underlap at source cut seams. Recommended motion bounded by pivots/angles above. Tiny keying islands under 7 px removed. Wave polygon tightened to visible cuff boundary; complete hand retained.",
+  "energetic": {
+    "assets": {
+      "base": "koharu-motion-base-energetic.webp",
+      "head": "koharu-motion-head-energetic.webp"
+    },
+    "headPivot": [
+      388,
+      350
+    ],
+    "headRotationDeg": [
+      -2.3,
+      2.2
+    ],
+    "hairTipMaxDeg": 2.3,
+    "notes": "Original base below y385; original cuff layer stays still. Smooth SVG displacement carries the assembled forearm with a continuous sleeve; no large-angle forearm segmentation or reconstructed color planes. Body and head move through CSS groups. Both CSS and SVG timelines pause together.",
+    "waveDisplacement": {
+      "asset": "koharu-wave-displacement.png",
+      "mapBounds": [
+        -100,
+        0,
+        972,
+        1680
+      ],
+      "elbowPivot": [
+        573,
+        647
+      ],
+      "scaleRange": [
+        -120,
+        120
+      ],
+      "angleEquivalentDeg": [
+        -10,
+        10
+      ],
+      "neutralChannelCorrection": -0.00196078431372549,
+      "mapBlur": 0.6,
+      "periodSeconds": 3.6
+    },
+    "entranceMilliseconds": 750
+  }
+}

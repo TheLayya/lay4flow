@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>模型测试 - lay4flow</title>
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e1e1e6; }
+.container { max-width: 1160px; margin: auto; padding: 24px; }
+h1 { font-size: 24px; color: #a6b0ff; margin: 0 0 8px; }
+p { color: #9499ac; line-height: 1.6; }
+.config-bar, .gen-panel, .output-panel, .sidebar { background: #1a1b26; border: 1px solid #303243; border-radius: 10px; padding: 18px; }
+.config-bar { display: flex; gap: 12px; align-items: center; margin: 22px 0 8px; }
+.config-bar input { flex: 1; min-width: 0; }
+label { display: block; font-size: 13px; color: #a8aec2; margin-bottom: 6px; }
+input, select, textarea, button { font: inherit; }
+input, select, textarea { background: #0f1117; color: #e1e1e6; border: 1px solid #3b3e54; border-radius: 6px; padding: 9px 10px; width: 100%; }
+textarea { min-height: 100px; resize: vertical; }
+input:focus, select:focus, textarea:focus { outline: 2px solid #7c8aff; outline-offset: 1px; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .55; }
+.config-note, .model-info, .hint { font-size: 12px; color: #9499ac; margin: 6px 0 14px; line-height: 1.6; }
+.main-layout { display: flex; gap: 18px; margin-top: 18px; }
+.sidebar { width: 260px; flex-shrink: 0; align-self: flex-start; padding: 8px; }
+.model-item { width: 100%; background: transparent; color: #e1e1e6; border: 0; border-radius: 7px; text-align: left; padding: 12px; margin: 2px 0; }
+.model-item:hover { background: #26283a; }
+.model-item.active { color: #b9c0ff; background: #303452; }
+.model-item small { display: block; color: #9299b3; margin-top: 5px; overflow-wrap: anywhere; }
+.content { flex: 1; min-width: 0; }
+.gen-panel h2 { font-size: 18px; margin: 0 0 6px; }
+.parameter-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.form-group { margin-bottom: 14px; }
+.upload-area { border: 2px dashed #42455c; border-radius: 8px; padding: 16px; }
+.upload-area.dragging { border-color: #a6b0ff; }
+.upload-area input { margin-bottom: 10px; }
+.preview-list { display: flex; gap: 8px; flex-wrap: wrap; }
+.image-preview-item, .video-preview-item { position: relative; }
+.image-preview-item img { width: 88px; height: 88px; object-fit: cover; border-radius: 6px; }
+.image-preview-item small { display: block; color: #a8aec2; }
+.video-preview-item { width: min(100%, 360px); }
+.video-preview-item video { width: 100%; max-height: 220px; background: #000; border-radius: 6px; }
+.remove-btn { position: absolute; top: 3px; right: 3px; border: 0; border-radius: 50%; background: #111c; color: white; width: 24px; height: 24px; }
+.btn-generate { width: 100%; padding: 12px; background: #7c8aff; color: #fff; border: 0; border-radius: 8px; font-weight: 600; }
+.validation { color: #ffb4a9; font-size: 13px; min-height: 20px; margin: 8px 0; }
+.output-panel { margin-top: 16px; }
+.output-panel h3 { margin: 0 0 12px; font-size: 15px; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+.status-idle { background: #777; } .status-running { background: #facc15; } .status-done { background: #4ade80; } .status-error { background: #f87171; }
+.output-log { background: #0f1117; border-radius: 8px; padding: 12px; font-size: 13px; line-height: 1.6; max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #b1b5c5; }
+.output-result img, .output-result video { max-width: 100%; border-radius: 8px; margin-top: 12px; }
+@media (max-width: 760px) { .main-layout, .config-bar { flex-direction: column; align-items: stretch; } .sidebar { width: 100%; } .container { padding: 16px; } }
+/* Keep the standalone test surface in the management console visual system. */
+body { background: hsl(0 0% 100%); color: hsl(0 0% 3.9%); }
+.app-header { height: 56px; border-bottom: 1px solid hsl(0 0% 89%); background: rgba(255,255,255,.95); display: flex; align-items: center; }
+.app-header-inner { width: 100%; max-width: 80rem; margin: 0 auto; padding: 0 1.5rem; display: flex; align-items: center; }
+.app-brand { font-size: 20px; font-weight: 700; }
+.app-nav { display: flex; gap: 2rem; margin-left: 2rem; height: 56px; align-items: stretch; }
+.app-nav a { display: inline-flex; align-items: center; border-bottom: 2px solid transparent; color: #52525b; font-size: 14px; text-decoration: none; }
+.app-nav a:hover { color: #09090b; }
+.app-nav a[aria-current="page"] { color: #09090b; border-bottom-color: #18181b; font-weight: 600; }
+.doc-link { color: #52525b !important; }
+.doc-link:hover { color: #09090b !important; }
+.container { max-width: 80rem; padding: 1.5rem; }
+h1 { color: #09090b; }
+p, .config-note, .model-info, .hint { color: #71717a; }
+.config-bar, .gen-panel, .output-panel, .sidebar { background: #fff; border-color: #e4e4e7; border-radius: .5rem; }
+.config-bar input, input, select, textarea { background: #fff; color: #09090b; border-color: #e4e4e7; border-radius: .375rem; }
+input:focus, select:focus, textarea:focus { outline-color: #18181b; }
+.sidebar { padding: .5rem; }
+.model-item { color: #3f3f46; border-radius: .375rem; }
+.model-item:hover { background: #f4f4f5; }
+.model-item.active { color: #09090b; background: #f4f4f5; }
+.model-item small { color: #71717a; }
+.upload-area { border-color: #d4d4d8; }
+.upload-area.dragging { border-color: #18181b; }
+.btn-generate { background: #18181b; border-radius: .375rem; }
+.validation { color: #b91c1c; }
+.output-log { background: #fafafa; color: #52525b; border: 1px solid #e4e4e7; }
+</style>
+</head>
+<body>
+<header class="app-header">
+  <div class="app-header-inner">
+    <a class="app-brand" href="/manage" style="color:inherit;text-decoration:none">lay4flow</a>
+    <nav class="app-nav" aria-label="主导航">
+      <a href="/manage">管理后台</a>
+      <a href="/test" aria-current="page">测试页面</a>
+      <a href="/api-guide">API 文档</a>
+    </nav>
+  </div>
+</header>
+<main class="container">
+  <h1>lay4flow 模型测试</h1>
+  <p>选择模型，再设置画面比例、时长和清晰度。<a class="doc-link" href="/api-guide">API 文档：参数、格式与代码示例 ↗</a></p>
+  <div class="config-bar">
+    <label for="apiKey">API Key</label><input type="password" id="apiKey" autocomplete="off" placeholder="输入 API Key">
+    <label for="baseUrl">地址</label><input type="text" id="baseUrl" placeholder="http://localhost:8000">
+  </div>
+  <p class="config-note" id="catalogNote">未连接时显示内置的 6 个公开模型；Veo 兼容入口已合并到 Veo 3.1，实际生成需要有效 API Key。</p>
+  <div class="main-layout">
+    <nav class="sidebar" id="modelSidebar" aria-label="模型"></nav>
+    <div class="content">
+      <section class="gen-panel">
+        <h2 id="selectedModelName">请选择模型</h2>
+        <div class="model-info" id="selectedModelInfo"></div>
+        <div class="parameter-grid" id="imageParameters" style="display:none;">
+          <div><label for="imageAspect">画面比例</label><select id="imageAspect"></select></div>
+          <div><label for="imageSize">清晰度</label><select id="imageSize"></select></div>
+        </div>
+        <div class="hint" id="imageSizeHint" style="display:none;">原生档位不保证精确像素；2K / 4K 会额外放大。</div>
+        <div id="videoParameters" style="display:none;">
+          <div class="parameter-grid">
+            <div><label for="videoMode">生成方式</label><select id="videoMode"></select></div>
+            <div id="videoPriorityGroup"><label for="videoPriority">执行模式</label><select id="videoPriority"></select></div>
+            <div id="videoQualityGroup"><label for="videoQuality">生成档位</label><select id="videoQuality"></select></div>
+            <div><label for="videoAspect">画面比例</label><select id="videoAspect"></select></div>
+            <div><label for="videoResolution">清晰度</label><select id="videoResolution"></select></div>
+            <div id="videoDurationGroup"><label for="videoDuration">时长</label><select id="videoDuration"></select></div>
+          </div>
+          <p class="hint" id="modeHint"></p>
+          <div class="parameter-grid" id="videoTrimGroup" style="display:none;">
+            <div><label for="trimStartMs">片段开始（毫秒）</label><input id="trimStartMs" type="number" min="0" step="1" value="0"></div>
+            <div><label for="trimEndMs">片段结束（毫秒）</label><input id="trimEndMs" type="number" min="1" step="1" value="10000"></div>
+          </div>
+          <div class="form-group" id="mediaIdGroup" style="display:none;">
+            <label for="videoMediaId">源视频媒体 ID</label><input id="videoMediaId" placeholder="填写已有 Flow 视频的 mediaGenerationId">
+            <p class="hint">视频续写使用已有媒体 ID，不支持在这里上传源视频。</p>
+          </div>
+        </div>
+        <div class="form-group"><label for="promptInput">提示词</label><textarea id="promptInput" placeholder="描述你想生成或修改的内容">一只可爱的橘猫趴在窗台上晒太阳，窗外是樱花盛开的春天</textarea></div>
+        <div class="form-group" id="imageUploadGroup" style="display:none;">
+          <label for="imageFileInput">图片素材 <span id="imageLimit"></span></label>
+          <div class="upload-area" id="imageUploadArea"><input type="file" id="imageFileInput" accept="image/*" multiple><div class="hint" id="imageHint">可选择文件或拖入图片。</div><div class="preview-list" id="imagePreviewList"></div></div>
+        </div>
+        <div class="form-group" id="videoUploadGroup" style="display:none;">
+          <label for="videoFileInput">视频素材 <span id="videoLimit">（1 个，最大 100 MiB）</span></label>
+          <div class="upload-area" id="videoUploadArea"><input type="file" id="videoFileInput" accept="video/mp4,video/webm,video/quicktime"><div class="hint" id="videoHint">MP4、WebM 或 QuickTime；编辑片段不超过 10 秒。</div><div class="preview-list" id="videoPreviewList"></div></div>
+        </div>
+        <p class="validation" id="parameterError" role="status"></p>
+        <button class="btn-generate" id="btnGenerate" disabled>选择模型后开始生成</button>
+      </section>
+      <section class="output-panel"><h3><span class="status-dot status-idle" id="statusDot"></span><span id="statusText">等待中</span></h3><div class="output-log" id="outputLog">准备就绪。</div><div class="output-result" id="outputResult"></div></section>
+    </div>
+  </div>
+</main>
+<script src="/static/js/model_catalog.js?v=banana21-20261010"></script>
+<script src="/static/js/test.js?v=20261003-09"></script>
+<script>if(window.location?.search?.includes('embedded='))document.querySelector('.app-header')?.remove();</script>
+</body>
+</html>

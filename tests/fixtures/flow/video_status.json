@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "source": "Synthetic contract examples based on supported Flow response shapes; no credentials",
+  "cases": [
+    {
+      "name": "media_success_with_new_fields",
+      "response": {
+        "media": [{"name": "source-video", "projectId": "project", "mediaMetadata": {"mediaStatus": {"mediaGenerationStatus": "MEDIA_GENERATION_STATUS_SUCCESSFUL"}}, "video": {"dimensions": {"length": "8s"}, "generatedVideo": {"aspectRatio": "VIDEO_ASPECT_RATIO_LANDSCAPE"}}, "futureField": {"ignored": true}}],
+        "futureEnvelopeField": [1]
+      },
+      "expected": {"media_id": "source-video", "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL", "duration": "8s"}
+    },
+    {
+      "name": "legacy_operations",
+      "response": {"operations": [{"operation": {"name": "legacy-video", "metadata": {"video": {"duration": "4s"}}}, "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL"}]},
+      "expected": {"media_id": "legacy-video", "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL", "duration": "4s"}
+    },
+    {
+      "name": "media_failed",
+      "response": {"media": [{"name": "failed-video", "mediaMetadata": {"mediaStatus": {"mediaGenerationStatus": "MEDIA_GENERATION_STATUS_FAILED", "error": {"code": 13, "message": "Synthetic failure"}, "failureReasons": ["Synthetic failure"]}}}]},
+      "expected": {"media_id": "failed-video", "status": "MEDIA_GENERATION_STATUS_FAILED", "error_code": 13}
+    }
+  ]
+}

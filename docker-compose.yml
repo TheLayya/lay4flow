@@ -1,0 +1,31 @@
+name: lay4flow-remote
+
+services:
+  app:
+    build: .
+    image: lay4flow-remote:controlled-proxy-switch-20261019
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${LAY4FLOW_REMOTE_PORT:-38000}:8000"
+    volumes:
+      - ./data:/app/data
+      - ./tmp:/app/tmp
+      - type: bind
+        source: ./config/setting.toml
+        target: /app/config/setting.toml
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      PYTHONUNBUFFERED: "1"
+      LAY4FLOW_PROFILE_VIEWER_ENABLED: "1"
+      LAY4FLOW_PROFILE_BACKGROUND_DISPLAY: ":98"
+      DISPLAY: ":99"
+    shm_size: "2gb"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3

@@ -1,0 +1,171 @@
+{
+  "provenance": {
+    "origin": "Saved official Google Vids editor JavaScript bundles, 2026-10-11",
+    "method": "Offline Node vm executed extracted official Kts/Pfh/jcq/bR/TO/xO/P3r/Rts/M3r and native proto setters/serialization; synthetic token only.",
+    "construction": "Vts Xps uploaded video branch: Kts(token) -> ogh field 6 -> Ke(name) -> P3r(uR, ogh) -> Rts(uR, name).",
+    "sources": [
+      {
+        "file": "core.js",
+        "sha256": "aa790a1c24c823e0ccee4945abdd0e2d0db4959fd1bb39d643301de46eb37cae",
+        "lines": [
+          568,
+          593,
+          600,
+          601,
+          608,
+          609,
+          610,
+          614,
+          617,
+          630,
+          637,
+          3980
+        ]
+      },
+      {
+        "file": "app.js",
+        "sha256": "ce386f68e872fa33e1bb221527cde3f9c3ef814a5a8ac29e5bee893fda2bd763",
+        "lines": [
+          999,
+          1077,
+          1478,
+          1490,
+          1492,
+          1501,
+          1931,
+          11486,
+          11489,
+          11490,
+          11497,
+          11498
+        ]
+      },
+      {
+        "file": "pretertiarydeps.js",
+        "sha256": "ab00da6045dbac387cf47002ab7895ed6536af5409c1a95b8d7862c52a60258a",
+        "lines": [
+          216
+        ]
+      },
+      {
+        "file": "tertiary.js",
+        "sha256": "0384a38019496e28104b5271519d9975cf4a31f842adfc1f167c40eb487f3401",
+        "lines": [
+          278,
+          893,
+          894,
+          899
+        ]
+      }
+    ]
+  },
+  "token": "SYNTHETIC_TEMPORARY_VIDEO",
+  "name": "source_video",
+  "temporary_video": [
+    null,
+    null,
+    null,
+    "SYNTHETIC_TEMPORARY_VIDEO",
+    1
+  ],
+  "named_video_node": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    [
+      null,
+      null,
+      null,
+      null,
+      null,
+      [
+        null,
+        null,
+        null,
+        "SYNTHETIC_TEMPORARY_VIDEO",
+        1
+      ],
+      null,
+      "source_video"
+    ]
+  ],
+  "named_reference": [
+    [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      [
+        "source_video",
+        [
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          [
+            null,
+            null,
+            null,
+            null,
+            null,
+            [
+              null,
+              null,
+              null,
+              "SYNTHETIC_TEMPORARY_VIDEO",
+              1
+            ],
+            null,
+            "source_video"
+          ]
+        ]
+      ]
+    ]
+  ]
+}
