@@ -22,7 +22,7 @@ services:
       LAY4FLOW_PROFILE_VIEWER_ENABLED: "1"
       LAY4FLOW_PROFILE_BACKGROUND_DISPLAY: ":98"
       DISPLAY: ":99"
-      REMOTE_BROWSER_BASE_URL: "http://host.docker.internal:8881"
+      REMOTE_BROWSER_BASE_URL: "https://cap.tk218.top"
     shm_size: "2gb"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
