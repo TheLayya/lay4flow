@@ -254,11 +254,18 @@ async def load_generated_asset(uri: str, media_type: str, *, allow_local=True) -
         or parsed.password
     ):
         raise APIError(502, "Invalid generated asset URL", "invalid_asset")
+    # Google content CDN is trusted; under Clash TUN it resolves to a FakeIP
+    # (198.18.x) that ipaddress.is_global rejects, so skip the global check for it.
+    trusted_cdn = parsed.hostname == "flow-content.google" or parsed.hostname.endswith(
+        ".googleusercontent.com"
+    )
     try:
         addresses = await asyncio.to_thread(
             socket.getaddrinfo, parsed.hostname, port, type=socket.SOCK_STREAM
         )
-        if not addresses or any(not ipaddress.ip_address(x[4][0]).is_global for x in addresses):
+        if not trusted_cdn and (
+            not addresses or any(not ipaddress.ip_address(x[4][0]).is_global for x in addresses)
+        ):
             raise APIError(502, "Asset points to a private destination", "invalid_asset")
         address = addresses[0][4][0]
         address = f"[{address}]" if ":" in address else address

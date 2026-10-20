@@ -1,5 +1,6 @@
 """Configuration management for lay4flow"""
 
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
@@ -464,7 +465,8 @@ class Config:
     @property
     def remote_browser_base_url(self) -> str:
         """The remote captcha provider is fixed for this distribution."""
-        return REMOTE_BROWSER_BASE_URL
+        override = os.getenv("REMOTE_BROWSER_BASE_URL", "").strip()
+        return override or REMOTE_BROWSER_BASE_URL
 
     def set_remote_browser_base_url(self, base_url: str):
         """Keep legacy settings reloads compatible with the fixed provider."""

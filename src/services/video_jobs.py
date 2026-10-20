@@ -297,6 +297,10 @@ class VideoJobService:
                     except asyncio.CancelledError:
                         raise
                     except Exception as error:
+                        print(
+                            f"[VIDEO JOB FAIL] {job_id}: {type(error).__name__}: {error}",
+                            flush=True,
+                        )
                         await self._fail(job_id, worker_id, error)
             finally:
                 self._pending_bytes -= media_bytes
