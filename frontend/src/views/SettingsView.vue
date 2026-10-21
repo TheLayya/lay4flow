@@ -26,7 +26,7 @@ const groups = [
     { id: 'generation', label: '生成与调度', sub: '超时 · 轮询 · 刷新', icon: MagicStick },
     { id: 'captcha', label: '远程有头打码', sub: '服务地址 · 密钥 · 超时', icon: Monitor },
     { id: 'cache', label: '媒体缓存', sub: '保存时间 · 访问地址', icon: FolderOpened },
-    { id: 'integration', label: '运行诊断', sub: '调试日志', icon: Tools },
+    { id: 'integration', label: '运行诊断', sub: '更新记录 · 调试日志', icon: Tools },
 ]
 const settingCards = [
     { id: 'api', section: 'general', terms: 'API 访问密钥 当前 API 密钥 新 API 密钥 key 外部客户端' },
@@ -45,6 +45,7 @@ const settingCards = [
         terms: '远程有头打码 验证码 远程服务地址 API 密钥 申请 请求超时 remote browser',
     },
     { id: 'cache', section: 'cache', terms: '作品媒体缓存 缓存保留时间 秒 公开访问地址 当前生效地址 图片 视频' },
+    { id: 'release', section: 'integration', terms: '更新记录 当前版本 版本日志 Docker Windows 安装 更新' },
     { id: 'debug', section: 'integration', terms: '运行诊断 启用详细调试日志 logs.txt' },
 ]
 const matchingCards = computed(() =>
@@ -84,6 +85,15 @@ const captcha = reactive({
     remote_browser_api_key: '',
     remote_browser_timeout: 60,
 })
+const release = reactive({
+    project: 'lay4flow-remote',
+    version: '—',
+    release_date: '',
+    entries: [],
+    release_page: 'https://github.com/TheLayya/lay4flow/releases',
+    update_docs: { windows: '/docs/WINDOWS_INSTALL.md', docker: '/docs/DOCKER_UPDATE.md' },
+})
+const releaseCheck = reactive({ loading: false, checked_at: '', status: '', message: '' })
 let loadRequest
 const configSources = [
     { id: 'admin', path: '/api/admin/config', target: admin },
@@ -206,6 +216,32 @@ async function readSettings() {
         markSnapshot('debug', { enabled: admin.debug_enabled })
     }
     loading.value = false
+    await loadRelease()
+}
+
+async function loadRelease() {
+    try {
+        Object.assign(release, await api.get('/api/admin/release'))
+    } catch (error) {
+        // Older servers may not have the release endpoint yet.
+        releaseCheck.message = '当前服务未提供版本记录接口，请查看仓库更新记录。'
+    }
+}
+
+async function checkRelease() {
+    if (releaseCheck.loading) return
+    releaseCheck.loading = true
+    try {
+        const result = await api.get('/api/admin/release/check')
+        Object.assign(releaseCheck, result)
+        if (result.status === 'update_available') ElMessage.warning(result.message)
+        else ElMessage.success(result.message || '版本检查完成')
+    } catch (error) {
+        releaseCheck.message = '线上版本暂时不可查询，已保留本地更新记录。'
+        notifyError(error)
+    } finally {
+        releaseCheck.loading = false
+    }
 }
 async function save(id, path, body, target = body) {
     if (busy.has(id)) return
@@ -908,6 +944,50 @@ onMounted(load)
                         </header>
                         <div class="settings-grid">
                             <section
+                                v-show="cardVisible('release')"
+                                data-setting-card="release"
+                                class="surface settings-card release-card"
+                            >
+                                <div class="card-heading">
+                                    <div>
+                                        <h3>版本与更新记录</h3>
+                                        <p>当前版本、已发布修复和 Docker / Windows 更新入口集中在这里。</p>
+                                    </div>
+                                    <el-tag type="info" size="small" effect="plain">{{ release.project }}</el-tag>
+                                </div>
+                                <div class="release-meta">
+                                    <div>
+                                        <span>当前版本</span>
+                                        <strong>{{ release.version === '—' ? '—' : `v${release.version}` }}</strong>
+                                    </div>
+                                    <div>
+                                        <span>发布日期</span>
+                                        <strong>{{ release.release_date || '—' }}</strong>
+                                    </div>
+                                    <div v-if="releaseCheck.checked_at">
+                                        <span>上次检查</span>
+                                        <strong>{{ parseDate(releaseCheck.checked_at).toLocaleString('zh-CN', { hour12: false }) }}</strong>
+                                    </div>
+                                </div>
+                                <p v-if="releaseCheck.message" class="release-note">{{ releaseCheck.message }}</p>
+                                <details v-for="(entry, index) in release.entries" :key="`${entry.version}-${entry.date}`" :open="index === 0" class="release-entry">
+                                    <summary class="release-entry-heading">
+                                        <strong>{{ entry.version ? `v${entry.version}` : '历史修复' }}</strong>
+                                        <span>{{ entry.date }}</span>
+                                        <span class="release-entry-toggle">展开 / 收起</span>
+                                    </summary>
+                                    <ul>
+                                        <li v-for="item in entry.items" :key="item">{{ item }}</li>
+                                    </ul>
+                                </details>
+                                <div class="release-links">
+                                    <el-button :loading="releaseCheck.loading" :icon="Refresh" @click="checkRelease">检查线上版本</el-button>
+                                    <a :href="release.release_page" target="_blank" rel="noreferrer">GitHub 发布页</a>
+                                    <a :href="release.update_docs.windows" target="_blank" rel="noreferrer">Windows 一键安装</a>
+                                    <a :href="release.update_docs.docker" target="_blank" rel="noreferrer">Docker 热更新</a>
+                                </div>
+                            </section>
+                            <section
                                 v-show="cardVisible('debug')"
                                 data-setting-card="debug"
                                 class="surface settings-card"
@@ -1119,6 +1199,75 @@ onMounted(load)
 }
 .settings-grid > .settings-card > .save-row {
     margin-top: auto;
+}
+.settings-grid > .release-card {
+    grid-column: 1 / -1;
+}
+.release-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px 34px;
+    margin: 2px 0 20px;
+}
+.release-meta > div {
+    display: grid;
+    gap: 6px;
+}
+.release-meta span,
+.release-entry-heading > span,
+.release-note {
+    color: var(--muted);
+    font-size: 13px;
+}
+.release-meta strong {
+    font-size: 16px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+.release-entry + .release-entry {
+    border-top: 1px solid var(--line);
+    padding-top: 16px;
+}
+.release-entry-heading {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    cursor: pointer;
+    padding: 2px 0 10px;
+    list-style: none;
+}
+.release-entry-heading::-webkit-details-marker {
+    display: none;
+}
+.release-entry-heading .release-entry-toggle {
+    margin-left: auto;
+    font-size: 12px;
+}
+.release-entry ul {
+    margin: 12px 0 18px;
+    padding-left: 20px;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.8;
+}
+.release-entry li + li {
+    margin-top: 7px;
+}
+.release-links {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 18px;
+    border-top: 1px solid var(--line);
+    padding-top: 16px;
+    font-size: 14px;
+}
+.release-links a {
+    color: var(--accent);
+}
+.release-note {
+    line-height: 1.7;
+    margin: 0 0 18px;
 }
 .settings-section-title {
     display: flex;

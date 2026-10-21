@@ -175,8 +175,51 @@ test('settings overview searches field labels without changing drafts and counts
     assert.equal(s.cardVisible('plugin'), false)
     assert.equal(s.generation.image_timeout, 480)
     s.settingsQuery.value = ''
-    assert.equal(s.matchingCards.value.length, 9)
+    assert.equal(s.matchingCards.value.length, 10)
     assert.equal(s.dirtyCount.value, 3)
+})
+
+test('release information is local on load and checks online versions only on request', async () => {
+    const paths = []
+    const local = {
+        version: '1.2.0',
+        release_date: '2026-10-21',
+        entries: [{ version: '1.2.0', date: '2026-10-21', items: ['合成更新记录'] }],
+    }
+    const { state: s } = view('Settings', {
+        api: {
+            get: async (path) => {
+                paths.push(path)
+                if (path === '/api/admin/release') return local
+                if (path === '/api/admin/release/check')
+                    return { status: 'unpublished', message: 'GitHub 尚未发布稳定版' }
+                throw new Error('Unexpected release path')
+            },
+        },
+    })
+    await s.loadRelease()
+    assert.equal(s.release.version, '1.2.0')
+    assert.deepEqual(paths, ['/api/admin/release'])
+    await s.checkRelease()
+    assert.deepEqual(paths, ['/api/admin/release', '/api/admin/release/check'])
+    assert.equal(s.releaseCheck.status, 'unpublished')
+    assert.equal(s.releaseCheck.loading, false)
+    assert.equal(s.release.entries[0].items[0], '合成更新记录')
+    s.settingsQuery.value = 'Windows'
+    assert.deepEqual(plain(s.matchingCards.value.map((card) => card.id)), ['release'])
+})
+
+test('release check failures retain the local version and changelog', async () => {
+    const { state: s } = view('Settings', {
+        api: { get: async () => { throw new Error('Synthetic offline network') } },
+    })
+    s.release.version = '1.2.0'
+    s.release.entries = [{ version: '1.2.0', items: ['已知修复'] }]
+    await s.checkRelease()
+    assert.equal(s.release.version, '1.2.0')
+    assert.equal(s.release.entries[0].items[0], '已知修复')
+    assert.equal(s.releaseCheck.loading, false)
+    assert.match(s.releaseCheck.message, /已保留本地更新记录/)
 })
 
 test('captcha settings always use the fixed service and refresh global health after saving', async () => {

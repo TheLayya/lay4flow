@@ -3,7 +3,7 @@ name: lay4flow-remote
 services:
   app:
     build: .
-    image: lay4flow-remote:upscale-fix-20261021
+    image: ${LAY4FLOW_REMOTE_IMAGE:-lay4flow-remote:1.2.0}
     init: true
     restart: unless-stopped
     ports:

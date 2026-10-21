@@ -1,9 +1,19 @@
 """Settings routes with explicit runtime dependencies."""
 
+import asyncio
+import json
+import re
+import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse
 
+from ...core.version import VERSION
 from ..admin_schemas import (
     CallLogicConfigRequest,
     GenerationConfigRequest,
@@ -11,6 +21,112 @@ from ..admin_schemas import (
     UpdateAPIKeyRequest,
     UpdateDebugConfigRequest,
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+RELEASE_API_URL = "https://api.github.com/repos/TheLayya/lay4flow/releases/latest"
+RELEASE_PAGE_URL = "https://github.com/TheLayya/lay4flow/releases"
+
+
+def _read_release_metadata() -> dict:
+    """Read the checked-in release identity and changelog without network access."""
+    version = VERSION
+    changelog_path = PROJECT_ROOT / "docs" / "CHANGELOG.md"
+    text = changelog_path.read_text(encoding="utf-8") if changelog_path.is_file() else ""
+    entries: list[dict] = []
+    current: dict | None = None
+    for line in text.splitlines():
+        heading = line.strip()
+        if heading.startswith("## "):
+            if current:
+                entries.append(current)
+            title = heading[3:].strip()
+            release_version, _, release_date = title.partition(" — ")
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", title):
+                release_version, release_date = "", title
+            current = {
+                "version": release_version.strip(),
+                "date": release_date.strip(),
+                "items": [],
+            }
+        elif current and heading.startswith("- "):
+            current["items"].append(heading[2:].strip())
+    if current:
+        entries.append(current)
+    date = entries[0]["date"] if entries else ""
+    return {
+        "project": "lay4flow-remote",
+        "version": version,
+        "release_date": date,
+        "entries": entries,
+        "release_page": RELEASE_PAGE_URL,
+        "update_docs": {
+            "windows": "/docs/WINDOWS_INSTALL.md",
+            "docker": "/docs/DOCKER_UPDATE.md",
+        },
+    }
+
+
+def _valid_release_payload(payload: object) -> dict | None:
+    """Keep the remote check informational and limited to the trusted repository."""
+    if not isinstance(payload, dict) or payload.get("draft") or payload.get("prerelease"):
+        return None
+    tag = str(payload.get("tag_name") or "").strip().removeprefix("v")
+    html_url = str(payload.get("html_url") or "").strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+", tag) or html_url not in {
+        f"{RELEASE_PAGE_URL}/tag/{tag}",
+        f"{RELEASE_PAGE_URL}/tag/v{tag}",
+    }:
+        return None
+    return {"version": tag, "url": html_url, "name": str(payload.get("name") or tag)}
+
+
+async def _check_latest_release() -> dict:
+    local = _read_release_metadata()
+
+    def fetch() -> dict | None:
+        request = urllib.request.Request(
+            RELEASE_API_URL,
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "lay4flow-remote"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                return _valid_release_payload(json.loads(response.read().decode("utf-8")))
+        except urllib.error.HTTPError as error:
+            return {"unpublished": True} if error.code == 404 else None
+        except (OSError, ValueError):
+            return None
+
+    try:
+        latest = await asyncio.wait_for(asyncio.to_thread(fetch), timeout=9)
+    except TimeoutError:
+        latest = None
+    checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    if latest is None or latest.get("unpublished"):
+        return {
+            "success": True,
+            "status": "unpublished" if latest else "unavailable",
+            "message": (
+                "GitHub 尚未发布稳定版，当前版本与本地更新记录仍可查看。"
+                if latest
+                else "线上版本暂时不可查询，当前版本与本地更新记录仍可使用。"
+            ),
+            "local": local,
+            "checked_at": checked_at,
+        }
+    latest_version = latest["version"]
+    newer = tuple(map(int, latest_version.split("."))) > tuple(map(int, VERSION.split(".")))
+    return {
+        "success": True,
+        "status": "update_available" if newer else "up_to_date",
+        "message": (
+            f"发现线上版本 {latest_version}，请查看发布页。"
+            if newer
+            else "当前版本已包含发布页上的最新稳定版。"
+        ),
+        "local": local,
+        "latest": latest,
+        "checked_at": checked_at,
+    }
 
 
 def create_settings_router(
@@ -21,6 +137,8 @@ def create_settings_router(
     call_generation_config: Callable,
 ):
     router = APIRouter()
+    release_check_lock = asyncio.Lock()
+    release_check_cache = {"at": 0.0, "result": None}
 
     @router.get("/api/config/generation")
     async def get_generation_config(token: str = Depends(verify_token)):
@@ -88,17 +206,53 @@ def create_settings_router(
                 "total_tokens": stats["total_tokens"],
                 "active_tokens": stats["active_tokens"],
                 "total_credits": stats["total_credits"],
-                "version": "1.0.0",
+                "version": VERSION,
             },
         }
 
+    @router.get("/api/admin/release")
+    async def get_release_metadata(token: str = Depends(verify_token)):
+        """Return the local release identity and checked-in changelog."""
+        return {"success": True, **_read_release_metadata()}
+
+    @router.get("/api/admin/release/check")
+    async def check_latest_release(token: str = Depends(verify_token)):
+        """Check the trusted GitHub release page without delaying app startup."""
+        async with release_check_lock:
+            if (
+                release_check_cache["result"] is None
+                or time.monotonic() - release_check_cache["at"] > 300
+            ):
+                release_check_cache["result"] = await _check_latest_release()
+                release_check_cache["at"] = time.monotonic()
+            return release_check_cache["result"]
+
+    @router.get("/docs/{document}", include_in_schema=False)
+    async def get_release_document(document: str):
+        """Serve only public install/update instructions shipped with this release."""
+        if document not in {"WINDOWS_INSTALL.md", "DOCKER_UPDATE.md", "CHANGELOG.md"}:
+            raise HTTPException(status_code=404, detail="Document not found")
+        path = PROJECT_ROOT / "docs" / document
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Document not found")
+        return FileResponse(path, media_type="text/plain; charset=utf-8")
+
     @router.get("/health")
-    async def health_check():
+    async def health_check(request: Request):
         """Public health check endpoint - no auth required"""
         try:
-            return await build_health(get_database())
+            payload = await build_health(get_database())
         except Exception:
-            return {"backend_running": True, "has_active_tokens": False}
+            payload = {"backend_running": False, "ready": False, "has_active_tokens": False}
+        payload["version"] = VERSION
+        app = getattr(request, "app", None)
+        activity = getattr(getattr(app, "state", None), "update_activity", None)
+        payload["update_active_requests"] = getattr(activity, "active_requests", 0)
+        payload["update_in_progress"] = bool(activity and activity.marker.exists())
+        manager = getattr(getattr(app, "state", None), "token_manager", None)
+        imports = getattr(manager, "_profile_import_jobs", None)
+        payload["update_pending_imports"] = imports._pending() if imports else 0
+        return payload
 
     @router.get("/api/stats")
     async def get_stats(token: str = Depends(verify_token)):

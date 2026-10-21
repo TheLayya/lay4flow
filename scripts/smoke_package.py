@@ -73,6 +73,7 @@ assert Path("data/flow.db").exists() == bool(iteration)
 with contextlib.redirect_stdout(io.StringIO()), TestClient(app) as client:
     health = client.get("/health")
     assert health.status_code == 200 and health.json()["backend_running"]
+    assert health.json()["version"] == API_VERSION
     for path in ("/manage", "/test", "/vids", "/vids-accounts", "/vids/accounts", "/legacy/manage", "/legacy/test", "/legacy/vids", "/legacy/vids-accounts"):
         response = client.get(path, follow_redirects=False)
         assert response.status_code == 302 and response.headers["location"] == "/login", path
@@ -90,6 +91,11 @@ with contextlib.redirect_stdout(io.StringIO()), TestClient(app) as client:
         assert client.post("/api/login", json={"username":"admin", "password":"admin"}).status_code == 401
     login = client.post("/api/login", json={"username":"admin", "password":"admin" if iteration == 0 else "smoke-updated-password"})
     assert login.status_code == 200 and login.json()["success"]
+    release = client.get("/api/admin/release")
+    assert release.status_code == 200 and release.json()["version"] == API_VERSION
+    assert release.json()["entries"], "Release changelog must ship with the runtime"
+    for name in ("CHANGELOG.md", "WINDOWS_INSTALL.md", "DOCKER_UPDATE.md"):
+        assert client.get("/docs/" + name).status_code == 200, name
     if iteration == 0:
         changed = client.post("/api/admin/change-password", json={"old_password":"admin", "new_password":"smoke-updated-password"})
         assert changed.status_code == 200 and changed.json()["success"]
@@ -195,6 +201,7 @@ def main() -> int:
         shutil.copy2(ROOT / "docs/API.md", target / "docs/API.md")
         shutil.copy2(ROOT / "config/setting_example.toml", target / "config/setting_example.toml")
         shutil.copy2(ROOT / "main.py", target / "main.py")
+        shutil.copy2(ROOT / "VERSION", target / "VERSION")
         environment = {**os.environ, "PYTHONUTF8": "1", "PYTHONPATH": str(target)}
         for iteration in range(2):
             result = subprocess.run(

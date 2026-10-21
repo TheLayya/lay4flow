@@ -45,9 +45,21 @@ jobs:
       - name: Verify runtime release package
         if: runner.os == 'Linux'
         run: python scripts/package_release.py "$RUNNER_TEMP/lay4flow-remote-runtime.tar.gz"
+      - name: Build versioned installation and update assets
+        if: runner.os == 'Linux'
+        run: python scripts/build_release.py "$RUNNER_TEMP/lay4flow-release"
+      - name: Check Docker updater shell
+        if: runner.os == 'Linux'
+        run: bash -n scripts/update.sh
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
         with:
           name: lay4flow-remote-runtime
           path: ${{ runner.temp }}/lay4flow-remote-runtime.tar.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: lay4flow-remote-installation-and-update
+          path: ${{ runner.temp }}/lay4flow-release/
           if-no-files-found: error

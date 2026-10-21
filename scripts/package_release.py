@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TOP_LEVEL = (
     "main.py",
+    "VERSION",
     "requirements.txt",
     "README.md",
     "LICENSE",
@@ -40,8 +41,14 @@ TOP_LEVEL = (
     "docs/screenshots/api-guide.webp",
     "docs/screenshots/settings.webp",
     "docs/screenshots/mobile.webp",
+    "docs/screenshots/updates.webp",
     "scripts/smoke_package.py",
     "scripts/capture_readme.mjs",
+    "scripts/update.ps1",
+    "scripts/update.sh",
+    "scripts/update_runtime.py",
+    "docs/DOCKER_UPDATE.md",
+    "docs/WINDOWS_INSTALL.md",
 )
 TREE_SUFFIXES = {
     "src": {".py"},
@@ -102,6 +109,7 @@ def runtime_files(root: Path):
 def package_release(root: Path, output: Path) -> dict:
     root, output = Path(root).resolve(), Path(output).resolve()
     files = list(runtime_files(root))
+    version = (root / "VERSION").read_text(encoding="utf-8").strip()
     output.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(output, "w:gz") as archive:
         for path in files:
@@ -115,7 +123,7 @@ def package_release(root: Path, output: Path) -> dict:
         sha256 = hashlib.file_digest(packaged, "sha256").hexdigest()
     return {
         "project": "lay4flow-remote",
-        "version": "0.1.0",
+        "version": version,
         "files": [path.relative_to(root).as_posix() for path in files],
         "sha256": sha256,
     }

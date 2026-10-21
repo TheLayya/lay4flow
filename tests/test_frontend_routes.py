@@ -80,6 +80,7 @@ class FrontendRouteTests(unittest.TestCase):
                 ROOT / "src", target / "src", ignore=shutil.ignore_patterns("__pycache__", "*.pyc")
             )
             (target / "config").mkdir()
+            shutil.copy2(ROOT / "VERSION", target / "VERSION")
             shutil.copy2(
                 ROOT / "config/setting_example.toml", target / "config/setting_example.toml"
             )

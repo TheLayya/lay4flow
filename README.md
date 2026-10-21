@@ -4,7 +4,7 @@
 
 支持 AT 自动续期、Cloak 持久登录、登录态 JSON 导入导出、多账号聚合、固定代理、商务 SKU，以及带作品历史和图片编辑器的可视化工作台。Flow 验证码固定使用 **[远程有头打码服务](https://cap.tk218.top/)**，点击申请 API Key 后填入设置即可。
 
-[快速部署](#快速部署) · [打码申请与配置](#打码申请与配置) · [界面预览](#界面预览) · [账号与自动续期](#账号与自动续期) · [登录态导入导出](#登录态导入导出免重复登录迁移) · [API 接入](#api-接入) · [完整文档](#完整文档) · [社区](#社区) · [QQ 交流群](#qq-交流群)
+[快速部署](#快速部署) · [Windows 一键安装](#windows-一键安装) · [Docker 在线更新](#docker-在线更新) · [打码申请与配置](#打码申请与配置) · [界面预览](#界面预览) · [账号与自动续期](#账号与自动续期) · [登录态导入导出](#登录态导入导出免重复登录迁移) · [API 接入](#api-接入) · [完整文档](#完整文档) · [社区](#社区) · [QQ 交流群](#qq-交流群)
 
 本次修复与行为说明见[更新记录](docs/CHANGELOG.md)。
 
@@ -60,6 +60,12 @@
 
 </details>
 
+### 版本与更新入口
+
+后台设置中的版本卡片集中展示当前版本、变更记录、Windows 安装包和 Docker 更新指引；检查线上版本是手动触发的，不会阻塞创作任务。
+
+![版本与更新记录：安装和 Docker 更新入口](docs/screenshots/updates.webp)
+
 ### 代理池与 API 文档
 
 代理池支持批量导入与逐行错误反馈。API 文档按 Flow、Vids、商务 SKU 分组，提供可复制的请求示例。
@@ -88,6 +94,28 @@
 本发行版固定连接该服务，用户只需配置 Key 与超时；仓库包含客户端，不包含远程打码服务端。Vids 使用独立会话、账号池与配额，其接入状态在账号管理中查看。
 
 ## 快速部署
+
+### Windows 一键安装
+
+在 [GitHub Releases](https://github.com/TheLayya/lay4flow/releases) 下载 `lay4flow-remote-版本-windows-x64.zip`，解压后双击 **`install.cmd`**。需要先安装 [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/) 并启用 Linux 容器；安装器自动准备配置、构建并启动服务，成功后打开管理页并创建桌面快捷方式。
+
+默认安装到 `%LOCALAPPDATA%\lay4flow-remote`，账号和密码均为 **`admin`**。详细的启动、更新、停止与保留数据卸载方式见 [Windows 安装指引](docs/WINDOWS_INSTALL.md)。
+
+### Docker 在线更新
+
+已有部署在宿主机运行更新脚本，先下载并校验发布包、构建候选，再备份和切换应用；健康或版本检查失败会回滚。
+
+```powershell
+# Windows，在部署目录运行
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/update.ps1 -InstallDir .
+```
+
+```sh
+# Linux，在部署目录运行
+bash scripts/update.sh --install-dir .
+```
+
+更新保留持久数据与配置，单实例切换会短暂重启。升级前结束生成与导入任务；回滚命令、备份位置和首次接入旧版的操作见 [Docker 更新指引](docs/DOCKER_UPDATE.md)。运行中可在 **工坊设置 → 版本与更新** 查看当前版本、变更记录和检查新版本。
 
 ### 1. 准备 Docker 与打码 API Key
 
@@ -388,6 +416,9 @@ python scripts/package_release.py /path/to/lay4flow-remote-runtime.tar.gz
 | [远程验证码契约](docs/REMOTE_BROWSER_FINGERPRINT.md) | 服务请求、指纹、会话完成和失败回调 |
 | [前端开发](docs/FRONTEND.md) | 构建、隔离预览与界面回归 |
 | [发布与验收](docs/RELEASE_PACKAGE.md) | 镜像、发布包、持久化与真实环境验收 |
+| [Windows 一键安装](docs/WINDOWS_INSTALL.md) | 双击安装、启动、更新与保留数据卸载 |
+| [Docker 在线更新](docs/DOCKER_UPDATE.md) | 校验、备份、版本切换与失败回滚 |
+| [版本更新记录](docs/CHANGELOG.md) | 每版变化、升级影响和已知限制 |
 | [安全问题报告](SECURITY.md) | 私密报告与凭据管理 |
 
 运行服务内还可打开 `/api-guide`、`/api-docs`、`/compat/api-docs` 和 `/providers/vids/api-docs` 查看交互文档。

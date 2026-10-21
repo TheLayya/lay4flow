@@ -32,6 +32,8 @@ from .api.vids_media import (
 )
 from .core.config import config
 from .core.monitoring import CONTENT_TYPE_LATEST, render_main_metrics
+from .core.update_guard import UpdateActivity, UpdateGuardMiddleware
+from .core.version import VERSION
 from .services.factory import create_services
 from .services.video_jobs import VideoJobService
 from .services.vids.auto_onboarding import VidsAutoOnboarding
@@ -41,7 +43,7 @@ from .services.vids.onboarding import VidsOnboardingService
 # Auxiliary API containers may skip the Vids video-worker and its database lock.
 _SKIP_VIDS = os.getenv("LAY4FLOW_SKIP_VIDS", "").strip().lower() in {"1", "true", "yes", "on"}
 _LOCAL_NO_PROXY_HOSTS = ("127.0.0.1", "localhost", "::1")
-API_VERSION = "1.1.0"
+API_VERSION = VERSION
 PUBLIC_OPENAPI_PATHS = frozenset(
     {
         "/v1/chat/completions",
@@ -303,6 +305,9 @@ app = FastAPI(
     version=API_VERSION,
     lifespan=lifespan,
 )
+app.state.update_activity = UpdateActivity(Path(db.db_path).resolve().parent / "update-maintenance")
+app.state.token_manager = token_manager
+app.add_middleware(UpdateGuardMiddleware, activity=app.state.update_activity)
 app.state.model_gateway = model_gateway
 app.state.vids_dispatcher = services.vids_dispatcher
 app.state.vids_runtime = vids_runtime

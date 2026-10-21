@@ -14,6 +14,8 @@ data/
 tmp/
 output/
 dist/
+.lay4flow-updates/
+.lay4flow-windows/
 browser_data*/
 *.db
 *.db-*

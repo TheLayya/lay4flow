@@ -50,6 +50,7 @@ const fixtureKey = 'fixture-current-secret-key'
 const fixtures = {
     '/health': { status: 'ok', backend_running: true, has_active_tokens: true },
     '/api/stats': { total_tokens: 3, active_tokens: 3, today_images: 0, today_videos: 0, today_errors: 0 },
+    '/api/profile-transfer/jobs': { jobs: [] },
     '/api/admin/config': {
         admin_username: 'fixture-admin',
         api_key: fixtureKey,
@@ -80,6 +81,15 @@ const fixtures = {
                 last_check_at: '2026-10-16T02:00:00Z',
             },
         ],
+    },
+    '/api/admin/release': {
+        success: true,
+        project: 'lay4flow-remote',
+        version: '1.2.0',
+        release_date: '2026-10-21',
+        entries: [{ version: '1.2.0', date: '2026-10-21', items: ['合成更新记录测试'] }],
+        release_page: 'https://github.com/TheLayya/lay4flow/releases',
+        update_docs: { windows: '/docs/WINDOWS_INSTALL.md', docker: '/docs/DOCKER_UPDATE.md' },
     },
 }
 await context.route('**/*', (route) => {
@@ -190,7 +200,7 @@ try {
     assert.match(summaryText, /验证码|打码/)
     assert.match(summaryText, /缓存/)
     assert.match(summaryText, /API 访问\s*已配置/)
-    assert.match(summaryText, /验证码\s*远程有头打码/)
+    assert.match(summaryText, /验证码\s*已填写密钥/)
     assert.match(summaryText, /媒体缓存\s*120 分钟/)
     assert.match(summaryText, /待保存\s*0 组修改/)
     assert.doesNotMatch(summaryText, new RegExp(fixtureKey))

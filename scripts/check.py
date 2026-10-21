@@ -8,6 +8,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENTS = [
+    "src/core/version.py",
+    "src/core/update_guard.py",
+    "tests/test_update_guard.py",
+    "tests/test_release_metadata.py",
+    "tests/test_update_runtime.py",
+    "tests/test_update_shell.py",
+    "tests/test_windows_installer.py",
     "src/core/auth.py",
     "tests/test_default_credentials.py",
     "src/main.py",

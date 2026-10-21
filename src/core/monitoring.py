@@ -54,6 +54,7 @@ except ModuleNotFoundError:
 
 
 from .config import config
+from .version import VERSION
 
 _PROCESS_START_TIME = time.time()
 _REMOTE_HEALTH_CACHE_TTL_SECONDS = 10.0
@@ -630,6 +631,7 @@ async def build_public_health_snapshot(db: Any) -> dict[str, Any]:
             banned_429_tokens += 1
 
     return {
+        "version": VERSION,
         "backend_running": True,
         "has_active_tokens": active_tokens > 0,
         "total_tokens": len(rows),

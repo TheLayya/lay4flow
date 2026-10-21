@@ -80,6 +80,7 @@ def main() -> int:
                 ROOT / name, target / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc")
             )
         (target / "config").mkdir()
+        shutil.copy2(ROOT / "VERSION", target / "VERSION")
         shutil.copy2(ROOT / "config/setting_example.toml", target / "config/setting_example.toml")
         environment = {**os.environ, "PYTHONUTF8": "1", "PYTHONPATH": str(target)}
         result = subprocess.run(

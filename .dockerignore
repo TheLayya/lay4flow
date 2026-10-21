@@ -17,6 +17,8 @@ data
 tmp
 output
 dist
+.lay4flow-updates
+.lay4flow-windows
 browser_data*
 config/*
 !config/setting_example.toml
@@ -35,10 +37,14 @@ logs.txt
 **/*.tar.gz
 **/*.zip
 *.md
+!README.md
 docs/*
 !docs/
 !docs/API.md
 !docs/VIDS_API.md
+!docs/DOCKER_UPDATE.md
+!docs/WINDOWS_INSTALL.md
+!docs/CHANGELOG.md
 !LICENSE
 !NOTICE
 !SECURITY.md
