@@ -12,6 +12,19 @@ import { spawnSync } from 'node:child_process'
 // The preview only serves UI assets. Every API response and displayed account is
 // synthetic; upstream requests and writes are intercepted before they leave Chromium.
 const root = fileURLToPath(new URL('..', import.meta.url))
+const version = readFileSync(resolve(root, 'VERSION'), 'utf8').trim()
+assert.match(version, /^\d+\.\d+\.\d+$/)
+const entries = []
+for (const line of readFileSync(resolve(root, 'docs/CHANGELOG.md'), 'utf8').split(/\r?\n/)) {
+    const heading = line.match(/^## (\d+\.\d+\.\d+) — (\d{4}-\d{2}-\d{2})$/)
+    if (heading) entries.push({ version: heading[1], date: heading[2], items: [] })
+    else if (line.startsWith('- ') && entries.length) entries.at(-1).items.push(line.slice(2).trim())
+}
+const releaseMetadata = {
+    success: true, project: 'lay4flow-remote', version, release_date: entries[0]?.date, entries,
+    release_page: 'https://github.com/TheLayya/lay4flow/releases',
+    update_docs: { windows: '/docs/WINDOWS_INSTALL.md', docker: '/docs/DOCKER_UPDATE.md' },
+}
 const require = createRequire(new URL('../frontend/package.json', import.meta.url))
 const { chromium } = require('playwright')
 const base = process.env.FRONTEND_PREVIEW_URL || 'http://127.0.0.1:38127'
@@ -113,7 +126,14 @@ const vidsStatus = {
     }])),
 }
 const fixtures = {
-    '/health': { status: 'ok', backend_running: true, has_active_tokens: true, remote_browser_configured: true },
+    '/health': { status: 'ok', version, backend_running: true, has_active_tokens: true, remote_browser_configured: true },
+    '/api/admin/network': { mode: 'direct', reachable: null, upstream: null, message: '演示实例使用直连通路，账号最终出口由固定代理保持。' },
+    '/api/profile-transfer/jobs': { success: true, jobs: [] },
+    '/api/admin/studio/jobs': { success: true, jobs: [] },
+    '/api/release': releaseMetadata,
+    '/api/admin/release': releaseMetadata,
+    '/api/release/check': { success: true, status: 'up_to_date', message: '当前版本已包含发布页上的最新稳定版。', local: releaseMetadata, latest: { version }, checked_at: date(0) },
+    '/api/admin/release/check': { success: true, status: 'up_to_date', message: '当前版本已包含发布页上的最新稳定版。', local: releaseMetadata, latest: { version }, checked_at: date(0) },
     '/api/stats': { total_tokens: 3, active_tokens: 3, today_images: 48, today_videos: 12, today_errors: 0, total_images: 268, total_videos: 56, total_errors: 0 },
     '/api/tokens': accounts,
     '/api/logs': logs,
@@ -218,6 +238,7 @@ try {
     await capture('login', '萌娘 lay 登录页与分层插画场景')
     authenticated = true
     await go('dashboard', '.dashboard-page h1')
+    await page.locator('.dashboard-overview-tabs').getByRole('button', { name: '趋势与额度', exact: true }).click()
     await capture('dashboard', 'Flow 与 Vids 工坊总览、创作统计及可用额度')
     await go('studio', '.studio-view h1')
     await page.locator('.gallery-card').nth(5).waitFor()
@@ -232,7 +253,10 @@ try {
     })
     await ready('.gallery-card img')
     await page.locator('.studio-editor textarea').fill('樱花树下的 lay，轻盈的春日微风，温暖明亮的日系插画。')
-    await capture('studio', '聚合创作工作台、模型参数及本地示例作品')
+    await page.locator('#studio-generation-count').fill('4')
+    await page.locator('#studio-generation-count').blur()
+    await capture('studio', '聚合创作工作台、生成数量与固定提交按钮及本地示例作品')
+    await page.getByRole('tab', { name: '参考素材', exact: true }).click()
     await page.locator('.reference-board input[type="file"]').setInputFiles({
         name: 'lay-春日灵感.webp', mimeType: 'image/webp',
         buffer: readFileSync(resolve(root, 'frontend/src/assets/koharu-banner.webp')),
@@ -281,9 +305,19 @@ try {
     await go('guide?platform=vids', '.guide-view h1')
     await capture('api-guide', 'Flow、Vids 与商务固定 SKU 三种接入目录')
     await go('settings', '.settings-view h1')
-    await page.locator('.settings-search input').fill('远程')
+    await page.locator('.settings-nav button').filter({ hasText: '远程有头打码' }).click()
     await ready('[data-setting-card="captcha"]')
-    await capture('settings', '远程有头浏览器服务配置')
+    await capture('settings', '远程有头打码设置分区与固定申请入口')
+    await page.getByRole('button', { name: '版本与更新', exact: true }).click()
+    const releaseDrawer = page.locator('.release-history-drawer')
+    await releaseDrawer.getByText(`当前 v${version}`, { exact: true }).waitFor()
+    assert.match(await page.getByRole('button', { name: '版本与更新', exact: true }).innerText(), new RegExp(version.replaceAll('.', '\\.')))
+    await releaseDrawer.getByRole('button', { name: '检查更新', exact: true }).click()
+    await releaseDrawer.getByText('当前版本已包含发布页上的最新稳定版。', { exact: true }).waitFor()
+    await page.locator('.el-message').waitFor({ state: 'hidden' })
+    await capture('updates', '左下角版本号打开更新日志抽屉，检查线上版本与逐版变更')
+    await releaseDrawer.getByRole('button', { name: /close|关闭/i }).click()
+    await releaseDrawer.waitFor({ state: 'hidden' })
     await page.setViewportSize({ width: 390, height: 844 })
     await go('dashboard', '.dashboard-page h1')
     await capture('mobile', '手机端工坊总览')
@@ -296,6 +330,7 @@ try {
     await page.getByRole('tab', { name: '声线 · 语音', exact: true }).click()
     await page.locator('.studio-editor textarea').fill('Welcome to our little creative studio. Let your imagination bloom, and bring every story to life.')
     await page.waitForFunction(() => document.querySelectorAll('.gallery-card audio').length === 3 && [...document.querySelectorAll('.gallery-card audio')].every((audio) => audio.readyState >= 2))
+    await page.getByRole('tab', { name: '声线设置', exact: true }).click()
     await page.locator('.el-form-item').filter({ has: page.locator('.el-form-item__label').getByText('选择声线', { exact: true }) }).locator('.el-select').click()
     await page.getByRole('option', { name: 'Neo · 欢快、音调适中', exact: true }).waitFor()
     await capture('vids-studio', 'Vids 语音工作台、官方声线选择与可播放的合成示例音频')
@@ -311,7 +346,7 @@ try {
     ], { encoding: 'utf8' })
     assert.equal(converted.status, 0, converted.stderr)
     await writeFile(resolve(review, 'verification.json'), JSON.stringify({
-        base, captures, errors, failedAssets, unexpected, external, requests,
+        base, version, captures, errors, failedAssets, unexpected, external, requests,
         fixtures: { accounts: accounts.map((row) => row.email), proxyNetwork: '192.0.2.0/24', artwork: images,
             data: 'Synthetic UI fixtures; every API request mocked; no generation request submitted; cookies/origins empty. Speech previews are local synthesized tones, not upstream voice generation.' },
     }, null, 2))

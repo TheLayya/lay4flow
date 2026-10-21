@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -178,6 +179,71 @@ class CloakProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"CONNECT api.invalid:443", seen[0])
         self.assertIn(b"Proxy-Authorization: Basic " + base64.b64encode(b"user:p:#@"), seen[0])
         self.assertNotIn(b"Proxy-Authorization", seen[1])
+
+    async def test_host_http_hop_connects_to_fixed_socks_without_changing_remote_dns(self):
+        final_port, final_seen = await self.socks_server(b"fixed-egress")
+        first_seen = []
+
+        async def tunnel(reader, writer):
+            self.writers.append(writer)
+            request = await reader.readuntil(b"\r\n\r\n")
+            first_seen.append(request)
+            upstream_reader, upstream_writer = await asyncio.open_connection(
+                "127.0.0.1", final_port
+            )
+            self.writers.append(upstream_writer)
+            writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            await writer.drain()
+
+            async def pipe(source, destination):
+                while chunk := await source.read(65536):
+                    destination.write(chunk)
+                    await destination.drain()
+                destination.close()
+
+            await asyncio.gather(pipe(reader, upstream_writer), pipe(upstream_reader, writer))
+
+        server = await asyncio.start_server(tunnel, "127.0.0.1", 0)
+        self.servers.append(server)
+        first_port = server.sockets[0].getsockname()[1]
+        with patch.dict(os.environ, {"LAY4FLOW_HOST_PROXY": f"http://127.0.0.1:{first_port}"}):
+            bridge = await self.bridge(final_port, "account-user", "final-secret")
+        reader, writer = await self.connect(bridge)
+        writer.write(b"CONNECT google.invalid:443 HTTP/1.1\r\nHost: google.invalid:443\r\n\r\n")
+        await writer.drain()
+        self.assertIn(b"200", await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 3))
+        writer.write(b"GET /session HTTP/1.1\r\nHost: google.invalid\r\n\r\n")
+        await writer.drain()
+        self.assertTrue((await asyncio.wait_for(reader.read(), 3)).endswith(b"fixed-egress"))
+        self.assertIn(f"CONNECT 127.0.0.1:{final_port}".encode(), first_seen[0])
+        self.assertNotIn(b"google.invalid", first_seen[0])
+        self.assertNotIn(b"final-secret", first_seen[0])
+        self.assertEqual(final_seen[0]["hostname"], b"google.invalid")
+        self.assertEqual(final_seen[0]["username"], b"account-user")
+
+    async def test_host_hop_rejection_does_not_fall_back_to_the_fixed_proxy(self):
+        final_port, final_seen = await self.socks_server(b"should-not-connect")
+
+        async def reject(reader, writer):
+            self.writers.append(writer)
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(reject, "127.0.0.1", 0)
+        self.servers.append(server)
+        bridge = await CloakProxyBridge.start(
+            f"socks5h://account-user:secret@127.0.0.1:{final_port}",
+            host_proxy=f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}",
+        )
+        self.bridges.append(bridge)
+        reader, writer = await self.connect(bridge)
+        writer.write(b"CONNECT google.invalid:443 HTTP/1.1\r\nHost: google.invalid:443\r\n\r\n")
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), 3)
+        self.assertNotIn(b"200", response)
+        self.assertFalse(final_seen)
 
     async def test_backend_keeps_original_binding_and_preserves_failed_close_for_retry(self):
         context = SimpleNamespace(close=AsyncMock())

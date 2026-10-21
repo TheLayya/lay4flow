@@ -74,6 +74,57 @@ class ReleaseMetadataTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReleaseMetadataRouteTests(unittest.TestCase):
+    def test_host_network_status_uses_runtime_selection_and_requires_login(self):
+        def denied():
+            raise HTTPException(status_code=401, detail="Synthetic expired session")
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "host-network.json"
+            state_file.write_text(
+                json.dumps({"mode": "auto", "source": "windows_proxy", "checked_at": "fixture"}),
+                encoding="utf-8-sig",
+            )
+            database = SimpleNamespace(db_path=str(Path(directory) / "flow.db"))
+            app = FastAPI()
+            router, _ = settings.create_settings_router(
+                lambda: database, Mock(), Mock(), denied, Mock()
+            )
+            app.include_router(router)
+            with TestClient(app) as client:
+                self.assertEqual(client.get("/api/admin/network").status_code, 401)
+                app.dependency_overrides[denied] = lambda: "synthetic-session"
+                with (
+                    patch.dict(
+                        "os.environ",
+                        {"LAY4FLOW_HOST_PROXY": "http://fixture:secret@host.docker.internal:18732"},
+                    ),
+                    patch.object(
+                        settings.asyncio,
+                        "open_connection",
+                        new=AsyncMock(return_value=(Mock(), Mock())),
+                    ) as connect,
+                ):
+                    result = client.get("/api/admin/network").json()
+                connect.assert_awaited_once_with("host.docker.internal", 18732)
+                self.assertEqual(result["upstream"], "http://host.docker.internal:18732")
+                self.assertEqual(result["source"], "windows_proxy")
+                self.assertTrue(result["reachable"])
+                self.assertNotIn("secret", json.dumps(result))
+                with (
+                    patch.dict(
+                        "os.environ", {"LAY4FLOW_HOST_PROXY": "http://host.docker.internal:18732"}
+                    ),
+                    patch.object(
+                        settings.asyncio, "open_connection", new=AsyncMock(side_effect=OSError())
+                    ),
+                ):
+                    self.assertFalse(client.get("/api/admin/network").json()["reachable"])
+                state_file.write_text("[]", encoding="utf-8")
+                with patch.dict("os.environ", {"LAY4FLOW_HOST_PROXY": ""}):
+                    result = client.get("/api/admin/network").json()
+                self.assertEqual(result["upstream"], "")
+                self.assertEqual(result["mode"], "auto")
+
     def test_health_exposes_drain_counts_and_marks_database_failure_not_ready(self):
         app = FastAPI()
         health = AsyncMock(return_value={"backend_running": True, "ready": True})

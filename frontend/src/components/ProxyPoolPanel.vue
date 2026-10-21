@@ -878,4 +878,50 @@ watch(
         display: none;
     }
 }
+@media (min-width: 1051px) {
+    .proxy-pool-panel {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+    }
+    .pool-panel-heading,
+    .pool-stats,
+    .pool-toolbar,
+    .pool-selectionbar,
+    .pool-bulkbar,
+    .pool-pagination {
+        flex-shrink: 0;
+    }
+    .pool-panel-heading {
+        margin-bottom: 10px;
+    }
+    .pool-panel-heading p {
+        display: none;
+    }
+    .pool-stats > div {
+        padding-block: 6px;
+    }
+    .pool-table-wrap {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+    }
+    .pool-table-wrap > .el-table {
+        height: 100%;
+        max-height: none !important;
+        min-height: 0;
+        flex: 1;
+    }
+    .pool-table-wrap :deep(.el-table__inner-wrapper) {
+        height: 100%;
+    }
+    .pool-table-wrap :deep(.el-table__body-wrapper) {
+        flex: 1;
+        min-height: 0;
+    }
+    .pool-pagination {
+        padding-top: 10px;
+        margin-top: 0;
+    }
+}
 </style>

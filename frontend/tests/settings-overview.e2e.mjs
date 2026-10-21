@@ -69,7 +69,12 @@ const fixtures = {
     '/api/cache/config': {
         config: { enabled: true, timeout: 7200, base_url: '', effective_base_url: 'http://fixture.cache.test:8000' },
     },
-    '/api/captcha/config': { captcha_method: 'remote_browser', remote_browser_base_url: 'https://captcha.example.test', remote_browser_api_key: 'synthetic-key', remote_browser_timeout: 60 },
+    '/api/captcha/config': {
+        captcha_method: 'remote_browser',
+        remote_browser_base_url: 'https://captcha.example.test',
+        remote_browser_api_key: 'synthetic-key',
+        remote_browser_timeout: 60,
+    },
     '/api/proxy/pool': {
         entries: [
             {
@@ -115,7 +120,7 @@ const section = (id) => page.locator(`.settings-section[data-section="${id}"]`)
 const card = (id, heading) =>
     section(id)
         .locator('.settings-card')
-        .filter({ has: page.getByRole('heading', { name: heading, exact: true }) })
+        .filter({ has: page.getByRole('heading', { name: heading, exact: true, includeHidden: true }) })
 const field = (area, label) =>
     area
         .locator('.el-form-item')
@@ -141,12 +146,14 @@ async function screenshot(name, fullPage = false) {
         .catch(() => {})
     await page.screenshot({ path: resolve(output, `${name}.png`), fullPage, animations: 'disabled' })
 }
-async function assertAllSections() {
-    assert.equal(await page.locator('.settings-section:visible').count(), 5)
-    for (const id of ids) {
-        assert.equal(await section(id).count(), 1)
-        assert.ok(await section(id).isVisible(), `${id} must be rendered without clicking a group`)
-        assert.ok((await section(id).locator('.settings-grid > .settings-card').count()) > 0)
+async function assertActiveSection(id = 'general') {
+    assert.equal(await page.locator('.settings-section:visible').count(), 1)
+    for (const sectionId of ids) {
+        assert.equal(await section(sectionId).count(), 1)
+        if (sectionId === id) {
+            assert.ok(await section(sectionId).isVisible(), `${id} must be active`)
+            assert.ok((await section(sectionId).locator('.settings-grid > .settings-card').count()) > 0)
+        }
     }
 }
 async function measureColumns(width, minimum) {
@@ -178,7 +185,7 @@ try {
     await page.locator('.settings-view h1').waitFor()
     await page.locator('.settings-skeleton').waitFor({ state: 'hidden' })
     await page.evaluate(() => document.fonts.ready)
-    await assertAllSections()
+    await assertActiveSection()
     assert.equal(await page.locator('.settings-alert').count(), 0)
     assert.equal(await section('captcha').locator('.settings-grid > .settings-card').count(), 1)
     assert.equal(await page.locator('[data-setting-card="score"]').count(), 0)
@@ -186,7 +193,7 @@ try {
     assert.equal(await page.getByText('给服务做一次小体检', { exact: true }).count(), 0)
     assert.equal(await page.getByRole('dialog', { name: '验证码服务体检' }).count(), 0)
     record('Captcha settings retain their configuration and remove the score test card, action and dialog')
-    record('All five configuration sections and their controls render together without group switching')
+    record('Settings opens one active section with its controls visible')
 
     await measureColumns(1920, 3)
     await screenshot('settings-1920-top')
@@ -215,9 +222,11 @@ try {
 
     const generation = card('generation', '任务等待时间')
     const timeout = field(generation, '图片生成超时')
+    await page.locator('.settings-nav button').filter({ hasText: '生成与调度' }).click()
     await timeout.fill('480')
     await timeout.blur()
     const newKey = field(section('general'), '新 API 密钥')
+    await page.locator('.settings-nav button').filter({ hasText: '基础与访问' }).click()
     await newKey.fill('fixture-new-draft-key')
     assert.match(await summary.innerText(), /未保存|待保存|待处理/)
     assert.match(await summary.innerText(), /待保存\s*2 组修改/)
@@ -239,7 +248,7 @@ try {
     await page.locator('.settings-view .el-empty').filter({ hasText: '没有匹配设置' }).waitFor()
     assert.equal(await page.locator('.settings-card:visible').count(), 0)
     await search.fill('')
-    await assertAllSections()
+    await assertActiveSection()
     assert.equal(await timeout.inputValue(), '480')
     assert.equal(await newKey.inputValue(), 'fixture-new-draft-key')
     record('Live search finds specific fields and clearing it restores all sections with unsaved drafts intact')
@@ -249,21 +258,14 @@ try {
         ['general', '基础与访问'],
     ]) {
         await page.locator('.settings-nav button').filter({ hasText: label }).click()
-        await assertAllSections()
-        await page.waitForFunction((id) => {
-            const bounds = document.querySelector(`.settings-section[data-section="${id}"]`).getBoundingClientRect()
-            return bounds.top < innerHeight && bounds.bottom > 0
-        }, id)
-        const position = await section(id).boundingBox()
-        assert.ok(
-            position && position.y < 1080 && position.y + position.height > 0,
-            `${id} anchor must scroll into view`,
-        )
+        await assertActiveSection(id)
+        assert.ok(await section(id).isVisible(), `${id} tab must switch the active section`)
     }
     assert.equal(await timeout.inputValue(), '480')
     assert.equal(await newKey.inputValue(), 'fixture-new-draft-key')
-    record('Section shortcuts only scroll and preserve all other sections and in-progress edits')
+    record('Section shortcuts switch in place and preserve in-progress edits')
 
+    await page.locator('.settings-nav button').filter({ hasText: '生成与调度' }).click()
     await generation.getByRole('button', { name: '保存生成配置', exact: true }).click()
     await page.getByText('Synthetic settings save interruption', { exact: true }).waitFor()
     assert.equal(saveRequests.length, 1)
@@ -279,19 +281,20 @@ try {
     await search.fill('图片生成超时')
     assert.equal(await page.locator('.settings-card:visible').count(), 1)
     await search.fill('')
-    await assertAllSections()
+    await assertActiveSection('generation')
     await noOverflow()
-    await section('general').scrollIntoViewIfNeeded()
+    await page.locator('.settings-nav button').filter({ hasText: '基础与访问' }).click()
     await screenshot('settings-768-top')
-    await section('cache').scrollIntoViewIfNeeded()
+    await page.locator('.settings-nav button').filter({ hasText: '媒体缓存' }).click()
     await screenshot('settings-768-cache')
 
     await page.setViewportSize({ width: 390, height: 844 })
     await search.fill('')
-    await assertAllSections()
+    await assertActiveSection('cache')
     await page.evaluate(() => window.scrollTo(0, 0))
     await screenshot('settings-390-top')
     for (const id of ids) {
+        await page.locator('.settings-nav button').nth(ids.indexOf(id)).click()
         await section(id).scrollIntoViewIfNeeded()
         await noOverflow()
         assert.ok(await section(id).locator('.settings-card').first().isVisible())

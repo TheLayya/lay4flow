@@ -18,6 +18,8 @@ internal sealed class MainForm : Form
     private readonly List<Form> childWindows = [];
     private bool historyPending;
     private bool checkPending;
+    private int updateRunning;
+    private readonly string windowStatePath;
     private static string Version => Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.3.0";
 
     public MainForm(DesktopOptions options)
@@ -26,10 +28,13 @@ internal sealed class MainForm : Form
         Text = "lay4flow-remote";
         Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!);
         StartPosition = FormStartPosition.CenterScreen;
-        Size = new Size(1440, 940);
-        MinimumSize = new Size(850, 620);
+        var workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
+        ApplyWindowMinimum(workArea);
+        Size = new Size(Math.Min(1600, workArea.Width), Math.Min(1000, workArea.Height));
+        WindowState = FormWindowState.Maximized;
         BackColor = Color.White;
         logPath = Path.Combine(Path.GetDirectoryName(options.UserDataDir)!, "desktop.log");
+        windowStatePath = Path.Combine(Path.GetDirectoryName(options.UserDataDir)!, "window.json");
         Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
         if (!File.Exists(logPath)) File.WriteAllText(logPath, $"lay4flow-remote desktop v{Version}\n", Encoding.UTF8);
         var menu = new MenuStrip { BackColor = Color.White, Font = new Font("Microsoft YaHei UI", 9) };
@@ -47,15 +52,72 @@ internal sealed class MainForm : Form
         Controls.Add(loading);
         Controls.Add(menu);
         MainMenuStrip = menu;
-        Shown += async (_, _) => { _ = ListenForActivation(); await StartApplication(); };
+        Shown += async (_, _) => { ApplyWindowMinimum(Screen.FromHandle(Handle).WorkingArea); _ = ListenForActivation(); await StartApplication(); };
+        FormClosing += (_, eventArgs) =>
+        {
+            if (Volatile.Read(ref updateRunning) == 0) return;
+            eventArgs.Cancel = true;
+            PostUpdateStatus("running", "更新正在进行中，完成后会自动重启桌面端。请稍候…");
+        };
         FormClosed += (_, _) =>
         {
+            SaveWindowBounds();
             lifetime.Cancel();
             foreach (var child in childWindows.ToArray()) child.Close();
             browser.Dispose();
             // The Docker service owns queued work and survives desktop window closure.
         };
+        LoadWindowBounds();
     }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        ApplyWindowMinimum(Screen.FromHandle(Handle).WorkingArea);
+    }
+
+    private void ApplyWindowMinimum(Rectangle workArea)
+    {
+        // Minimum client workspace is 1100 x 680 at 100% DPI.  On smaller
+        // displays cap it to the actual working area instead of hiding edges.
+        var scale = DeviceDpi / 96d;
+        MinimumSize = new Size(
+            Math.Min((int)Math.Round(1100 * scale), workArea.Width),
+            Math.Min((int)Math.Round(720 * scale), workArea.Height));
+    }
+
+    private void LoadWindowBounds()
+    {
+        try
+        {
+            if (!File.Exists(windowStatePath)) return;
+            var saved = JsonSerializer.Deserialize<SavedWindow>(File.ReadAllText(windowStatePath));
+            if (saved is null) return;
+            var proposed = new Rectangle(saved.X, saved.Y, saved.Width, saved.Height);
+            var screen = Screen.AllScreens.FirstOrDefault(item => item.WorkingArea.IntersectsWith(proposed));
+            if (screen is null) return;
+            var workArea = screen.WorkingArea;
+            ApplyWindowMinimum(workArea);
+            var width = Math.Clamp(saved.Width, MinimumSize.Width, workArea.Width);
+            var height = Math.Clamp(saved.Height, MinimumSize.Height, workArea.Height);
+            StartPosition = FormStartPosition.Manual;
+            Bounds = new Rectangle(Math.Clamp(saved.X, workArea.Left, workArea.Right - width), Math.Clamp(saved.Y, workArea.Top, workArea.Bottom - height), width, height);
+            WindowState = saved.Maximized ? FormWindowState.Maximized : FormWindowState.Normal;
+        }
+        catch (Exception error) { Log("Window restore: " + error.Message); }
+    }
+
+    private void SaveWindowBounds()
+    {
+        try
+        {
+            var bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+            File.WriteAllText(windowStatePath, JsonSerializer.Serialize(new SavedWindow(bounds.X, bounds.Y, bounds.Width, bounds.Height, WindowState != FormWindowState.Normal)), Encoding.UTF8);
+        }
+        catch { }
+    }
+
+    private sealed record SavedWindow(int X, int Y, int Width, int Height, bool Maximized);
 
     private async Task ListenForActivation()
     {
@@ -84,6 +146,7 @@ internal sealed class MainForm : Form
             var environment = await CoreWebView2Environment.CreateAsync(null, options.UserDataDir, new CoreWebView2EnvironmentOptions(arguments));
             await browser.EnsureCoreWebView2Async(environment);
             ConfigureView(browser);
+            browser.CoreWebView2.WebMessageReceived += (_, args) => _ = HandleWebMessage(args);
             await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync($"window.lay4flowDesktop = Object.freeze({JsonSerializer.Serialize(new { version = Version })});");
             browser.NavigationCompleted += async (_, eventArgs) =>
             {
@@ -98,6 +161,17 @@ internal sealed class MainForm : Form
                     await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new { pid = Environment.ProcessId, url = browser.Source.AbsoluteUri, version = Version, window_handle = Handle.ToInt64() }));
                 }
                 if (historyPending) { historyPending = false; await OpenHistory(checkPending); checkPending = false; }
+                var updateStatus = Path.Combine(options.InstallDir, ".lay4flow-updates", "desktop-update-status.json");
+                if (File.Exists(updateStatus))
+                {
+                    try
+                    {
+                        using var status = JsonDocument.Parse(await File.ReadAllTextAsync(updateStatus));
+                        PostUpdateStatus(status.RootElement.GetProperty("state").GetString() ?? "failed", status.RootElement.GetProperty("message").GetString() ?? "");
+                        File.Delete(updateStatus);
+                    }
+                    catch (Exception error) { Log("Update result: " + error.Message); }
+                }
             };
             browser.Source = options.Url;
         }
@@ -175,6 +249,99 @@ internal sealed class MainForm : Form
             finally { deferral.Complete(); }
         };
         core.DownloadStarting += (_, args) => { args.Handled = false; };
+    }
+
+    private async Task HandleWebMessage(CoreWebView2WebMessageReceivedEventArgs args)
+    {
+        try
+        {
+            using var payload = JsonDocument.Parse(args.WebMessageAsJson);
+            if (!payload.RootElement.TryGetProperty("type", out var type) || type.GetString() != "apply-update") return;
+            if (browser.CoreWebView2 is null || !options.IsAppUrl(args.Source) || !options.IsAppUrl(browser.Source.AbsoluteUri)) return;
+            if (Interlocked.Exchange(ref updateRunning, 1) != 0)
+            {
+                PostUpdateStatus("running", "更新正在进行中，请稍候…");
+                return;
+            }
+            var version = payload.RootElement.TryGetProperty("version", out var versionNode) ? versionNode.GetString() : null;
+            await RunDesktopUpdate(version);
+        }
+        catch (JsonException) { }
+        catch (Exception error)
+        {
+            Log("Update bridge: " + error);
+            PostUpdateStatus("failed", error.Message);
+            Interlocked.Exchange(ref updateRunning, 0);
+        }
+    }
+
+    private async Task RunDesktopUpdate(string? version)
+    {
+        var script = Path.Combine(options.InstallDir, ".lay4flow-windows", "desktop-update.ps1");
+        if (!File.Exists(script)) throw new FileNotFoundException("安装目录中缺少更新脚本，请重新安装最新版。", script);
+        PostUpdateStatus("running", "正在下载并校验桌面更新…");
+        var info = new ProcessStartInfo("powershell.exe")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = options.InstallDir,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        };
+        var args = new List<string> { "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-InstallDir", options.InstallDir, "-Phase", "Prepare" };
+        if (!string.IsNullOrWhiteSpace(version)) { args.Add("-Version"); args.Add(version); }
+        foreach (var arg in args)
+            info.ArgumentList.Add(arg);
+        using var process = Process.Start(info) ?? throw new Exception("更新进程未建立。");
+        var output = new StringBuilder();
+        async Task Pump(StreamReader reader)
+        {
+            while (await reader.ReadLineAsync() is { } line)
+            {
+                if (output.Length > 6000) output.Remove(0, output.Length - 6000);
+                output.AppendLine(line);
+                if (line.Length > 0) PostUpdateStatus("running", line);
+            }
+        }
+        var stdout = Pump(process.StandardOutput);
+        var stderr = Pump(process.StandardError);
+        await process.WaitForExitAsync(lifetime.Token);
+        await Task.WhenAll(stdout, stderr);
+        Log("Update output:\n" + output);
+        if (process.ExitCode != 0)
+        {
+            PostUpdateStatus("failed", $"更新失败（{process.ExitCode}）。{output.ToString().Trim()}");
+            Interlocked.Exchange(ref updateRunning, 0);
+            return;
+        }
+        PostUpdateStatus("running", "服务更新完成，正在重启桌面端…");
+        Interlocked.Exchange(ref updateRunning, 0);
+        var apply = new ProcessStartInfo("powershell.exe")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = options.InstallDir
+        };
+        foreach (var arg in new[] { "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-InstallDir", options.InstallDir, "-Phase", "Apply", "-ParentProcessId", Environment.ProcessId.ToString() })
+            apply.ArgumentList.Add(arg);
+        Process.Start(apply);
+        PostUpdateStatus("completed", "更新已准备，桌面端将自动重启…");
+        await Task.Delay(250);
+        Close();
+    }
+
+    private void PostUpdateStatus(string state, string message)
+    {
+        if (IsDisposed || browser.CoreWebView2 is null) return;
+        var json = JsonSerializer.Serialize(new { type = "desktop-update-status", state, message });
+        try
+        {
+            browser.CoreWebView2.PostWebMessageAsJson(json);
+            _ = browser.ExecuteScriptAsync("window.dispatchEvent(new CustomEvent('desktop-update-status', { detail: " + json + " }));");
+        }
+        catch { }
     }
 
     private async Task OpenHistory(bool check = false)

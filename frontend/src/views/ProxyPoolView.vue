@@ -1355,4 +1355,28 @@ onMounted(loadPool)
         grid-template-columns: 1fr;
     }
 }
+@media (min-width: 1051px) {
+    .proxy-pool-view {
+        height: 100%;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+    }
+    .proxy-pool-view > .page-heading {
+        margin-bottom: 12px;
+        flex-shrink: 0;
+    }
+    .proxy-pool-view > .page-heading p {
+        display: none;
+    }
+    .proxy-pool-surface {
+        min-height: 0;
+        flex: 1;
+        display: flex;
+        padding: 16px;
+    }
+    .proxy-pool-surface > .proxy-pool-panel {
+        width: 100%;
+    }
+}
 </style>

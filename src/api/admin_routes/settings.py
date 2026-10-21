@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 import time
 import urllib.error
@@ -9,6 +10,7 @@ import urllib.request
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -284,6 +286,51 @@ def create_settings_router(
             "debug_enabled": get_config().debug_enabled,
         }
 
+    @router.get("/api/admin/network")
+    async def get_host_network(token: str = Depends(verify_token)):
+        """Expose only host transport selection; never account proxy credentials."""
+        state = {}
+        path = Path(getattr(get_database(), "db_path", "data/flow.db")).parent / "host-network.json"
+        try:
+            state = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            pass
+        if not isinstance(state, dict):
+            state = {}
+        selected = os.getenv("LAY4FLOW_HOST_PROXY", "").strip()
+        reachable = None
+        try:
+            proxy = urlsplit(selected)
+            host = proxy.hostname or ""
+            if host and proxy.port:
+                try:
+                    _, writer = await asyncio.wait_for(
+                        asyncio.open_connection(host, proxy.port), timeout=2
+                    )
+                    writer.close()
+                    reachable = True
+                except (OSError, TimeoutError):
+                    reachable = False
+            if ":" in host:
+                host = f"[{host}]"
+            endpoint = f"{proxy.scheme}://{host}:{proxy.port}" if host and proxy.port else ""
+        except ValueError:
+            endpoint = ""
+        return {
+            "mode": state.get("mode", "auto"),
+            "source": state.get("source", "direct"),
+            "upstream": endpoint,
+            "reachable": reachable,
+            "checked_at": state.get("checked_at", ""),
+            "message": (
+                "宿主代理端口已连通，账号仍使用原绑定出口"
+                if reachable
+                else "容器连接宿主代理端口失败，请检查代理程序并重新打开桌面端"
+                if endpoint
+                else "未设置宿主前置代理，按账号代理或直连网络访问"
+            ),
+        }
+
     @router.post("/api/admin/config")
     async def update_admin_config(
         request: UpdateAdminConfigRequest, token: str = Depends(verify_token)
@@ -338,6 +385,7 @@ def create_settings_router(
         health_check,
         get_stats,
         get_admin_config,
+        get_host_network,
         update_admin_config,
         update_api_key,
         update_debug_config,

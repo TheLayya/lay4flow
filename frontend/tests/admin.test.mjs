@@ -177,6 +177,13 @@ test('settings overview searches field labels without changing drafts and counts
     s.settingsQuery.value = ''
     assert.equal(s.matchingCards.value.length, 10)
     assert.equal(s.dirtyCount.value, 3)
+    assert.equal(s.sectionVisible('general'), true)
+    assert.equal(s.sectionVisible('generation'), false)
+    s.jumpToSection('generation')
+    assert.equal(s.sectionVisible('general'), false)
+    assert.equal(s.sectionVisible('generation'), true)
+    assert.equal(s.generation.image_timeout, 480)
+    assert.equal(s.newKey.value, 'fixture-new-key')
 })
 
 test('release information is local on load and checks online versions only on request', async () => {
@@ -211,7 +218,11 @@ test('release information is local on load and checks online versions only on re
 
 test('release check failures retain the local version and changelog', async () => {
     const { state: s } = view('Settings', {
-        api: { get: async () => { throw new Error('Synthetic offline network') } },
+        api: {
+            get: async () => {
+                throw new Error('Synthetic offline network')
+            },
+        },
     })
     s.release.version = '1.2.0'
     s.release.entries = [{ version: '1.2.0', items: ['已知修复'] }]

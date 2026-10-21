@@ -185,12 +185,14 @@ onMounted(async () => {
 .login-page {
     display: grid;
     grid-template-columns: 58% 42%;
-    min-height: 100svh;
+    min-height: 100dvh;
+    height: 100dvh;
+    overflow: hidden;
     background: var(--surface);
 }
 .login-world {
     position: relative;
-    min-height: 760px;
+    min-height: 0;
     overflow: hidden;
     background: #e3c2ba;
 }
@@ -268,7 +270,7 @@ onMounted(async () => {
     color: #766173;
 }
 .login-entry {
-    padding: 64px 46px 28px;
+    padding: clamp(24px, 5vh, 64px) clamp(24px, 3vw, 46px) 20px;
     position: relative;
     display: flex;
     flex-direction: column;
@@ -276,6 +278,7 @@ onMounted(async () => {
     justify-content: center;
     background: var(--surface);
     min-width: 0;
+    overflow-y: auto;
 }
 .login-form-wrap {
     max-width: 390px;
@@ -363,7 +366,7 @@ onMounted(async () => {
 }
 .login-footer {
     text-align: center;
-    padding-top: 64px;
+    padding-top: clamp(20px, 5vh, 64px);
     width: 100%;
     color: var(--muted);
     font-size: 12px;

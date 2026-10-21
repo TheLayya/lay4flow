@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlparse, urlun
 from curl_cffi.requests import AsyncSession
 
 from ..core.logger import debug_logger
+from .browser.cloak_proxy import transport_proxy
 from .flow.google_cookies import GoogleCookieJar
 from .flow.session import _session_cookie
 from .proxy_urls import normalize_proxy_url
@@ -169,7 +170,12 @@ class ProtocolLogin:
         if proxy_url:
             session_kwargs["proxy"] = proxy_url
 
-        async with AsyncSession(**session_kwargs) as session:
+        async with (
+            transport_proxy(proxy_url) as network_proxy,
+            AsyncSession(
+                **{**session_kwargs, **({"proxy": network_proxy} if network_proxy else {})}
+            ) as session,
+        ):
 
             async def request(method, url, **kwargs):
                 if not _trusted_url(url):

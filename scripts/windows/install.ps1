@@ -241,6 +241,13 @@ function Copy-LauncherAssets([string]$Bundle, [string]$Target) {
   return $windowsDir
 }
 
+function Sync-HostNetwork([string]$WindowsDir) {
+  $networkScript = Join-Path $WindowsDir "network.ps1"
+  if (-not (Test-Path -LiteralPath $networkScript)) { return }
+  try { & $networkScript -InstallDir $InstallDir | Out-Null }
+  catch { Write-InstallLog ("Host proxy discovery needs attention: " + $_.Exception.Message) }
+}
+
 function New-ApplicationShortcuts([string]$WindowsDir) {
   $desktop = [Environment]::GetFolderPath("Desktop")
   $ps = (Get-Command powershell.exe).Source
@@ -251,7 +258,24 @@ function New-ApplicationShortcuts([string]$WindowsDir) {
   } else {
     New-Shortcut (Join-Path $desktop "$shortcutName.lnk") $ps "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$WindowsDir\start.ps1`" -InstallDir `"$InstallDir`" -Port $Port -ProjectName $ProjectName" $InstallDir
   }
-  New-Shortcut (Join-Path $desktop "$shortcutName update.lnk") $ps "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$WindowsDir\update.ps1`" -InstallDir `"$InstallDir`"" $InstallDir
+  # Updates are exposed in the desktop app's update log.  Keep the desktop
+  # clean and remove the shortcut created by older bundles for this install.
+  Remove-LegacyUpdateShortcut (Join-Path $desktop "$shortcutName update.lnk")
+}
+
+function Remove-LegacyUpdateShortcut([string]$Path) {
+  if (Test-Path -LiteralPath $Path) {
+    $shell = New-Object -ComObject WScript.Shell
+    $existing = $shell.CreateShortcut($Path)
+    if ($existing.WorkingDirectory -and [IO.Path]::GetFullPath($existing.WorkingDirectory).TrimEnd('\') -eq $InstallDir.TrimEnd('\')) {
+      Remove-Item -LiteralPath $Path -Force
+    }
+  }
+}
+
+function Get-ApplicationShortcutName {
+  if ($ProjectName -eq "lay4flow-remote") { return "lay4flow-remote" }
+  return "lay4flow-remote ($ProjectName)"
 }
 
 try {
@@ -339,6 +363,7 @@ if (Test-Path -LiteralPath (Join-Path $InstallDir "docker-compose.yml")) {
   Write-Host "An existing installation was found at $InstallDir. Its files and data will be preserved."
   # Refresh the launcher assets so reinstalling a bundle also updates the shortcut icon.
   $windowsDir = Copy-LauncherAssets $BundleRoot $InstallDir
+  Remove-LegacyUpdateShortcut (Join-Path ([Environment]::GetFolderPath("Desktop")) "$(Get-ApplicationShortcutName) update.lnk")
   if (-not $NoShortcuts) { New-ApplicationShortcuts $windowsDir }
   & (Join-Path $BundleRoot "windows\start.ps1") -InstallDir $InstallDir -Port $Port -ProjectName $ProjectName -NoBrowser:$NoBrowser
   Write-InstallLog "Existing installation was started successfully."
@@ -380,8 +405,10 @@ try {
   if ($envText -notmatch '(?m)^COMPOSE_PROJECT_NAME=') {
     Add-Content -LiteralPath $envPath -Value "COMPOSE_PROJECT_NAME=$ProjectName"
   }
+  Sync-HostNetwork $windowsDir
   Invoke-Compose $compose @("--project-directory", $InstallDir, "--env-file", $existingEnv, "-p", $ProjectName, "-f", (Join-Path $InstallDir "docker-compose.yml"), "up", "-d", "--build")
   & (Join-Path $windowsDir "start.ps1") -InstallDir $InstallDir -Port $Port -ProjectName $ProjectName -AlreadyStarted -NoBrowser
+  Remove-LegacyUpdateShortcut (Join-Path ([Environment]::GetFolderPath("Desktop")) "$(Get-ApplicationShortcutName) update.lnk")
   if (-not $NoShortcuts) { New-ApplicationShortcuts $windowsDir }
   Write-Host "lay4flow-remote is installed at $InstallDir"
   Write-InstallLog "lay4flow-remote is installed at $InstallDir."

@@ -97,6 +97,11 @@ body {
     font-size: 14px;
     line-height: 1.6;
 }
+html,
+body,
+#app {
+    min-height: 100%;
+}
 button,
 input,
 textarea {
@@ -429,6 +434,29 @@ a:focus-visible {
     outline: none;
 }
 @media (min-width: 1051px) {
+    .app-shell {
+        height: 100dvh;
+        min-height: 0;
+        overflow: hidden;
+    }
+    .workspace-main {
+        height: 100dvh;
+        min-height: 0;
+        overflow: hidden;
+    }
+    .main-content {
+        min-height: 0;
+        overflow: auto;
+        overscroll-behavior-y: contain;
+        scrollbar-gutter: stable;
+        scrollbar-width: thin;
+    }
+    .topbar {
+        flex: 0 0 auto;
+    }
+    .app-footer {
+        display: none;
+    }
     .studio-shell .workspace-main {
         height: 100svh;
         min-height: 0;
@@ -446,6 +474,43 @@ a:focus-visible {
         overflow: hidden;
     }
     .studio-shell .app-footer {
+        display: none;
+    }
+}
+@media (min-width: 1051px) and (max-height: 850px) {
+    html:root {
+        --workspace-gutter: 20px;
+    }
+    .topbar {
+        height: 52px;
+    }
+    .main-content,
+    .studio-shell .main-content {
+        padding-top: 16px;
+        padding-bottom: 16px;
+    }
+    .page-heading {
+        margin-bottom: 16px;
+    }
+    .sidebar {
+        padding-top: 18px;
+    }
+    .sidebar .workspace-label {
+        margin-top: 18px;
+        margin-bottom: 12px;
+    }
+    .sidebar .nav-item {
+        min-height: 40px;
+        padding-top: 9px;
+        padding-bottom: 9px;
+    }
+    .main-nav {
+        gap: 4px;
+    }
+    .sidebar-bottom {
+        padding-top: 14px;
+    }
+    .companion-note {
         display: none;
     }
 }
@@ -2168,6 +2233,21 @@ html.dark .nav-item.active {
     }
     .main-content {
         padding-top: 23px;
+    }
+}
+
+@media (min-width: 1051px) and (max-height: 850px) {
+    .sidebar-bottom {
+        padding-top: 8px;
+    }
+    .companion-note {
+        display: none;
+    }
+    .main-content {
+        padding-top: 16px;
+    }
+    .page-heading {
+        margin-bottom: 16px;
     }
 }
 

@@ -52,7 +52,9 @@ def build_release(root: Path, output: Path, desktop_runtime: Path | None = None)
         "working_tree_dirty": dirty,
         "assets": assets,
         "runtime_files": manifest["files"],
-        "windows_signing": "unsigned_script_bundle",
+        "windows_signing": "unsigned_desktop_bundle"
+        if resolved_desktop
+        else "unsigned_script_bundle",
     }
     (output / "build-manifest.json").write_text(
         json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

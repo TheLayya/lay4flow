@@ -61,6 +61,9 @@ class ProfileSessionRefresher:
         self._active_context: contextvars.ContextVar[tuple[str, Any] | None] = (
             contextvars.ContextVar("lay4flow_active_profile_context", default=None)
         )
+        self._renewal_step: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "lay4flow_profile_renewal_step", default=""
+        )
 
     @asynccontextmanager
     async def use_context(self, email: str, context: Any):
@@ -100,10 +103,12 @@ class ProfileSessionRefresher:
 
     async def _renew_session(self, context: Any) -> str:
         request = context.request
+        self._renewal_step.set("oauth_csrf")
         csrf = await request.get("https://labs.google/fx/api/auth/csrf", timeout=15000)
         if csrf.status != 200:
             return "transient_error"
         payload = await csrf.json()
+        self._renewal_step.set("oauth_signin")
         signin = await request.post(
             "https://labs.google/fx/api/auth/signin/google",
             form={
@@ -123,10 +128,12 @@ class ProfileSessionRefresher:
             return "transient_error"
         page = await context.new_page()
         try:
+            self._renewal_step.set("oauth_redirect")
             await page.goto(redirect, wait_until="domcontentloaded", timeout=20000)
             await page.wait_for_timeout(2000)
             address = urlsplit(page.url)
             if address.hostname == "accounts.google.com":
+                self._renewal_step.set("oauth_confirmation")
                 text = (await page.locator("body").inner_text()).casefold()
                 if (
                     "/signin/challenge/" in address.path
@@ -147,6 +154,7 @@ class ProfileSessionRefresher:
     ) -> dict[str, str]:
         from .token_account_probe import TokenManagerAccountProbe
 
+        self._renewal_step.set("")
         probe = TokenManagerAccountProbe(self.token_manager, token)
         session_response = None
         # A forced refresh is used after a newly imported Profile has already
@@ -224,6 +232,7 @@ class ProfileSessionRefresher:
             <= datetime.now(timezone.utc) + timedelta(hours=1)
         )
         if not force and (reason == "session_invalid" or expiring):
+            probe.network_step = ""
             try:
                 renewal = await self._renew_session(context)
             except Exception:
@@ -239,7 +248,9 @@ class ProfileSessionRefresher:
                 reason = renewal
         if reason != "account_ready":
             await self.manager.mark_blocked(str(token.email), reason)
-            raise ProfileNotReadyError(str(token.email), reason)
+            error = ProfileNotReadyError(str(token.email), reason)
+            error.profile_network_step = probe.network_step or self._renewal_step.get()
+            raise error
         google_rows = []
         for cookie in await context.cookies():
             row = dict(cookie)

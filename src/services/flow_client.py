@@ -24,6 +24,7 @@ from .flow import media as media_protocol
 from .flow import retry as retry_policy
 from .flow.session import with_session_token
 from .proxy_urls import normalize_proxy_url
+from .browser.cloak_proxy import transport_proxy
 from .flow.fingerprint import (
     apply_remote_fingerprint_headers,
     merge_cookie_header,
@@ -581,13 +582,16 @@ class FlowClient:
         start_time = time.time()
 
         try:
-            async with AsyncSession(trust_env=False) as session:
+            async with (
+                transport_proxy(proxy_url, enabled=not force_no_proxy) as network_proxy,
+                AsyncSession(trust_env=False) as session,
+            ):
                 remote_options = {"default_headers": False, "allow_redirects": False}
                 if method.upper() == "GET":
                     response = await session.get(
                         url,
                         headers=headers,
-                        proxy=proxy_url,
+                        proxy=network_proxy,
                         timeout=request_timeout,
                         impersonate=impersonate,
                         **remote_options,
@@ -595,7 +599,7 @@ class FlowClient:
                 else:
                     request_kwargs = {
                         "headers": headers,
-                        "proxy": proxy_url,
+                        "proxy": network_proxy,
                         "timeout": request_timeout,
                         "impersonate": impersonate,
                         **remote_options,
@@ -675,16 +679,19 @@ class FlowClient:
                     f"[HTTP FALLBACK] curl_cffi 请求失败，回退 urllib: {method.upper()} {url}"
                 )
                 try:
-                    return await asyncio.to_thread(
-                        self._sync_json_request_via_urllib,
-                        method.upper(),
-                        url,
-                        headers,
-                        json_data,
-                        proxy_url,
-                        request_timeout,
-                        **({"capture_session_token": True} if capture_session_token else {}),
-                    )
+                    async with transport_proxy(
+                        proxy_url, enabled=not force_no_proxy
+                    ) as network_proxy:
+                        return await asyncio.to_thread(
+                            self._sync_json_request_via_urllib,
+                            method.upper(),
+                            url,
+                            headers,
+                            json_data,
+                            network_proxy,
+                            request_timeout,
+                            **({"capture_session_token": True} if capture_session_token else {}),
+                        )
                 except Exception as fallback_error:
                     fallback_message = self._remote_safe_error(
                         fallback_error, redact=capture_session_token
@@ -769,13 +776,16 @@ class FlowClient:
         start_time = time.time()
 
         try:
-            async with AsyncSession(trust_env=False) as session:
+            async with (
+                transport_proxy(proxy_url, enabled=not force_no_proxy) as network_proxy,
+                AsyncSession(trust_env=False) as session,
+            ):
                 remote_options = {"default_headers": False, "allow_redirects": False}
                 if method.upper() == "GET":
                     response = await session.get(
                         url,
                         headers=headers,
-                        proxy=proxy_url,
+                        proxy=network_proxy,
                         timeout=request_timeout,
                         impersonate=impersonate,
                         **remote_options,
@@ -783,7 +793,7 @@ class FlowClient:
                 else:
                     request_kwargs = {
                         "headers": headers,
-                        "proxy": proxy_url,
+                        "proxy": network_proxy,
                         "timeout": request_timeout,
                         "impersonate": impersonate,
                         **remote_options,
@@ -1595,13 +1605,16 @@ class FlowClient:
             last_error = None
             for attempt in range(3):
                 try:
-                    async with AsyncSession(trust_env=False) as session:
+                    async with (
+                        transport_proxy(proxy_url) as network_proxy,
+                        AsyncSession(trust_env=False) as session,
+                    ):
                         remote_options = {"default_headers": False, "allow_redirects": False}
                         return await session.post(
                             target_url,
                             headers=target_headers,
                             data=data,
-                            proxy=proxy_url,
+                            proxy=network_proxy,
                             timeout=timeout,
                             impersonate=resolve_browser_impersonate(
                                 target_headers.get("User-Agent", "")
@@ -4084,12 +4097,15 @@ class FlowClient:
         request_timeout = self._get_control_plane_timeout()
         start_time = time.time()
         try:
-            async with AsyncSession(trust_env=False) as session:
+            async with (
+                transport_proxy(proxy_url) as network_proxy,
+                AsyncSession(trust_env=False) as session,
+            ):
                 remote_options = {"default_headers": False}
                 response = await session.get(
                     url,
                     headers=headers,
-                    proxy=proxy_url,
+                    proxy=network_proxy,
                     timeout=request_timeout,
                     impersonate=self._resolve_runtime_impersonate(),
                     allow_redirects=False,

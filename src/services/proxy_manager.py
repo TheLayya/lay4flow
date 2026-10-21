@@ -10,6 +10,7 @@ from ..core.database import Database
 from ..core.models import ProxyConfig
 from .proxy_urls import normalize_proxy_url
 from .flow.retry import is_proxy_connection_error, is_retryable_network_error
+from .browser.cloak_proxy import transport_proxy
 
 
 @dataclass
@@ -275,7 +276,10 @@ class ProxyManager:
         try:
             from curl_cffi.requests import AsyncSession
 
-            async with AsyncSession(trust_env=False, proxy=proxy, timeout=15) as session:
+            async with (
+                transport_proxy(proxy) as network_proxy,
+                AsyncSession(trust_env=False, proxy=network_proxy, timeout=15) as session,
+            ):
                 response = await session.get("https://aisandbox-pa.googleapis.com/v1/credits")
             ok = response.status_code in {200, 401, 403, 404, 429}
         except Exception:

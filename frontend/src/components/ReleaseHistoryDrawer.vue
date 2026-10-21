@@ -8,6 +8,9 @@ const open = ref(false)
 const drawerSize = ref(window.innerWidth <= 540 ? '100%' : '540px')
 const loading = ref(false)
 const checking = ref(false)
+const updating = ref(false)
+const desktopAvailable = ref(Boolean(window.chrome?.webview && window.lay4flowDesktop))
+const updateStatus = reactive({ state: '', message: '' })
 const loadError = ref('')
 const releaseCheck = reactive({ status: '', message: '', checked_at: '' })
 const release = reactive({
@@ -43,6 +46,7 @@ async function checkRelease() {
     checking.value = true
     try {
         Object.assign(releaseCheck, await api.get('/api/release/check'))
+        window.dispatchEvent(new CustomEvent('release-checked', { detail: releaseCheck }))
         if (releaseCheck.status === 'update_available') ElMessage.warning(releaseCheck.message)
         else if (releaseCheck.message) ElMessage.success(releaseCheck.message)
     } catch (error) {
@@ -50,6 +54,27 @@ async function checkRelease() {
     } finally {
         checking.value = false
     }
+}
+
+function applyUpdate() {
+    if (updating.value || !desktopAvailable.value || releaseCheck.status !== 'update_available') return
+    updating.value = true
+    updateStatus.state = 'running'
+    updateStatus.message = '正在准备更新，完成后桌面端会自动重启。'
+    try {
+        window.chrome.webview.postMessage({ type: 'apply-update', version: releaseCheck.latest?.version })
+    } catch (error) {
+        updating.value = false
+        updateStatus.state = 'failed'
+        updateStatus.message = error?.message || '更新启动失败，请重新打开桌面端后重试。'
+    }
+}
+function receiveUpdate(event) {
+    const value = event.detail || event.data
+    if (!value || (value.type && value.type !== 'desktop-update-status')) return
+    if (!['running', 'completed', 'failed'].includes(value.state)) return
+    Object.assign(updateStatus, value)
+    updating.value = value.state === 'running'
 }
 
 function formatDate(value) {
@@ -69,10 +94,14 @@ function resizeDrawer() {
 onMounted(() => {
     window.addEventListener('open-release-history', openDrawer)
     window.addEventListener('resize', resizeDrawer)
+    window.addEventListener('desktop-update-status', receiveUpdate)
+    window.chrome?.webview?.addEventListener('message', receiveUpdate)
 })
 onUnmounted(() => {
     window.removeEventListener('open-release-history', openDrawer)
     window.removeEventListener('resize', resizeDrawer)
+    window.removeEventListener('desktop-update-status', receiveUpdate)
+    window.chrome?.webview?.removeEventListener('message', receiveUpdate)
 })
 </script>
 
@@ -86,8 +115,10 @@ onUnmounted(() => {
                 <p v-else>本地版本记录</p>
             </div>
             <el-button :loading="checking" :icon="Refresh" @click="checkRelease">检查更新</el-button>
+            <el-button v-if="desktopAvailable && releaseCheck.status === 'update_available'" type="primary" :loading="updating" @click="applyUpdate">立即更新</el-button>
         </div>
         <el-alert v-if="loadError" type="warning" :closable="false" show-icon :title="loadError" />
+        <el-alert v-if="updateStatus.message" class="release-check-message" :type="updateStatus.state === 'failed' ? 'error' : 'info'" :closable="false" show-icon :title="updateStatus.message" />
         <el-alert
             v-if="releaseCheck.message"
             class="release-check-message"

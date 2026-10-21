@@ -3445,4 +3445,107 @@ html.dark .quota-error {
         flex-wrap: wrap;
     }
 }
+@media (min-width: 1051px) {
+    .accounts-view {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        min-height: 0;
+    }
+    .accounts-view > .page-heading {
+        margin-bottom: 12px;
+        flex-shrink: 0;
+    }
+    .accounts-view > .page-heading p,
+    .crew-note,
+    .crew-metric > p,
+    .crew-metric .metric-top .el-icon,
+    .account-surface > .section-heading {
+        display: none;
+    }
+    .crew-metrics {
+        flex-shrink: 0;
+        margin-bottom: 12px;
+        gap: 12px;
+    }
+    .crew-metric {
+        padding: 10px 14px;
+        border-radius: 12px;
+    }
+    .crew-metric strong {
+        margin-top: 3px;
+        font-size: 24px;
+        line-height: 1.3;
+    }
+    .crew-metric.violet {
+        padding-block: 8px;
+    }
+    .crew-metric .vids-quota-total {
+        margin-top: 2px;
+    }
+    .crew-metric .metric-quotas {
+        display: flex;
+        gap: 16px;
+        margin-top: 3px;
+    }
+    .crew-metric .metric-quotas > div {
+        display: flex;
+        align-items: baseline;
+        gap: 5px;
+    }
+    .crew-metric .metric-quotas strong {
+        font-size: 24px;
+        margin: 0;
+    }
+    .account-surface {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+    }
+    .account-toolbar {
+        flex-shrink: 0;
+        padding: 10px 16px;
+        gap: 12px;
+    }
+    .account-search {
+        width: 210px;
+    }
+    .filters {
+        gap: 8px;
+        flex-wrap: nowrap;
+    }
+    .filters > .el-select {
+        width: 110px;
+    }
+    .table-tools .el-button {
+        padding-inline: 10px;
+    }
+    .account-surface > .accounts-table {
+        flex: 1;
+        min-height: 0;
+    }
+    .accounts-table :deep(.el-table__inner-wrapper) {
+        height: 100%;
+    }
+    .accounts-table :deep(.el-table__body-wrapper) {
+        flex: 1;
+        min-height: 0;
+    }
+    .table-footer {
+        flex-shrink: 0;
+        padding: 9px 16px;
+        gap: 10px;
+    }
+    .table-footer > span {
+        font-size: 11px;
+    }
+    .profile-import-jobs {
+        max-height: 135px;
+        overflow: auto;
+        flex-shrink: 0;
+        margin-bottom: 12px;
+        scrollbar-width: thin;
+    }
+}
 </style>

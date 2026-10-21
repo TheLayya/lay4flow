@@ -654,10 +654,10 @@ test('a material-dependent mode reveals the complete upload controls', async () 
     studio.selectedId.value = 'veo_3_1'
     studio.selectModel()
     await flush()
-    studio.parameterSections.value = []
+    studio.editorTab.value = 'prompt'
     studio.params.mode = 'first_last_frame'
     await flush()
-    assert.ok(studio.parameterSections.value.includes('materials'))
+    assert.equal(studio.editorTab.value, 'materials')
     assert.equal(studio.modeLimits.value.minImages, 2)
 })
 
@@ -974,7 +974,8 @@ test('failed background retries remain visible in request details and after relo
     const job = fixtureJob({ provider: 'flow', count: 1, request_id: 'failed-retries' }, 1)
     job.items[0].status = 'failed'
     job.items[0].retry_trace = {
-        max_attempts: 3, attempts: 3,
+        max_attempts: 3,
+        attempts: 3,
         history: [{ attempt: 1, success: false, error: 'HTTP Error 403' }],
     }
     fixture.studio.applyGenerationJob(job)
@@ -989,7 +990,10 @@ test('failed background retries remain visible in request details and after relo
 test('an earlier polling response never hides a newly accepted batch', async () => {
     let finishPoll
     const { studio } = makeStudio({
-        responder: async () => new Promise((resolve) => { finishPoll = resolve }),
+        responder: async () =>
+            new Promise((resolve) => {
+                finishPoll = resolve
+            }),
     })
     const polling = studio.refreshGenerationJobs()
     while (!finishPoll) await flush()

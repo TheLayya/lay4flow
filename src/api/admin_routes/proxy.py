@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 from fastapi import APIRouter, Depends
 
+from ...services.browser.cloak_proxy import transport_proxy
 from ..admin_schemas import (
     ProxyConfigRequest,
     ProxyPoolAddRequest,
@@ -117,8 +118,8 @@ def create_proxy_router(
             return {"success": False, "message": str(e), "test_url": test_url}
         start_time = time.time()
         try:
-            proxies = {"http": proxy_url, "https": proxy_url}
-            async with make_session() as session:
+            async with transport_proxy(proxy_url) as network_proxy, make_session() as session:
+                proxies = {"http": network_proxy, "https": network_proxy}
                 resp = await session.get(
                     test_url,
                     proxies=proxies,

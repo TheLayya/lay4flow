@@ -51,6 +51,11 @@ if ($infoExit -ne 0) { throw "Docker Desktop did not become ready within 120 sec
 if ($osTypeExit -ne 0 -or $osType.Trim() -ne "linux") { throw "Docker Desktop must use Linux containers (WSL 2 engine)." }
 $portValue = $Port
 $envPath = Join-Path $InstallDir ".env"
+$networkScript = Join-Path $PSScriptRoot "network.ps1"
+if (Test-Path -LiteralPath $networkScript) {
+  try { & $networkScript -InstallDir $InstallDir | Out-Null }
+  catch { Write-Warning ("Host proxy discovery needs attention: " + $_.Exception.Message) }
+}
 if (Test-Path -LiteralPath $envPath) {
   $match = Select-String -LiteralPath $envPath -Pattern '^LAY4FLOW_REMOTE_PORT=(\d+)' | Select-Object -First 1
   if ($match) { $portValue = [int]$match.Matches[0].Groups[1].Value }

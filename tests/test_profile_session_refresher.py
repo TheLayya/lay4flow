@@ -383,6 +383,23 @@ class ProfileSessionRefresherTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await refresher._renew_session(context), expected)
                 page.close.assert_awaited_once()
 
+    async def test_forced_renewal_exposes_only_the_failed_network_step(self):
+        context = SimpleNamespace(
+            cookies=AsyncMock(return_value=[]),
+            request=SimpleNamespace(get=AsyncMock(side_effect=TimeoutError("synthetic-secret"))),
+        )
+        manager = SimpleNamespace(mark_blocked=AsyncMock())
+        verifier = SimpleNamespace(verify_account=AsyncMock())
+        refresher = ProfileSessionRefresher(manager, verifier, object())
+        with self.assertRaises(ProfileNotReadyError) as caught:
+            await refresher.refresh_in_context(
+                SimpleNamespace(email="user@example.com"), context, force=True
+            )
+        self.assertEqual(caught.exception.reason, "transient_error")
+        self.assertEqual(caught.exception.profile_network_step, "oauth_csrf")
+        self.assertNotIn("synthetic-secret", str(caught.exception))
+        verifier.verify_account.assert_not_awaited()
+
     async def test_invalid_session_probes_login_and_revalidates_renewal(self):
         for renewal, expected in (
             ("login_required", "login_required"),

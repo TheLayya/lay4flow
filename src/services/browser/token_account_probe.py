@@ -67,6 +67,7 @@ class TokenManagerAccountProbe:
         self.context = None
         self.validated_session = None
         self._session_response = None
+        self.network_step = ""
 
     def set_context(
         self,
@@ -79,6 +80,7 @@ class TokenManagerAccountProbe:
 
     async def verify(self, expected_email: str, context: Any = None) -> dict[str, Any]:
         self.validated_session = None
+        self.network_step = ""
         # Navigation and this probe share a Cookie jar. Consume its response
         # once so a post-OAuth verification always reads the renewed session.
         session_response, self._session_response = self._session_response, None
@@ -107,6 +109,7 @@ class TokenManagerAccountProbe:
             session = None
             if active_context is not None and hasattr(active_context, "request"):
                 if session_response is None:
+                    self.network_step = "session_read"
                     request_pending = True
                     response = await active_context.request.get(SESSION_URL, timeout=15000)
                     request_pending = False
@@ -133,6 +136,7 @@ class TokenManagerAccountProbe:
                 if not same_google_identity(email, self.token.email):
                     return {"reason": "identity_mismatch"}
                 url = self.token_manager.flow_client.api_base_url + "/credits"
+                self.network_step = "credits_read"
                 request_pending = True
                 response = await active_context.request.get(
                     url,

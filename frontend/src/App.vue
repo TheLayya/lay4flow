@@ -22,6 +22,7 @@ import {
     Check,
     Refresh,
     Link,
+    Connection,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
@@ -49,6 +50,8 @@ const health = ref(null),
     lastChecked = ref(''),
     username = ref(localStorage.getItem('admin_username') || '创作者')
 const connectionError = ref(false)
+const updateAvailable = ref(false)
+const network = ref(null)
 const captchaMissing = computed(() => health.value?.remote_browser_configured === false && !route.meta.public)
 const nav = [
     { path: '/dashboard', label: '工坊总览', sub: 'Dashboard', icon: House },
@@ -112,6 +115,9 @@ function openReleaseHistory() {
     mobileOpen.value = false
     window.dispatchEvent(new Event('open-release-history'))
 }
+function releaseChecked(event) {
+    updateAvailable.value = event.detail?.status === 'update_available'
+}
 function userCommand(command) {
     if (command === 'logout') logout()
     else if (command === 'releases') openReleaseHistory()
@@ -138,6 +144,12 @@ async function checkHealth() {
         connectionError.value = true
     }
 }
+async function checkNetwork() {
+    if (route.meta.public) return
+    try {
+        network.value = await api.get('/api/admin/network')
+    } catch {}
+}
 async function logout() {
     try {
         await api.post('/api/logout')
@@ -159,8 +171,7 @@ function expired() {
         location.assign('/login')
         return
     }
-    if (route.matched.length && !route.meta.public)
-        router.replace({ path: '/login', query: { next: route.fullPath } })
+    if (route.matched.length && !route.meta.public) router.replace({ path: '/login', query: { next: route.fullPath } })
 }
 function keyboard(event) {
     if (isProfile.value) return
@@ -182,19 +193,23 @@ async function fullscreen() {
 let timer
 watch(
     () => route.path,
-    () => {
+    (_, previousPath) => {
         mobileOpen.value = false
         username.value = localStorage.getItem('admin_username') || '创作者'
+        if (route.meta.public) network.value = null
+        else if (previousPath === '/login') checkNetwork()
     },
 )
 onMounted(() => {
     applyTheme(theme.value)
     checkHealth()
+    checkNetwork()
     timer = setInterval(checkHealth, 30000)
     window.addEventListener('resize', resize)
     window.addEventListener('keydown', keyboard)
     window.addEventListener('session-expired', expired)
     window.addEventListener('captcha-config-saved', checkHealth)
+    window.addEventListener('release-checked', releaseChecked)
     media.addEventListener('change', systemThemeChange)
 })
 onUnmounted(() => {
@@ -203,6 +218,7 @@ onUnmounted(() => {
     window.removeEventListener('keydown', keyboard)
     window.removeEventListener('session-expired', expired)
     window.removeEventListener('captcha-config-saved', checkHealth)
+    window.removeEventListener('release-checked', releaseChecked)
     media.removeEventListener('change', systemThemeChange)
 })
 </script>
@@ -253,13 +269,6 @@ onUnmounted(() => {
                     </el-tooltip>
                 </nav>
                 <div class="sidebar-bottom">
-                    <el-tooltip content="更新日志" placement="right" :disabled="!collapsed">
-                        <button class="release-history-trigger" @click="openReleaseHistory">
-                            <el-icon><Document /></el-icon>
-                            <span class="release-trigger-label">更新日志</span>
-                            <span v-if="health?.version" class="release-trigger-version">v{{ health.version }}</span>
-                        </button>
-                    </el-tooltip>
                     <div class="companion-note">
                         <Mascot compact portrait mood="sleepy" />
                         <div>
@@ -271,11 +280,7 @@ onUnmounted(() => {
                             </router-link>
                         </div>
                     </div>
-                    <el-dropdown
-                        trigger="click"
-                        placement="top-start"
-                        @command="userCommand"
-                    >
+                    <el-dropdown trigger="click" placement="top-start" @command="userCommand">
                         <button class="user-menu">
                             <span class="user-avatar">{{ username.slice(0, 1).toUpperCase() }}</span>
                             <span class="user-caption">
@@ -294,6 +299,16 @@ onUnmounted(() => {
                             </el-dropdown-menu>
                         </template>
                     </el-dropdown>
+                    <el-tooltip content="更新日志与检查更新" placement="right">
+                        <button
+                            class="release-history-trigger version-trigger"
+                            aria-label="版本与更新"
+                            @click="openReleaseHistory"
+                        >
+                            <span>版本 {{ health?.version || '—' }}</span>
+                            <span v-if="updateAvailable" class="version-update-dot" aria-hidden="true"></span>
+                        </button>
+                    </el-tooltip>
                 </div>
             </aside>
             <div class="workspace-main">
@@ -445,7 +460,15 @@ onUnmounted(() => {
                         <p>{{ check.note }}</p>
                     </div>
                 </div>
-                <el-button :icon="Refresh" @click="checkHealth">重新检查</el-button>
+                <div v-if="network" class="health-check">
+                    <el-icon :class="network.reachable ? 'good' : 'waiting'"><Connection /></el-icon>
+                    <div>
+                        <strong>宿主网络</strong>
+                        <p>{{ network.message }}</p>
+                        <code v-if="network.upstream">{{ network.upstream }}</code>
+                    </div>
+                </div>
+                <el-button :icon="Refresh" @click="checkHealth(); checkNetwork()">重新检查</el-button>
                 <el-button type="primary" @click="manageAccounts">管理账号</el-button>
             </el-drawer>
         </div>
@@ -458,17 +481,28 @@ onUnmounted(() => {
     align-items: center;
     gap: 10px;
     width: 100%;
-    min-height: 40px;
-    margin-bottom: 12px;
-    padding: 8px 12px;
-    border: 1px solid #43506a;
-    border-radius: 10px;
-    color: #e7ecf7;
+    min-height: 30px;
+    margin-top: 8px;
+    padding: 5px 12px;
+    border: 0;
+    border-top: 1px solid #344259;
+    border-radius: 0;
+    color: var(--sidebar-muted);
     background: transparent;
     text-align: left;
 }
 .release-history-trigger:hover {
     background: #344259;
+}
+.version-trigger {
+    font-size: 11px;
+    justify-content: flex-start;
+}
+.version-update-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #d491a4;
 }
 .release-trigger-label {
     font-size: 13px;

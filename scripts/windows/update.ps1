@@ -6,6 +6,8 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 $updater = Join-Path $InstallDir "scripts\update.ps1"
 if (-not (Test-Path -LiteralPath $updater)) {

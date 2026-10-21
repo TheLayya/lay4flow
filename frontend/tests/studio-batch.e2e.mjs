@@ -112,7 +112,11 @@ const record = (message) => {
     console.log(`PASS ${message}`)
 }
 const promptInput = () => page.locator('.studio-editor textarea')
+async function editorTab(label) {
+    await page.getByRole('tab', { name: label, exact: true }).click()
+}
 async function submit(count, label) {
+    await editorTab('描述')
     await page.locator('#studio-generation-count').fill(String(count))
     await page.locator('#studio-generation-count').blur()
     await page.getByRole('button', { name: `提交 ${count} ${label}`, exact: true }).click()
@@ -139,6 +143,12 @@ try {
     assert.equal(jobs[2].total, 4)
     record('Video has the same quantity control and remains editable after acknowledgement')
 
+    await editorTab('画面设定')
+    assert.ok(await page.locator('.editor-parameters').isVisible())
+    await editorTab('参考素材')
+    assert.ok(await page.locator('.editor-materials').isVisible())
+    record('Studio keeps settings and materials in separate in-place tabs without moving the submit control')
+
     await page.reload()
     await page.locator('.studio-view h1').waitFor()
     await page.waitForFunction(() => document.querySelectorAll('.gallery-card').length >= 9)
@@ -160,16 +170,27 @@ try {
     record('Vids image and video quantities create batches without multiplying the per-request image count')
 
     const failed = jobs[2]
-    failed.items.forEach((item) => Object.assign(item, {
-        status: 'failed', message: 'HTTP Error 403: reCAPTCHA evaluation failed',
-        retry_trace: { attempts: 3, max_attempts: 3, history: [{ attempt: 1, error: 'HTTP Error 403', success: false }] },
-    }))
+    failed.items.forEach((item) =>
+        Object.assign(item, {
+            status: 'failed',
+            message: 'HTTP Error 403: reCAPTCHA evaluation failed',
+            retry_trace: {
+                attempts: 3,
+                max_attempts: 3,
+                history: [{ attempt: 1, error: 'HTTP Error 403', success: false }],
+            },
+        }),
+    )
     Object.assign(failed, { state: 'failed', status: 'failed', failed: failed.total })
     await page.getByText('已尝试 3 / 3 次', { exact: false }).first().waitFor()
     const failedCard = page.locator('.gallery-card').filter({ hasText: '已尝试 3 / 3 次' }).first()
     await failedCard.getByRole('button', { name: '记录', exact: true }).click()
     await page.locator('.studio-json').getByText('"max_attempts": 3', { exact: false }).waitFor()
-    await page.locator('.studio-json').locator('xpath=ancestor::div[contains(@class,"el-drawer")]').getByLabel('关闭此对话框').click()
+    await page
+        .locator('.studio-json')
+        .locator('xpath=ancestor::div[contains(@class,"el-drawer")]')
+        .getByLabel('关闭此对话框')
+        .click()
     record('A failed batch card and its request details expose the actual configured retry attempts')
 
     for (const job of jobs.slice(0, 2)) {

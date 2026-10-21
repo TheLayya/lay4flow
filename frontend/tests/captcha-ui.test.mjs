@@ -27,6 +27,7 @@ function app() {
         removed = []
     let result = { backend_running: true, remote_browser_configured: false }
     let reads = 0
+    const paths = []
     const media = { matches: false, addEventListener() {}, removeEventListener() {} }
     const context = {
         ...Object.fromEntries(imported.map((name) => [name, {}])),
@@ -46,8 +47,9 @@ function app() {
         setInterval: () => 1,
         clearInterval() {},
         api: {
-            get: async () => {
+            get: async (path) => {
                 reads++
+                paths.push(path)
                 return result
             },
         },
@@ -70,6 +72,7 @@ function app() {
             result = health
         },
         reads: () => reads,
+        paths,
         template: descriptor.template.content,
     }
 }
@@ -91,6 +94,28 @@ test('global captcha reminder follows configured state and stays out of public p
     await s.checkHealth()
     assert.equal(s.captchaMissing.value, false)
     assert.equal(fixture.routes.length, 0)
+})
+
+test('network status skips the public login and loads after entering the signed-in workspace', async () => {
+    const fixture = app()
+    fixture.route.path = '/login'
+    fixture.route.meta.public = true
+    await Vue.nextTick()
+    fixture.mounted.forEach((callback) => callback())
+    await Vue.nextTick()
+    assert.equal(fixture.paths.filter((path) => path === '/api/admin/network').length, 0)
+    fixture.route.meta.public = false
+    fixture.route.path = '/dashboard'
+    await Vue.nextTick()
+    await Vue.nextTick()
+    assert.equal(fixture.paths.filter((path) => path === '/api/admin/network').length, 1)
+    fixture.route.path = '/accounts'
+    await Vue.nextTick()
+    assert.equal(fixture.paths.filter((path) => path === '/api/admin/network').length, 1)
+    fixture.route.meta.public = true
+    fixture.route.path = '/login'
+    await Vue.nextTick()
+    assert.equal(fixture.state.network.value, null)
 })
 
 test('global reminder links directly to captcha setup and saving refreshes health immediately', async () => {

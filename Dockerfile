@@ -23,7 +23,7 @@ RUN python -c "from pathlib import Path; import shutil; browsers=list(Path('/roo
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
-ARG APP_VERSION=1.3.0
+ARG APP_VERSION=1.4.0
 LABEL org.opencontainers.image.title="lay4flow-remote" \
       org.opencontainers.image.version="$APP_VERSION"
 

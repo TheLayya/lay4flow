@@ -59,13 +59,11 @@ const matchingCards = computed(() =>
     }),
 )
 const cardVisible = (id) => matchingCards.value.some((card) => card.id === id)
-const sectionVisible = (id) => matchingCards.value.some((card) => card.section === id)
+const sectionVisible = (id) =>
+    (settingsQuery.value.trim() || group.value === id) && matchingCards.value.some((card) => card.section === id)
 function jumpToSection(id) {
     settingsQuery.value = ''
     group.value = id
-    requestAnimationFrame(() =>
-        document.getElementById(`settings-${id}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' }),
-    )
 }
 const loading = ref(true)
 const failures = ref([])
@@ -371,7 +369,7 @@ onMounted(load)
         <header class="page-heading">
             <div>
                 <h1>工作室设置</h1>
-                <p>所有配置同页查看，修改后在对应卡片保存。</p>
+                <p>选择设置分区，修改后在对应卡片保存。</p>
             </div>
             <div class="page-actions">
                 <el-tag v-if="dirtyCount" type="warning" effect="light">{{ dirtyCount }} 组待保存</el-tag>
@@ -403,10 +401,13 @@ onMounted(load)
                 placeholder="搜索设置、字段或服务，如：超时、代理、密钥"
                 aria-label="搜索设置"
             />
-            <nav class="settings-nav" aria-label="设置分区定位">
+            <nav class="settings-nav" aria-label="设置分区" role="tablist">
                 <button
                     v-for="item in groups"
                     :key="item.id"
+                    role="tab"
+                    :aria-selected="group === item.id && !settingsQuery.trim()"
+                    :aria-controls="`settings-${item.id}`"
                     :class="{ active: group === item.id }"
                     @click="jumpToSection(item.id)"
                 >
@@ -415,7 +416,7 @@ onMounted(load)
                 </button>
             </nav>
             <span class="settings-match-count">
-                {{ settingsQuery.trim() ? `${matchingCards.length} 项匹配` : '全部配置已展开' }}
+                {{ settingsQuery.trim() ? `${matchingCards.length} 项匹配` : '切换分区查看' }}
             </span>
         </div>
         <div class="settings-layout">
@@ -645,7 +646,9 @@ onMounted(load)
                                             :max="20"
                                             controls-position="right"
                                         />
-                                            <span class="field-note">每份作品独立计数，包含首次提交；验证码异常也遵循此上限，保存后对新任务生效</span>
+                                        <span class="field-note">
+                                            每份作品独立计数，包含首次提交；验证码异常也遵循此上限，保存后对新任务生效
+                                        </span>
                                     </el-form-item>
                                 </el-form>
                                 <div class="save-row">
@@ -970,26 +973,28 @@ onMounted(load)
                                     </div>
                                     <div v-if="releaseCheck.checked_at">
                                         <span>上次检查</span>
-                                        <strong>{{ parseDate(releaseCheck.checked_at).toLocaleString('zh-CN', { hour12: false }) }}</strong>
+                                        <strong>
+                                            {{
+                                                parseDate(releaseCheck.checked_at).toLocaleString('zh-CN', {
+                                                    hour12: false,
+                                                })
+                                            }}
+                                        </strong>
                                     </div>
                                 </div>
                                 <p v-if="releaseCheck.message" class="release-note">{{ releaseCheck.message }}</p>
-                                <details v-for="(entry, index) in release.entries" :key="`${entry.version}-${entry.date}`" :open="index === 0" class="release-entry">
-                                    <summary class="release-entry-heading">
-                                        <strong>{{ entry.version ? `v${entry.version}` : '历史修复' }}</strong>
-                                        <span>{{ entry.date }}</span>
-                                        <span class="release-entry-toggle">展开 / 收起</span>
-                                    </summary>
-                                    <ul>
-                                        <li v-for="item in entry.items" :key="item">{{ item }}</li>
-                                    </ul>
-                                </details>
                                 <div class="release-links">
                                     <el-button :icon="Document" @click="openReleaseHistory">打开更新日志</el-button>
-                                    <el-button :loading="releaseCheck.loading" :icon="Refresh" @click="checkRelease">检查线上版本</el-button>
+                                    <el-button :loading="releaseCheck.loading" :icon="Refresh" @click="checkRelease">
+                                        检查线上版本
+                                    </el-button>
                                     <a :href="release.release_page" target="_blank" rel="noreferrer">GitHub 发布页</a>
-                                    <a :href="release.update_docs.windows" target="_blank" rel="noreferrer">Windows 一键安装</a>
-                                    <a :href="release.update_docs.docker" target="_blank" rel="noreferrer">Docker 热更新</a>
+                                    <a :href="release.update_docs.windows" target="_blank" rel="noreferrer">
+                                        Windows 一键安装
+                                    </a>
+                                    <a :href="release.update_docs.docker" target="_blank" rel="noreferrer">
+                                        Docker 热更新
+                                    </a>
                                 </div>
                             </section>
                             <section
@@ -1599,6 +1604,158 @@ html.dark .settings-nav > button.active {
 .settings-nav > button:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 3px;
+}
+@media (min-width: 1051px) {
+    .settings-view .page-heading {
+        margin-bottom: 14px;
+    }
+    .settings-summary {
+        margin-bottom: 12px;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+    }
+    .settings-summary > div {
+        padding: 8px 12px;
+    }
+    .settings-toolbar {
+        position: static;
+        margin-bottom: 14px;
+        padding: 7px 10px;
+        gap: 8px;
+    }
+    .settings-search {
+        width: 230px;
+    }
+    .settings-nav {
+        flex: 1;
+        gap: 2px;
+    }
+    .settings-nav > button {
+        padding: 7px 8px;
+        font-size: 12px;
+    }
+    .settings-match-count {
+        display: none;
+    }
+    .settings-main {
+        display: block;
+    }
+    .settings-section-title {
+        margin-bottom: 10px;
+    }
+    .settings-grid,
+    .settings-section[data-section='general'] .settings-grid,
+    .settings-section[data-section='generation'] .settings-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+    }
+    .settings-grid > [data-setting-card='health'] {
+        grid-column: auto;
+        display: flex;
+        gap: 0;
+        align-items: stretch;
+    }
+    .settings-section[data-section='integration'] .settings-grid {
+        grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+    }
+    .settings-grid > .release-card {
+        grid-column: auto;
+    }
+    .card-heading {
+        margin-bottom: 12px;
+    }
+    .settings-card :deep(.el-form-item) {
+        margin-bottom: 10px;
+    }
+    .settings-card :deep(.el-form-item__label) {
+        padding-bottom: 3px;
+        font-size: 13px;
+    }
+    .settings-card .field-note,
+    .settings-card .card-heading p {
+        font-size: 12px;
+        line-height: 1.5;
+    }
+    .settings-form-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+    }
+    .settings-grid > .settings-card > .save-row {
+        padding-top: 10px;
+        gap: 8px;
+    }
+    .settings-grid > .settings-card > .save-row > span {
+        font-size: 11px;
+    }
+    .settings-main > .settings-section + .settings-section {
+        margin-top: 18px;
+    }
+    .settings-view > .page-heading p,
+    .settings-section-title {
+        display: none;
+    }
+    .settings-summary {
+        display: none;
+    }
+    .settings-nav > button .el-icon {
+        display: none;
+    }
+    .settings-card :deep(.el-input-number) {
+        max-width: 100%;
+    }
+    .settings-section[data-section='cache'] .settings-card > .el-form {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        column-gap: 20px;
+    }
+    .settings-card .mode-options {
+        grid-template-columns: 1fr;
+        gap: 8px;
+    }
+    .mode-options :deep(.el-radio) {
+        min-height: 48px;
+        padding: 8px;
+    }
+    .mode-options span {
+        margin-top: 3px;
+        font-size: 11px;
+    }
+    .settings-card .card-heading p {
+        margin-top: 3px;
+    }
+    .settings-grid > .settings-card > .save-row > span {
+        width: 100%;
+    }
+    .settings-grid > .settings-card > .save-row .el-button {
+        margin-left: auto;
+    }
+    .settings-section[data-section='captcha'] .settings-card > .el-form > .settings-form-grid {
+        grid-column: auto;
+    }
+}
+@media (min-width: 1051px) and (max-height: 740px) {
+    .settings-view > .page-heading {
+        margin-bottom: 8px;
+    }
+    .settings-view > .page-heading h1 {
+        font-size: 24px;
+    }
+    .settings-toolbar {
+        margin-bottom: 8px;
+    }
+    .settings-card {
+        padding-top: 10px;
+        padding-bottom: 10px;
+    }
+    .settings-card .switch-row {
+        padding-bottom: 6px;
+        margin-bottom: 6px;
+    }
+    .settings-card .effective-address {
+        margin-top: 8px;
+    }
+    .settings-section[data-section='cache'] .save-row > span {
+        width: auto;
+    }
 }
 @media (max-width: 800px) {
     .settings-view > .page-heading {

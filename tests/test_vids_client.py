@@ -37,6 +37,38 @@ from tests.test_vids_video_input import mp4
 
 
 class VidsClientTests(unittest.TestCase):
+    def test_host_transport_proxy_is_scoped_to_each_request(self):
+        with patch("src.services.vids.client.AsyncSession"):
+            client = VidsClient(
+                "https://docs.google.com/videos/d/doc/edit",
+                [],
+                proxy="socks5://u:p@proxy.invalid:1080",
+            )
+        bridge = SimpleNamespace(url="http://127.0.0.1:19878", close=AsyncMock())
+
+        async def run():
+            client.flags = {"espresso_api_key": "key", "docs-est": "token"}
+            client.service_origin = "https://appsgenaiserver-pa.clients6.google.com"
+            client._headers = lambda: {}
+            with (
+                patch.dict(
+                    "os.environ", {"LAY4FLOW_HOST_PROXY": "http://host.docker.internal:7897"}
+                ),
+                patch(
+                    "src.services.browser.cloak_proxy.CloakProxyBridge.start",
+                    AsyncMock(return_value=bridge),
+                ),
+            ):
+                response = SimpleNamespace(status_code=200, json=lambda: {"ok": True})
+                client.session.request = AsyncMock(return_value=response)
+                self.assertEqual(
+                    await client._request("POST", "/v1/genai/quotaSummary", []), {"ok": True}
+                )
+                self.assertEqual(client.session.request.await_args.kwargs["proxy"], bridge.url)
+
+        asyncio.run(run())
+        bridge.close.assert_awaited_once()
+
     def test_protocol_error_keeps_rpc_enums_and_discards_raw_message_metadata(self):
         response = SimpleNamespace(
             status_code=400,

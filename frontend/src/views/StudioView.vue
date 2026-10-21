@@ -65,7 +65,7 @@ function configureCaptcha() {
 const details = ref(false),
     documentDrawer = ref(false),
     receiptInput = ref('')
-const parameterSections = ref(window.matchMedia?.('(max-width: 850px)').matches ? [] : ['settings'])
+const editorTab = ref('prompt')
 const flowModels = ref(Object.entries(fallback).map(([id, entry]) => ({ id, ...entry })))
 const vidsModels = ref([]),
     vidsStatus = ref({ configured: false, available: {}, recoverable: {}, quota: {} })
@@ -448,6 +448,7 @@ function normalizeOptions() {
     }
 }
 watch([provider, kind], () => {
+    editorTab.value = 'prompt'
     if (kind.value === 'speech') provider.value = 'vids'
     selectedId.value = models.value[0]?.id || ''
     selectModel()
@@ -464,8 +465,7 @@ watch(
 watch(
     () => [params.mode, kind.value, provider.value],
     () => {
-        if (modeLimits.value.minImages > 0 || modeLimits.value.videoInput)
-            parameterSections.value = unique([...parameterSections.value, 'materials'])
+        if (modeLimits.value.minImages > 0 || modeLimits.value.videoInput) editorTab.value = 'materials'
     },
 )
 async function navigateKind(event) {
@@ -616,6 +616,7 @@ async function addReferenceFiles(files) {
         return
     }
     for (const file of images) await addImage({ raw: file })
+    if (!error.value) editorTab.value = 'materials'
 }
 async function pasteImages(event) {
     if (imageEditorOpen.value || busy.value || materialBusy.value) return
@@ -770,6 +771,7 @@ async function applyImageEdit({ file, prompt: editPrompt, mode }) {
     }
     if (error.value) return
     imageEditorOpen.value = false
+    editorTab.value = mode === 'edit' ? 'prompt' : 'materials'
     ElMessage.success(mode === 'edit' ? '编辑后的图片已设为原图，修改描述后点击开始绘梦' : '编辑后的图片已加入参考区')
 }
 function studioShortcuts(event) {
@@ -1664,6 +1666,7 @@ async function reuseEntry(entry) {
     for (const [name, value] of Object.entries(entry.settings || {})) if (name in params) params[name] = value
     params.count = 1
     await nextTick()
+    editorTab.value = 'prompt'
     window.scrollTo?.({ top: 0, behavior: 'smooth' })
     ElMessage.success('已带入原提示词与生成参数，可直接修改后重新创作')
 }
@@ -1893,397 +1896,420 @@ onUnmounted(() => {
                     </div>
                     <el-tag effect="plain">{{ provider === 'flow' ? 'FLOW' : 'VIDS' }}</el-tag>
                 </div>
-                <el-form label-position="top" :disabled="materialBusy">
-                    <el-form-item label="生成模型" class="model-field">
-                        <el-select v-model="selectedId" filterable placeholder="选择模型" :loading="loading">
-                            <el-option
-                                v-for="entry in models"
-                                :key="entry.id"
-                                :label="entry.displayName || entry.description || entry.id"
-                                :value="entry.id"
-                            >
-                                <span>{{ entry.displayName || entry.description || entry.id }}</span>
-                                <small class="model-option-id">{{ entry.id }}</small>
-                            </el-option>
-                            <el-option
-                                v-if="!models.length && provider === 'vids'"
-                                :label="`Vids ${kind === 'image' ? 'Image' : kind === 'video' ? 'Video' : 'Speech'}`"
-                                :value="`vids-${kind}`"
-                            />
-                        </el-select>
-                        <div class="field-hint">
-                            {{ catalogMessage }}
-                            <el-tooltip content="目录来自服务端能力声明；未连接时显示仓库自带公开模型。">
-                                <el-icon><InfoFilled /></el-icon>
-                            </el-tooltip>
-                        </div>
-                    </el-form-item>
-                    <el-form-item :label="kind === 'speech' ? '朗读文本' : '画面描述'">
-                        <el-input
-                            v-model="prompt"
-                            class="studio-prompt-input"
-                            @dragover.prevent
-                            @drop="dropPrompt"
-                            type="textarea"
-                            :autosize="{ minRows: 3, maxRows: 8 }"
-                            :maxlength="kind === 'speech' ? 4096 : 32000"
-                            show-word-limit
-                            :placeholder="
-                                kind === 'speech'
-                                    ? '写下你想听见的文字…当前 Vids 语音请使用英文等受支持语言。'
-                                    : '描述主角、场景、光线和画风。越具体，越接近你的想象…'
-                            "
-                        />
-                    </el-form-item>
-                    <div class="prompt-suggestions">
-                        <span>灵感小签</span>
-                        <el-button
-                            v-for="example in examples"
-                            :key="example.label"
-                            size="small"
-                            round
-                            @click="prompt = example.text"
-                        >
-                            {{ example.label }}
-                        </el-button>
-                    </div>
-                    <StudioReferenceBoard
+                <div class="editor-tabs" role="tablist" aria-label="编辑分区">
+                    <button
+                        role="tab"
+                        :aria-selected="editorTab === 'prompt'"
+                        :class="{ active: editorTab === 'prompt' }"
+                        @click="editorTab = 'prompt'"
+                    >
+                        描述
+                    </button>
+                    <button
+                        role="tab"
+                        :aria-selected="editorTab === 'settings'"
+                        :class="{ active: editorTab === 'settings' }"
+                        @click="editorTab = 'settings'"
+                    >
+                        {{ kind === 'speech' ? '声线设置' : '画面设定' }}
+                    </button>
+                    <button
                         v-if="kind !== 'speech'"
-                        :materials="materials"
-                        :maximum="modeLimits.maxImages || 1"
-                        :disabled="materialBusy"
-                        :busy="materialBusy"
-                        :first-last="params.mode === 'first_last_frame'"
-                        :provider="provider"
-                        @files="addReferenceFiles"
-                        @clipboard="readClipboardImages"
-                        @remove="materials.splice($event, 1)"
-                        @clear="materials = []"
-                        @edit="editReference"
-                        @move="moveReference"
-                        @media="useDraggedMedia"
-                    />
-                    <el-alert
-                        v-if="error || validation"
-                        :title="error || validation"
-                        type="warning"
-                        :closable="false"
-                        show-icon
-                        class="studio-error"
-                    />
-                    <div class="generate-area">
-                        <div v-if="kind === 'image' || kind === 'video'" class="generation-count">
-                            <label for="studio-generation-count">
-                                生成数量
-                                <small>{{ kind === 'image' ? '张' : '个' }}</small>
-                            </label>
-                            <div class="generation-count-controls">
-                                <el-input-number
-                                    id="studio-generation-count"
-                                    v-model="params.count"
-                                    :min="1"
-                                    :max="20"
-                                    :precision="0"
-                                    aria-label="生成数量"
-                                />
-                                <el-button
-                                    v-for="amount in [1, 4, 8]"
-                                    :key="amount"
-                                    size="small"
-                                    :type="params.count === amount ? 'primary' : 'default'"
-                                    plain
-                                    @click="params.count = amount"
-                                >
-                                    {{ amount }}
-                                </el-button>
-                            </div>
-                            <small>每份独立生成，按实际生成消耗额度，单批最多 20 份。</small>
-                        </div>
-                        <p v-if="captchaRequired" class="studio-captcha-setup" role="alert">
-                            Flow 创作需要打码密钥，
-                            <el-button link type="primary" @click="configureCaptcha">现在填写</el-button>
-                        </p>
-                        <el-button
-                            type="primary"
-                            size="large"
-                            :icon="MagicStick"
-                            :loading="submitting || materialBusy"
-                            :disabled="!prompt.trim() || !available || !!validation || captchaRequired"
-                            @click="generate"
-                        >
-                            {{
-                                submitting
-                                    ? '正在提交后台任务…'
-                                    : materialBusy
-                                      ? '正在读取素材…'
-                                      : kind === 'image'
-                                        ? `提交 ${params.count} 张图片`
-                                        : kind === 'video'
-                                          ? `提交 ${params.count} 个视频`
-                                          : '生成我的声线'
-                            }}
-                        </el-button>
-                        <span>后台生成，可继续修改与提交 · Ctrl + Enter</span>
-                    </div>
-                    <div v-if="!available" class="connection-help">
-                        <el-icon><Connection /></el-icon>
-                        <span>
-                            {{ provider === 'flow' ? '请重新同步模型能力。' : '先接入 Vids 账号，再开始创作。' }}
+                        role="tab"
+                        :aria-selected="editorTab === 'materials'"
+                        :class="{ active: editorTab === 'materials' }"
+                        @click="editorTab = 'materials'"
+                    >
+                        参考素材
+                        <span v-if="materials.length || sourceVideo">
+                            · {{ materials.length + (sourceVideo ? 1 : 0) }}
                         </span>
-                        <el-button v-if="provider === 'flow'" link type="primary" @click="loadCatalog">
-                            重新同步
-                        </el-button>
-                        <el-button v-else link type="primary" @click="router.push('/accounts?platform=vids')">
-                            账号接入
-                        </el-button>
-                    </div>
-
-                    <el-collapse v-model="parameterSections" class="studio-settings">
-                        <el-collapse-item name="settings">
-                            <template #title>
-                                <div class="settings-toggle">
-                                    <span>{{ kind === 'speech' ? '声线设置' : '画面设定' }}</span>
-                                    <small>{{ specificationSummary }}</small>
-                                </div>
-                            </template>
-                            <div class="parameter-grid">
-                                <el-form-item v-if="kind !== 'speech'" label="创作方式">
-                                    <el-select v-model="params.mode">
-                                        <el-option
-                                            v-for="mode in modes"
-                                            :key="mode"
-                                            :value="mode"
-                                            :label="modeNames[mode] || mode"
-                                        />
-                                    </el-select>
-                                </el-form-item>
-                                <el-form-item
-                                    v-if="
-                                        kind !== 'speech' &&
-                                        !(imageEditing && provider === 'vids') &&
-                                        params.mode !== 'upscale'
-                                    "
-                                    label="画面比例"
+                    </button>
+                </div>
+                <el-form label-position="top" :disabled="materialBusy" class="studio-editor-form">
+                    <div
+                        v-show="editorTab === 'prompt'"
+                        class="editor-panel editor-prompt"
+                        role="tabpanel"
+                        aria-label="描述"
+                    >
+                        <el-form-item label="生成模型" class="model-field">
+                            <el-select v-model="selectedId" filterable placeholder="选择模型" :loading="loading">
+                                <el-option
+                                    v-for="entry in models"
+                                    :key="entry.id"
+                                    :label="entry.displayName || entry.description || entry.id"
+                                    :value="entry.id"
                                 >
-                                    <el-select v-model="params.aspectRatio">
-                                        <el-option
-                                            v-for="aspect in aspects"
-                                            :key="aspect"
-                                            :label="`${aspect} · ${aspect === '16:9' ? '横向' : aspect === '9:16' ? '竖向' : aspect === '1:1' ? '方形' : '画幅'}`"
-                                            :value="aspect"
-                                        />
-                                    </el-select>
-                                </el-form-item>
-                                <el-form-item v-if="kind === 'image' && provider === 'flow'" label="输出精度">
-                                    <el-select v-model="params.imageSize">
-                                        <el-option
-                                            v-for="size in capabilities.imageSizes"
-                                            :key="size"
-                                            :value="size"
-                                            :label="size === '1k' ? '1K · 原生' : size.toUpperCase()"
-                                        />
-                                    </el-select>
-                                </el-form-item>
-                                <el-form-item
-                                    v-if="kind === 'image' && provider === 'vids' && !imageEditing"
-                                    label="画面风格"
-                                >
-                                    <el-select v-model="params.style">
-                                        <el-option
-                                            v-for="style in capabilities.styles"
-                                            :key="style"
-                                            :value="style"
-                                            :label="styleNames[style] || style"
-                                        />
-                                    </el-select>
-                                </el-form-item>
-                                <el-form-item v-if="kind === 'video' && params.mode !== 'upscale'" label="清晰度">
-                                    <el-select v-model="params.resolution">
-                                        <el-option
-                                            v-for="resolution in resolutions"
-                                            :key="resolution"
-                                            :value="resolution"
-                                            :label="resolution.toUpperCase()"
-                                        />
-                                    </el-select>
-                                </el-form-item>
-                                <el-form-item
-                                    v-if="
-                                        kind === 'video' &&
-                                        params.mode !== 'upscale' &&
-                                        !(provider === 'flow' && params.mode === 'edit')
-                                    "
-                                    :label="params.mode === 'extend' ? '追加时长' : '输出时长'"
-                                >
-                                    <el-select v-model="params.durationSeconds">
-                                        <el-option
-                                            v-for="seconds in durations"
-                                            :key="seconds"
-                                            :value="seconds"
-                                            :label="`${seconds} 秒`"
-                                        />
-                                    </el-select>
-                                </el-form-item>
-                                <el-form-item
-                                    v-if="kind === 'video' && provider === 'flow' && qualities.length"
-                                    label="生成档位"
-                                >
-                                    <el-select v-model="params.quality">
-                                        <el-option
-                                            v-for="quality in qualities"
-                                            :key="quality"
-                                            :value="quality"
-                                            :label="qualityNames[quality] || quality"
-                                        />
-                                    </el-select>
-                                </el-form-item>
-                                <el-form-item
-                                    v-if="kind === 'video' && provider === 'flow' && capabilities.priorities?.length"
-                                    label="执行模式"
-                                >
-                                    <el-select v-model="params.priority">
-                                        <el-option
-                                            v-for="priority in priorities"
-                                            :key="priority"
-                                            :value="priority"
-                                            :label="priority === 'relaxed' ? 'Relaxed · Ultra 账号' : '标准'"
-                                        />
-                                    </el-select>
-                                </el-form-item>
-                                <el-form-item
-                                    v-if="
-                                        kind === 'video' &&
-                                        provider === 'vids' &&
-                                        ['text', 'ingredients', 'edit'].includes(params.mode)
-                                    "
-                                    label="镜头语言"
-                                >
-                                    <el-select v-model="params.shotMode">
-                                        <el-option label="自动" value="auto" />
-                                        <el-option label="长镜头" value="long_take" />
-                                        <el-option label="蒙太奇" value="montage" />
-                                    </el-select>
-                                </el-form-item>
-                                <el-form-item v-if="kind === 'speech'" label="选择声线" class="span-two">
-                                    <el-select v-model="params.voice" filterable>
-                                        <el-option
-                                            v-for="voice in voiceOptions"
-                                            :key="voice.id"
-                                            :label="`${voice.name}${voice.description ? ` · ${voice.description}` : ''}`"
-                                            :value="voice.id"
-                                        />
-                                    </el-select>
-                                    <p class="field-hint">
-                                        {{ selectedVoice?.description || '30 个官方预设 · WAV 音频' }}
-                                        <el-tag
-                                            v-if="capabilities.verified_voices?.includes(params.voice)"
-                                            size="small"
-                                            type="success"
-                                        >
-                                            短英文已验收
-                                        </el-tag>
-                                    </p>
-                                </el-form-item>
+                                    <span>{{ entry.displayName || entry.description || entry.id }}</span>
+                                    <small class="model-option-id">{{ entry.id }}</small>
+                                </el-option>
+                                <el-option
+                                    v-if="!models.length && provider === 'vids'"
+                                    :label="`Vids ${kind === 'image' ? 'Image' : kind === 'video' ? 'Video' : 'Speech'}`"
+                                    :value="`vids-${kind}`"
+                                />
+                            </el-select>
+                            <div class="field-hint">
+                                {{ catalogMessage }}
+                                <el-tooltip content="目录来自服务端能力声明；未连接时显示仓库自带公开模型。">
+                                    <el-icon><InfoFilled /></el-icon>
+                                </el-tooltip>
                             </div>
-                            <el-alert
-                                v-if="imageEditing && provider === 'vids'"
-                                title="编辑成品由上游返回实际尺寸；构图与风格请直接写进描述。"
-                                type="info"
-                                :closable="false"
-                                show-icon
+                        </el-form-item>
+                        <el-form-item :label="kind === 'speech' ? '朗读文本' : '画面描述'">
+                            <el-input
+                                v-model="prompt"
+                                class="studio-prompt-input"
+                                @dragover.prevent
+                                @drop="dropPrompt"
+                                type="textarea"
+                                :autosize="{ minRows: 3, maxRows: 4 }"
+                                :maxlength="kind === 'speech' ? 4096 : 32000"
+                                show-word-limit
+                                :placeholder="
+                                    kind === 'speech'
+                                        ? '写下你想听见的文字…当前 Vids 语音请使用英文等受支持语言。'
+                                        : '描述主角、场景、光线和画风。越具体，越接近你的想象…'
+                                "
                             />
-                            <el-alert
-                                v-if="params.mode === 'upscale'"
-                                title="保留原视频时长与方向，放大至 1080p。上传 3–10 秒 MP4。"
-                                type="info"
-                                :closable="false"
-                                show-icon
-                            />
-                            <el-form-item
-                                v-if="provider === 'flow' && modeLimits.mediaId && !modeLimits.videoInput"
-                                label="源视频媒体 ID"
+                        </el-form-item>
+                        <div class="prompt-suggestions">
+                            <span>灵感小签</span>
+                            <el-button
+                                v-for="example in examples"
+                                :key="example.label"
+                                size="small"
+                                round
+                                @click="prompt = example.text"
                             >
-                                <el-input v-model="params.mediaId" placeholder="填写 Flow 生成返回的 media ID" />
+                                {{ example.label }}
+                            </el-button>
+                        </div>
+                    </div>
+                    <div
+                        v-show="editorTab === 'settings'"
+                        class="editor-panel editor-parameters"
+                        role="tabpanel"
+                        :aria-label="kind === 'speech' ? '声线设置' : '画面设定'"
+                    >
+                        <p class="editor-specification">{{ specificationSummary }}</p>
+                        <div class="parameter-grid">
+                            <el-form-item v-if="kind !== 'speech'" label="创作方式">
+                                <el-select v-model="params.mode">
+                                    <el-option
+                                        v-for="mode in modes"
+                                        :key="mode"
+                                        :value="mode"
+                                        :label="modeNames[mode] || mode"
+                                    />
+                                </el-select>
                             </el-form-item>
-                            <div v-if="provider === 'flow' && params.mode === 'edit'" class="parameter-grid">
-                                <el-form-item label="片段起点（毫秒）">
-                                    <el-input-number
-                                        v-model="params.trimStartMs"
-                                        :min="0"
-                                        :step="1000"
-                                        controls-position="right"
+                            <el-form-item
+                                v-if="
+                                    kind !== 'speech' &&
+                                    !(imageEditing && provider === 'vids') &&
+                                    params.mode !== 'upscale'
+                                "
+                                label="画面比例"
+                            >
+                                <el-select v-model="params.aspectRatio">
+                                    <el-option
+                                        v-for="aspect in aspects"
+                                        :key="aspect"
+                                        :label="`${aspect} · ${aspect === '16:9' ? '横向' : aspect === '9:16' ? '竖向' : aspect === '1:1' ? '方形' : '画幅'}`"
+                                        :value="aspect"
                                     />
-                                </el-form-item>
-                                <el-form-item label="片段终点（毫秒）">
+                                </el-select>
+                            </el-form-item>
+                            <el-form-item v-if="kind === 'image' && provider === 'flow'" label="输出精度">
+                                <el-select v-model="params.imageSize">
+                                    <el-option
+                                        v-for="size in capabilities.imageSizes"
+                                        :key="size"
+                                        :value="size"
+                                        :label="size === '1k' ? '1K · 原生' : size.toUpperCase()"
+                                    />
+                                </el-select>
+                            </el-form-item>
+                            <el-form-item
+                                v-if="kind === 'image' && provider === 'vids' && !imageEditing"
+                                label="画面风格"
+                            >
+                                <el-select v-model="params.style">
+                                    <el-option
+                                        v-for="style in capabilities.styles"
+                                        :key="style"
+                                        :value="style"
+                                        :label="styleNames[style] || style"
+                                    />
+                                </el-select>
+                            </el-form-item>
+                            <el-form-item v-if="kind === 'video' && params.mode !== 'upscale'" label="清晰度">
+                                <el-select v-model="params.resolution">
+                                    <el-option
+                                        v-for="resolution in resolutions"
+                                        :key="resolution"
+                                        :value="resolution"
+                                        :label="resolution.toUpperCase()"
+                                    />
+                                </el-select>
+                            </el-form-item>
+                            <el-form-item
+                                v-if="
+                                    kind === 'video' &&
+                                    params.mode !== 'upscale' &&
+                                    !(provider === 'flow' && params.mode === 'edit')
+                                "
+                                :label="params.mode === 'extend' ? '追加时长' : '输出时长'"
+                            >
+                                <el-select v-model="params.durationSeconds">
+                                    <el-option
+                                        v-for="seconds in durations"
+                                        :key="seconds"
+                                        :value="seconds"
+                                        :label="`${seconds} 秒`"
+                                    />
+                                </el-select>
+                            </el-form-item>
+                            <el-form-item
+                                v-if="kind === 'video' && provider === 'flow' && qualities.length"
+                                label="生成档位"
+                            >
+                                <el-select v-model="params.quality">
+                                    <el-option
+                                        v-for="quality in qualities"
+                                        :key="quality"
+                                        :value="quality"
+                                        :label="qualityNames[quality] || quality"
+                                    />
+                                </el-select>
+                            </el-form-item>
+                            <el-form-item
+                                v-if="kind === 'video' && provider === 'flow' && capabilities.priorities?.length"
+                                label="执行模式"
+                            >
+                                <el-select v-model="params.priority">
+                                    <el-option
+                                        v-for="priority in priorities"
+                                        :key="priority"
+                                        :value="priority"
+                                        :label="priority === 'relaxed' ? 'Relaxed · Ultra 账号' : '标准'"
+                                    />
+                                </el-select>
+                            </el-form-item>
+                            <el-form-item
+                                v-if="
+                                    kind === 'video' &&
+                                    provider === 'vids' &&
+                                    ['text', 'ingredients', 'edit'].includes(params.mode)
+                                "
+                                label="镜头语言"
+                            >
+                                <el-select v-model="params.shotMode">
+                                    <el-option label="自动" value="auto" />
+                                    <el-option label="长镜头" value="long_take" />
+                                    <el-option label="蒙太奇" value="montage" />
+                                </el-select>
+                            </el-form-item>
+                            <el-form-item v-if="kind === 'speech'" label="选择声线" class="span-two">
+                                <el-select v-model="params.voice" filterable>
+                                    <el-option
+                                        v-for="voice in voiceOptions"
+                                        :key="voice.id"
+                                        :label="`${voice.name}${voice.description ? ` · ${voice.description}` : ''}`"
+                                        :value="voice.id"
+                                    />
+                                </el-select>
+                                <p class="field-hint">
+                                    {{ selectedVoice?.description || '30 个官方预设 · WAV 音频' }}
+                                    <el-tag
+                                        v-if="capabilities.verified_voices?.includes(params.voice)"
+                                        size="small"
+                                        type="success"
+                                    >
+                                        短英文已验收
+                                    </el-tag>
+                                </p>
+                            </el-form-item>
+                        </div>
+                        <el-alert
+                            v-if="imageEditing && provider === 'vids'"
+                            title="编辑成品由上游返回实际尺寸；构图与风格请直接写进描述。"
+                            type="info"
+                            :closable="false"
+                            show-icon
+                        />
+                        <el-alert
+                            v-if="params.mode === 'upscale'"
+                            title="保留原视频时长与方向，放大至 1080p。上传 3–10 秒 MP4。"
+                            type="info"
+                            :closable="false"
+                            show-icon
+                        />
+                        <el-form-item
+                            v-if="provider === 'flow' && modeLimits.mediaId && !modeLimits.videoInput"
+                            label="源视频媒体 ID"
+                        >
+                            <el-input v-model="params.mediaId" placeholder="填写 Flow 生成返回的 media ID" />
+                        </el-form-item>
+                        <div v-if="provider === 'flow' && params.mode === 'edit'" class="parameter-grid">
+                            <el-form-item label="片段起点（毫秒）">
+                                <el-input-number
+                                    v-model="params.trimStartMs"
+                                    :min="0"
+                                    :step="1000"
+                                    controls-position="right"
+                                />
+                            </el-form-item>
+                            <el-form-item label="片段终点（毫秒）">
+                                <el-input-number
+                                    v-model="params.trimEndMs"
+                                    :min="1"
+                                    :step="1000"
+                                    controls-position="right"
+                                />
+                            </el-form-item>
+                        </div>
+                    </div>
+                    <div
+                        v-show="editorTab === 'materials' && kind !== 'speech'"
+                        class="editor-panel editor-materials"
+                        role="tabpanel"
+                        aria-label="参考图片与素材"
+                    >
+                        <StudioReferenceBoard
+                            v-if="kind !== 'speech'"
+                            :materials="materials"
+                            :maximum="modeLimits.maxImages || 1"
+                            :disabled="materialBusy"
+                            :busy="materialBusy"
+                            :first-last="params.mode === 'first_last_frame'"
+                            :provider="provider"
+                            @files="addReferenceFiles"
+                            @clipboard="readClipboardImages"
+                            @remove="materials.splice($event, 1)"
+                            @clear="materials = []"
+                            @edit="editReference"
+                            @move="moveReference"
+                            @media="useDraggedMedia"
+                        />
+                        <div v-if="modeLimits.videoInput" class="material-section">
+                            <div class="section-heading small">
+                                <h3>原视频</h3>
+                                <span class="muted">
+                                    {{ provider === 'vids' ? 'MP4 · 50 MiB' : 'MP4 / WebM / MOV · 100 MiB' }}
+                                </span>
+                            </div>
+                            <el-upload
+                                v-if="!sourceVideo"
+                                drag
+                                :auto-upload="false"
+                                :show-file-list="false"
+                                :limit="1"
+                                :accept="provider === 'vids' ? 'video/mp4' : 'video/mp4,video/webm,video/quicktime'"
+                                :on-change="addVideo"
+                                :disabled="materialBusy"
+                            >
+                                <el-icon class="upload-icon"><VideoCamera /></el-icon>
+                                <div>
+                                    拖入原视频，或
+                                    <strong>点击选择</strong>
+                                </div>
+                                <small>素材随本次请求提交</small>
+                            </el-upload>
+                            <div v-else class="source-video">
+                                <video
+                                    :src="sourceVideo.data"
+                                    controls
+                                    preload="metadata"
+                                    @loadedmetadata="videoMetadata"
+                                />
+                                <div>
+                                    <span>{{ sourceVideo.name }}</span>
+                                    <el-button text type="danger" :icon="Delete" @click="sourceVideo = null">
+                                        移除
+                                    </el-button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="editor-submit">
+                        <el-alert
+                            v-if="error || validation"
+                            :title="error || validation"
+                            type="warning"
+                            :closable="false"
+                            show-icon
+                            class="studio-error"
+                        />
+                        <div class="generate-area">
+                            <div v-if="kind === 'image' || kind === 'video'" class="generation-count">
+                                <label for="studio-generation-count">
+                                    生成数量
+                                    <small>{{ kind === 'image' ? '张' : '个' }}</small>
+                                </label>
+                                <div class="generation-count-controls">
                                     <el-input-number
-                                        v-model="params.trimEndMs"
+                                        id="studio-generation-count"
+                                        v-model="params.count"
                                         :min="1"
-                                        :step="1000"
-                                        controls-position="right"
+                                        :max="20"
+                                        :precision="0"
+                                        aria-label="生成数量"
                                     />
-                                </el-form-item>
+                                    <el-button
+                                        v-for="amount in [1, 4, 8]"
+                                        :key="amount"
+                                        size="small"
+                                        :type="params.count === amount ? 'primary' : 'default'"
+                                        plain
+                                        @click="params.count = amount"
+                                    >
+                                        {{ amount }}
+                                    </el-button>
+                                </div>
+                                <small>每份独立生成，按实际生成消耗额度，单批最多 20 份。</small>
                             </div>
-                        </el-collapse-item>
-                        <el-collapse-item v-if="modeLimits.videoInput" name="materials">
-                            <template #title>
-                                <div class="settings-toggle">
-                                    <span>参考图片与素材</span>
-                                    <small>
-                                        {{
-                                            sourceVideo
-                                                ? '已添加原视频'
-                                                : materials.length
-                                                  ? `已添加 ${materials.length} 张图片`
-                                                  : modeLimits.videoInput
-                                                    ? '上传原视频'
-                                                    : modeLimits.minImages
-                                                      ? `至少 ${modeLimits.minImages} 张图片`
-                                                      : '可选 · 上传图片或拖入素材'
-                                        }}
-                                    </small>
-                                </div>
-                            </template>
-                            <div v-if="modeLimits.videoInput" class="material-section">
-                                <div class="section-heading small">
-                                    <h3>原视频</h3>
-                                    <span class="muted">
-                                        {{ provider === 'vids' ? 'MP4 · 50 MiB' : 'MP4 / WebM / MOV · 100 MiB' }}
-                                    </span>
-                                </div>
-                                <el-upload
-                                    v-if="!sourceVideo"
-                                    drag
-                                    :auto-upload="false"
-                                    :show-file-list="false"
-                                    :limit="1"
-                                    :accept="provider === 'vids' ? 'video/mp4' : 'video/mp4,video/webm,video/quicktime'"
-                                    :on-change="addVideo"
-                                    :disabled="materialBusy"
-                                >
-                                    <el-icon class="upload-icon"><VideoCamera /></el-icon>
-                                    <div>
-                                        拖入原视频，或
-                                        <strong>点击选择</strong>
-                                    </div>
-                                    <small>素材随本次请求提交</small>
-                                </el-upload>
-                                <div v-else class="source-video">
-                                    <video
-                                        :src="sourceVideo.data"
-                                        controls
-                                        preload="metadata"
-                                        @loadedmetadata="videoMetadata"
-                                    />
-                                    <div>
-                                        <span>{{ sourceVideo.name }}</span>
-                                        <el-button text type="danger" :icon="Delete" @click="sourceVideo = null">
-                                            移除
-                                        </el-button>
-                                    </div>
-                                </div>
-                            </div>
-                        </el-collapse-item>
-                    </el-collapse>
+                            <p v-if="captchaRequired" class="studio-captcha-setup" role="alert">
+                                Flow 创作需要打码密钥，
+                                <el-button link type="primary" @click="configureCaptcha">现在填写</el-button>
+                            </p>
+                            <el-button
+                                type="primary"
+                                size="large"
+                                :icon="MagicStick"
+                                :loading="submitting || materialBusy"
+                                :disabled="!prompt.trim() || !available || !!validation || captchaRequired"
+                                @click="generate"
+                            >
+                                {{
+                                    submitting
+                                        ? '正在提交后台任务…'
+                                        : materialBusy
+                                          ? '正在读取素材…'
+                                          : kind === 'image'
+                                            ? `提交 ${params.count} 张图片`
+                                            : kind === 'video'
+                                              ? `提交 ${params.count} 个视频`
+                                              : '生成我的声线'
+                                }}
+                            </el-button>
+                            <span>后台生成，可继续修改与提交 · Ctrl + Enter</span>
+                        </div>
+                        <div v-if="!available" class="connection-help">
+                            <el-icon><Connection /></el-icon>
+                            <span>
+                                {{ provider === 'flow' ? '请重新同步模型能力。' : '先接入 Vids 账号，再开始创作。' }}
+                            </span>
+                            <el-button v-if="provider === 'flow'" link type="primary" @click="loadCatalog">
+                                重新同步
+                            </el-button>
+                            <el-button v-else link type="primary" @click="router.push('/accounts?platform=vids')">
+                                账号接入
+                            </el-button>
+                        </div>
+                    </div>
                 </el-form>
             </section>
 
@@ -2566,14 +2592,65 @@ onUnmounted(() => {
     position: sticky;
     top: 22px;
 }
+.editor-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 3px;
+    margin: -7px 0 14px;
+    border-radius: 9px;
+    background: var(--surface-soft);
+}
+.editor-tabs button {
+    flex: 1;
+    min-width: 0;
+    padding: 7px 8px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 12px;
+    white-space: nowrap;
+}
+.editor-tabs button.active {
+    background: var(--surface);
+    color: var(--accent);
+    box-shadow: 0 1px 4px rgb(40 51 72 / 8%);
+}
+.editor-tabs button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+.editor-panel {
+    min-height: 0;
+}
+.editor-specification {
+    margin: -3px 0 14px;
+    color: var(--muted);
+    font-size: 12px;
+}
+.editor-materials {
+    max-height: 430px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+}
+.editor-submit {
+    margin-top: 12px;
+}
+.editor-submit .generate-area {
+    margin: 0;
+}
+.editor-submit .connection-help {
+    margin-top: 10px;
+}
 .studio-editor :deep(.el-form-item) {
-    margin-bottom: 16px;
+    margin-bottom: 12px;
 }
 .studio-editor :deep(.el-form-item__label) {
     font-size: 12px;
     font-weight: 650;
     color: var(--ink);
-    padding-bottom: 7px;
+    padding-bottom: 4px;
 }
 .studio-editor :deep(.el-select),
 .parameter-grid :deep(.el-input-number) {
@@ -2825,7 +2902,7 @@ onUnmounted(() => {
 .studio-canvas {
     padding: 24px;
     min-width: 0;
-    min-height: 650px;
+    min-height: 0;
     display: flex;
     flex-direction: column;
 }
@@ -3106,6 +3183,9 @@ onUnmounted(() => {
     .studio-editor {
         position: static;
     }
+    .editor-materials {
+        max-height: none;
+    }
     .studio-canvas {
         min-height: 530px;
     }
@@ -3180,6 +3260,200 @@ onUnmounted(() => {
         gap: 9px;
     }
     .task-status .task-summary {
+        display: none;
+    }
+}
+@media (min-width: 1051px) {
+    .studio-view > .page-heading {
+        margin-bottom: 10px;
+        min-height: 34px;
+    }
+    .studio-view > .page-heading h1 {
+        font-size: 24px;
+    }
+    .studio-view > .page-heading p {
+        display: none;
+    }
+    .studio-nav {
+        gap: 10px;
+        flex-wrap: nowrap;
+        padding: 8px 10px;
+        margin-bottom: 12px;
+    }
+    .studio-kind-tabs {
+        order: 0;
+        width: auto;
+        padding: 0;
+        gap: 1px;
+        flex-wrap: nowrap;
+    }
+    .studio-kind-tabs button {
+        padding: 8px 9px;
+        font-size: 12px;
+        white-space: nowrap;
+    }
+    .studio-nav > .el-tag {
+        margin-left: auto;
+        font-size: 11px;
+    }
+    .studio-grid > .studio-editor {
+        display: flex;
+        flex-direction: column;
+        padding: 14px 16px;
+        overflow: visible;
+    }
+    .studio-editor > .section-heading {
+        display: none;
+    }
+    .editor-tabs {
+        margin: 0 0 10px;
+        flex-shrink: 0;
+    }
+    .studio-editor-form {
+        min-height: 0;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+    }
+    .editor-panel {
+        flex: 1;
+    }
+    .editor-prompt {
+        display: flex;
+        flex-direction: column;
+    }
+    .editor-prompt > .el-form-item:nth-child(2) {
+        flex: 1;
+        min-height: 95px;
+        align-items: stretch;
+    }
+    .editor-prompt > .el-form-item:nth-child(2) :deep(.el-form-item__content),
+    .editor-prompt :deep(.el-textarea) {
+        flex: 1;
+        min-height: 0;
+    }
+    .editor-prompt :deep(.el-textarea__inner) {
+        height: 100% !important;
+        min-height: 90px !important;
+        resize: none;
+    }
+    .editor-prompt .field-hint {
+        margin-top: 3px;
+        font-size: 11px;
+        line-height: 1.4;
+    }
+    .prompt-suggestions {
+        gap: 5px;
+        flex-wrap: nowrap;
+        margin-top: 0;
+    }
+    .prompt-suggestions > span {
+        display: none;
+    }
+    .prompt-suggestions :deep(.el-button) {
+        padding: 4px 6px;
+        font-size: 11px;
+        min-width: 0;
+    }
+    .editor-submit {
+        flex-shrink: 0;
+        margin-top: 10px;
+        padding-top: 9px;
+        border-top: 1px solid var(--line);
+    }
+    .editor-submit .generate-area {
+        gap: 7px;
+    }
+    .generation-count {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0;
+    }
+    .generation-count > label {
+        font-size: 12px;
+        white-space: nowrap;
+    }
+    .generation-count > small {
+        display: none;
+    }
+    .generation-count-controls {
+        flex: 1;
+        gap: 4px;
+    }
+    .generation-count-controls .el-input-number {
+        min-width: 80px;
+        width: 100px;
+    }
+    .generation-count-controls .el-button {
+        min-width: 28px;
+        padding-inline: 7px;
+    }
+    .generate-area > .el-button {
+        min-height: 38px;
+        height: 38px;
+    }
+    .generate-area > span {
+        font-size: 11px;
+    }
+    .editor-materials {
+        max-height: none;
+        overflow: auto;
+    }
+    .editor-materials :deep(.reference-board) {
+        margin-top: 0;
+    }
+    .editor-materials :deep(.reference-empty) {
+        min-height: 80px;
+    }
+    .editor-materials :deep(.reference-list) {
+        max-height: 200px;
+    }
+    .editor-materials .material-section {
+        margin: 8px 0 0;
+    }
+    .studio-canvas > .section-heading {
+        top: -14px;
+        margin-top: -8px;
+        padding: 8px 0;
+    }
+    .studio-grid > .studio-canvas {
+        padding: 14px 18px;
+    }
+    .studio-canvas .canvas-empty {
+        min-height: 0;
+        height: calc(100% - 210px);
+        padding-bottom: 0;
+    }
+    .canvas-companion {
+        height: clamp(80px, 19vh, 210px);
+        width: min(100%, 280px);
+        flex-shrink: 1;
+    }
+    .canvas-empty h3 {
+        font-size: 18px;
+    }
+    .canvas-empty p {
+        font-size: 12px;
+    }
+    .empty-formats {
+        margin-top: 8px;
+        font-size: 12px;
+    }
+    .canvas-note {
+        margin-top: 10px;
+        padding-top: 8px;
+        font-size: 11px;
+    }
+    .studio-receipt-recovery :deep(.el-collapse-item__header) {
+        height: 36px;
+    }
+}
+@media (min-width: 1051px) and (max-width: 1250px) {
+    .studio-kind-tabs button .el-icon {
+        display: none;
+    }
+    .studio-nav > .el-tag {
         display: none;
     }
 }

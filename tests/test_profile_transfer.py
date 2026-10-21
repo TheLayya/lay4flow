@@ -579,6 +579,7 @@ class ProfileTransferRouteTests(unittest.TestCase):
         error = ProfileNotReadyError(EMAIL, "transient_error")
         error.transfer_stage = "oauth_renewal"
         error.transfer_elapsed_seconds = 31.2
+        error.profile_network_step = "credits_read"
         self.service.import_bundle.side_effect = error
         response = self.client.post(
             "/api/profile-transfer/import",
@@ -590,14 +591,16 @@ class ProfileTransferRouteTests(unittest.TestCase):
         self.assertEqual(detail["reason"], "transient_error")
         self.assertEqual(detail["stage"], "oauth_renewal")
         self.assertEqual(detail["elapsed_seconds"], 31.2)
+        self.assertEqual(detail["network_step"], "credits_read")
+        self.assertIn("Flow 账号额度接口", detail["message"])
         self.assertIn("网络请求超时", detail["message"])
         self.assertIn("Google 登录态续签", detail["message"])
         self.assertNotIn(EMAIL, response.text)
 
     def test_unknown_verification_reason_is_not_echoed(self):
-        self.service.import_bundle.side_effect = ProfileNotReadyError(
-            EMAIL, "synthetic-private-secret"
-        )
+        error = ProfileNotReadyError(EMAIL, "synthetic-private-secret")
+        error.profile_network_step = "synthetic-private-secret"
+        self.service.import_bundle.side_effect = error
         response = self.client.post(
             "/api/profile-transfer/import",
             headers={"Authorization": "Bearer synthetic-admin"},

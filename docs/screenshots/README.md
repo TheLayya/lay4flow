@@ -6,7 +6,7 @@
 
 `image-editor.webp` 展示上传本地 lay 插画后的裁剪、涂鸦与 AI 编辑入口。`vids-studio.webp` 展示语音工作台及 30 个预设声线；三个音频卡片使用本地合成演示音，不代表上游声线生成或实时验收。
 
-`updates.webp` 展示设置页的版本与更新记录卡片，包含本版更新、GitHub 发布页、Windows 一键安装与 Docker 热更新指引。
+`updates.webp` 展示左下角版本号打开的更新日志抽屉，包含本地逐版变更、线上版本检查和安装指引。版本号和变更来自仓库的 `VERSION` 与 `docs/CHANGELOG.md`。
 
 桌面图片为 1600 × 1000，`mobile.webp` 为 390 × 844。WebP 使用质量 90 编码，保留原始尺寸。
 

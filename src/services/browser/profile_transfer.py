@@ -81,6 +81,14 @@ TRANSFER_STAGES = {
     "prepare_workspace": "准备账号工作区",
     "finalize": "完成账号配置",
 }
+PROFILE_NETWORK_STEPS = {
+    "oauth_csrf": "读取 Google 登录入口",
+    "oauth_signin": "提交 Google 登录续签",
+    "oauth_redirect": "打开 Google 授权回调",
+    "oauth_confirmation": "等待 Google 登录确认",
+    "session_read": "读取更新后的 Flow 会话",
+    "credits_read": "校验 Flow 账号额度接口",
+}
 
 
 class ProfileTransferError(ValueError):
@@ -97,6 +105,9 @@ def transfer_error_detail(error: Exception) -> tuple[int, dict[str, Any]]:
         **({"stage": stage} if stage in TRANSFER_STAGES else {}),
         **({"elapsed_seconds": elapsed} if isinstance(elapsed, (int, float)) else {}),
     }
+    network_step = getattr(error, "profile_network_step", None)
+    if network_step in PROFILE_NETWORK_STEPS:
+        diagnostics["network_step"] = network_step
     token_id = getattr(error, "transfer_token_id", None)
     if isinstance(token_id, int) and not isinstance(token_id, bool) and 0 < token_id < 2**63:
         return 502, {
@@ -113,6 +124,8 @@ def transfer_error_detail(error: Exception) -> tuple[int, dict[str, Any]]:
         message = VERIFICATION_MESSAGES.get(reason, "Profile 校验未通过，请检查登录态与代理网络")
         if stage in TRANSFER_STAGES:
             message = f"{TRANSFER_STAGES[stage]}失败：{message}"
+        if network_step in PROFILE_NETWORK_STEPS:
+            message += f"（步骤：{PROFILE_NETWORK_STEPS[network_step]}）"
         return 422, {
             "error_code": "profile_verification_failed",
             "reason": reason,
@@ -655,6 +668,12 @@ class ProfileTransfer:
                             **transfer,
                             "transfer_failure_reason": reason,
                             "transfer_failure_stage": stage,
+                            **(
+                                {"network_step": error.profile_network_step}
+                                if getattr(error, "profile_network_step", None)
+                                in PROFILE_NETWORK_STEPS
+                                else {}
+                            ),
                             "elapsed_seconds": elapsed,
                         },
                     )

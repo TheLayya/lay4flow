@@ -1,6 +1,7 @@
 """Offline transport regressions for account-bound Flow proxy failures."""
 
 import json
+import os
 import tomllib
 import unittest
 from pathlib import Path
@@ -138,6 +139,62 @@ class FlowProxyTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.calls[0][1]["proxy"], HTTP_PROXY)
         fallback.assert_called_once()
         self.assertEqual(fallback.call_args.args[4], HTTP_PROXY)
+
+    async def test_host_proxy_changes_only_transport_not_account_binding(self):
+        session = _Session()
+        client = FlowClient(None)
+        bridge = SimpleNamespace(url="http://127.0.0.1:19876", close=AsyncMock())
+        with (
+            patch.dict(os.environ, {"LAY4FLOW_HOST_PROXY": "http://host.docker.internal:9786"}),
+            patch("src.services.flow_client.AsyncSession", return_value=session),
+            patch(
+                "src.services.browser.cloak_proxy.CloakProxyBridge.start",
+                AsyncMock(return_value=bridge),
+            ) as start,
+        ):
+            with client.account_request_proxy(SOCKS_PROXY):
+                await client._make_request("GET", "https://flow.google.com/probe")
+                self.assertEqual(client._account_proxy_ctx.get(), SOCKS_PROXY)
+                await client._make_text_request("GET", "https://flow.google.com/text")
+                await client._make_request(
+                    "GET", "https://flow.google.com/direct", force_no_proxy=True
+                )
+            self.assertEqual(start.await_count, 2)
+            self.assertEqual(start.call_args.args, (SOCKS_PROXY,))
+            self.assertEqual(
+                start.call_args.kwargs["host_proxy"], "http://host.docker.internal:9786"
+            )
+            self.assertEqual(
+                [call[1]["proxy"] for call in session.calls], [bridge.url, bridge.url, None]
+            )
+            self.assertEqual(bridge.close.await_count, 2)
+
+    async def test_host_proxy_urllib_fallback_keeps_tunnel_alive(self):
+        session = _Session(error=RuntimeError("curl: (7) Failed to connect to proxy"))
+        client = FlowClient(
+            SimpleNamespace(get_request_proxy_url=AsyncMock(return_value=HTTP_PROXY))
+        )
+        bridge = SimpleNamespace(url="http://127.0.0.1:19876", close=AsyncMock())
+
+        def fallback(*args, **kwargs):
+            self.assertEqual(args[4], bridge.url)
+            self.assertEqual(bridge.close.await_count, 1)
+            return {"fallback": True}
+
+        with (
+            patch.dict(os.environ, {"LAY4FLOW_HOST_PROXY": "http://host.docker.internal:9786"}),
+            patch("src.services.flow_client.AsyncSession", return_value=session),
+            patch(
+                "src.services.browser.cloak_proxy.CloakProxyBridge.start",
+                AsyncMock(return_value=bridge),
+            ),
+            patch.object(client, "_sync_json_request_via_urllib", side_effect=fallback),
+        ):
+            self.assertEqual(
+                await client._make_request("GET", "https://flow.google.com/probe"),
+                {"fallback": True},
+            )
+        self.assertEqual(bridge.close.await_count, 2)
 
     async def test_generation_retry_uses_new_captcha_session_and_finishes_each_one(self):
         proxy = SimpleNamespace(get_request_proxy_url=AsyncMock(return_value=HTTP_PROXY))

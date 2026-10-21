@@ -45,13 +45,24 @@ class CloakBrowserBackend:
         proxy = options.get("proxy")
         if isinstance(proxy, str):
             parsed = urlsplit(proxy)
-            if parsed.scheme in {"socks5", "socks5h"} or parsed.username is not None:
+            if (
+                parsed.scheme in {"socks5", "socks5h"}
+                or parsed.username is not None
+                or os.getenv("LAY4FLOW_HOST_PROXY", "").strip()
+            ):
                 # Cloak passes these proxies only through Chromium's command
                 # line, leaving context.request on a different exit. A local
                 # HTTP bridge gives both clients Playwright's proxy settings.
                 # The stable Profile hash above still binds the real proxy.
                 bridge = await CloakProxyBridge.start(proxy)
                 options["proxy"] = bridge.url
+        elif os.getenv("LAY4FLOW_HOST_PROXY", "").strip():
+            # The host transport is added after validating the stable Profile
+            # options, so toggling a local VPN does not change its identity.
+            bridge = await CloakProxyBridge.start(
+                os.environ["LAY4FLOW_HOST_PROXY"].strip(), host_proxy=""
+            )
+            options["proxy"] = bridge.url
         try:
             context = await cloakbrowser.launch_persistent_context_async(
                 str(profile_dir), **options

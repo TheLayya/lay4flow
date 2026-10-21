@@ -37,6 +37,7 @@ const loading = ref(true),
     error = ref(''),
     range = ref('24h'),
     refreshed = ref('')
+const overviewTab = ref('recent')
 let timer,
     refreshing = false,
     quotaRequest
@@ -207,7 +208,7 @@ onUnmounted(() => {
 })
 </script>
 <template>
-    <div class="dashboard-page">
+    <div class="dashboard-page" :class="`dashboard-tab-${overviewTab}`">
         <div class="page-heading">
             <div>
                 <h1>工坊总览</h1>
@@ -273,6 +274,16 @@ onUnmounted(() => {
                 <p>{{ metric.total }}</p>
             </article>
         </section>
+        <nav class="dashboard-overview-tabs" aria-label="总览内容">
+            <button :class="{ active: overviewTab === 'recent' }" @click="overviewTab = 'recent'">最近记录</button>
+            <button :class="{ active: overviewTab === 'overview' }" @click="overviewTab = 'overview'">
+                趋势与额度
+            </button>
+            <el-button type="primary" @click="router.push('/studio')">
+                开始新的创作
+                <el-icon><ArrowRight /></el-icon>
+            </el-button>
+        </nav>
         <div class="dashboard-middle">
             <section class="surface activity-chart">
                 <div class="section-heading">
@@ -527,6 +538,9 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     isolation: isolate;
+}
+.dashboard-overview-tabs {
+    display: none;
 }
 .welcome-scene {
     position: absolute;
@@ -926,6 +940,154 @@ html.dark .welcome-caption {
         height: 204px;
         bottom: -12px;
         right: 0;
+    }
+}
+@media (min-width: 1051px) {
+    .dashboard-page {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        min-height: 0;
+    }
+    .dashboard-page > .page-heading {
+        margin-bottom: 12px;
+        flex-shrink: 0;
+    }
+    .dashboard-page > .page-heading p,
+    .welcome-panel,
+    .ideas-panel,
+    .dashboard-metrics .metric-card > p {
+        display: none;
+    }
+    .dashboard-metrics {
+        flex-shrink: 0;
+        gap: 12px;
+        margin-bottom: 12px;
+    }
+    .dashboard-metrics .metric-card {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 16px;
+    }
+    .dashboard-metrics .metric-top {
+        margin: 0;
+    }
+    .dashboard-metrics .metric-icon {
+        display: none;
+    }
+    .dashboard-metrics .metric-value {
+        font-size: 26px;
+    }
+    .dashboard-overview-tabs {
+        display: flex;
+        flex-shrink: 0;
+        align-items: center;
+        gap: 4px;
+        margin-bottom: 12px;
+    }
+    .dashboard-overview-tabs > button:not(.el-button) {
+        padding: 7px 14px;
+        border: 0;
+        border-radius: 8px;
+        color: var(--muted);
+        background: transparent;
+    }
+    .dashboard-overview-tabs > button.active {
+        color: var(--accent);
+        background: var(--pink-soft);
+    }
+    .dashboard-overview-tabs > .el-button {
+        margin-left: auto;
+    }
+    .dashboard-bottom,
+    .dashboard-middle {
+        flex: 1;
+        min-height: 0;
+        margin: 0;
+    }
+    .dashboard-tab-recent .dashboard-middle,
+    .dashboard-tab-overview .dashboard-bottom {
+        display: none;
+    }
+    .dashboard-bottom {
+        display: flex;
+    }
+    .recent-activity {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+        padding: 14px 18px;
+    }
+    .recent-activity > .section-heading {
+        margin-bottom: 10px;
+        flex-shrink: 0;
+    }
+    .recent-activity .section-heading p {
+        display: none;
+    }
+    .recent-activity > .dashboard-log-table {
+        min-height: 0;
+        flex: 1;
+    }
+    .recent-activity > .dashboard-log-table :deep(.el-table__inner-wrapper) {
+        height: 100%;
+    }
+    .recent-activity > .dashboard-log-table :deep(.el-table__body-wrapper) {
+        flex: 1;
+        min-height: 0;
+    }
+    .dashboard-middle {
+        grid-template-columns: minmax(0, 1.4fr) minmax(280px, 1fr);
+        align-items: stretch;
+        gap: 14px;
+    }
+    .dashboard-middle > .surface {
+        min-height: 0;
+        padding: 14px 18px;
+        overflow: auto;
+        scrollbar-width: thin;
+    }
+    .energy-panel .section-heading,
+    .activity-chart .section-heading {
+        margin-bottom: 10px;
+    }
+    .energy-panel .section-heading p,
+    .energy-panel .provider-row,
+    .activity-chart .section-heading p,
+    .chart-footnote {
+        display: none;
+    }
+    .credit-value {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        margin-bottom: 5px;
+        font-size: 26px;
+    }
+    .credit-value > span {
+        font-size: 12px;
+    }
+    .vids-quota-overview {
+        padding-top: 10px;
+    }
+    .vids-quota-values > article {
+        padding: 8px 10px;
+    }
+    .energy-panel .energy-action {
+        margin-top: 10px;
+    }
+    .chart-summary {
+        flex-wrap: wrap;
+    }
+    .chart-plot {
+        height: clamp(90px, 18vh, 170px);
+        margin-top: 12px;
+    }
+    .dashboard-empty {
+        flex: 1;
+        min-height: 0;
     }
 }
 </style>

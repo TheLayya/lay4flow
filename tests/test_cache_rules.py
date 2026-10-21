@@ -108,6 +108,42 @@ class MediaPoolDownloadTests(unittest.IsolatedAsyncioTestCase):
                     )
                 transport.assert_not_called()
 
+    async def test_host_transport_is_used_by_curl_and_external_downloaders(self):
+        proxy = SimpleNamespace(
+            select_media_proxy=AsyncMock(return_value="socks5h://u:p@proxy.invalid:1080")
+        )
+        bridge = SimpleNamespace(url="http://127.0.0.1:19877", close=AsyncMock())
+        flow = SimpleNamespace(get_request_fingerprint=lambda: None)
+        session = MagicMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+        session.get = AsyncMock(side_effect=RuntimeError("synthetic transport failure"))
+        commands = []
+
+        def run(command, **kwargs):
+            commands.append((command, kwargs))
+            if command[0] == "wget":
+                return SimpleNamespace(returncode=1, stderr=b"synthetic failure")
+            Path(command[command.index("-o") + 1]).write_bytes(b"synthetic image")
+            return SimpleNamespace(returncode=0)
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict("os.environ", {"LAY4FLOW_HOST_PROXY": "http://host.docker.internal:7897"}),
+            patch("src.services.file_cache.AsyncSession", return_value=session),
+            patch(
+                "src.services.browser.cloak_proxy.CloakProxyBridge.start",
+                AsyncMock(return_value=bridge),
+            ),
+            patch("subprocess.run", side_effect=run),
+        ):
+            cache = FileCache(directory, proxy_manager=proxy, flow_client=flow)
+            await cache.download_and_cache("https://storage.googleapis.com/result.png", "image")
+        self.assertEqual(session.get.await_args.kwargs["proxy"], bridge.url)
+        self.assertEqual(commands[0][1]["env"]["https_proxy"], bridge.url)
+        self.assertEqual(commands[1][0][commands[1][0].index("-x") + 1], bridge.url)
+        self.assertEqual(bridge.close.await_count, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

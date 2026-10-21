@@ -1,8 +1,28 @@
 """Keep Chromium and its shared-cookie API client on the same fixed proxy."""
 
 import asyncio
+import os
+from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import unquote, urlsplit
+
+
+@asynccontextmanager
+async def transport_proxy(proxy_url: str | None, *, enabled: bool = True):
+    """Apply the host transport hop without changing the logical account exit."""
+    host_proxy = os.getenv("LAY4FLOW_HOST_PROXY", "").strip() if enabled else ""
+    if not host_proxy:
+        yield proxy_url
+        return
+    # With no account proxy this is an ordinary Windows system proxy. With
+    # a fixed account proxy it must connect through that final proxy instead.
+    bridge = await CloakProxyBridge.start(
+        proxy_url or host_proxy, host_proxy=host_proxy if proxy_url else ""
+    )
+    try:
+        yield bridge.url
+    finally:
+        await bridge.close()
 
 
 class CloakProxyBridge:
@@ -14,7 +34,16 @@ class CloakProxyBridge:
         self._handlers: set[asyncio.Task] = set()
 
     @classmethod
-    async def start(cls, proxy_url: str) -> "CloakProxyBridge":
+    async def start(cls, proxy_url: str, *, host_proxy: str | None = None) -> "CloakProxyBridge":
+        """Start the account-local HTTP bridge.
+
+        ``proxy_url`` remains the account's fixed egress and is always the
+        final hop.  A host proxy is only a transport hop for Docker Desktop
+        networks (for example ``http://host.docker.internal:7897``); it does
+        not replace, or get included in, the account binding hash.  The
+        environment variable is intentionally read here, at bridge creation,
+        so browser sessions and HTTP clients use the same chain.
+        """
         import pproxy
 
         parsed = urlsplit(proxy_url)
@@ -28,14 +57,34 @@ class CloakProxyBridge:
         if parsed.username is not None:
             remote.users = [f"{unquote(parsed.username)}:{unquote(parsed.password or '')}".encode()]
         bridge = cls()
-        original_open = remote.open_connection
+        host_proxy = (
+            os.getenv("LAY4FLOW_HOST_PROXY", "") if host_proxy is None else host_proxy
+        ).strip()
+        upstream = remote
+        if host_proxy:
+            host = urlsplit(host_proxy)
+            host_scheme = {"socks5h": "socks5", "https": "http+secure"}.get(
+                host.scheme, host.scheme
+            )
+            if host_scheme not in {"socks5", "http", "http+secure"} or not host.hostname:
+                raise ValueError("invalid host proxy chain")
+            # Link the transport hop explicitly instead of embedding account
+            # credentials in a URI fragment.  Fragments cannot represent
+            # passwords containing '#', '/', or percent escapes reliably.
+            first_host = f"[{host.hostname}]" if ":" in host.hostname else host.hostname
+            first = pproxy.Connection(f"{host_scheme}://{first_host}:{host.port}")
+            if host.username is not None:
+                first.users = [f"{unquote(host.username)}:{unquote(host.password or '')}".encode()]
+            first.jump = remote
+            upstream = first
+        original_open = upstream.open_connection
 
         async def open_connection(*args: Any, **kwargs: Any):
             reader, writer = await original_open(*args, **kwargs)
             bridge._track_writer(writer)
             return reader, writer
 
-        remote.open_connection = open_connection
+        upstream.open_connection = open_connection
 
         async def handle(reader, writer, **kwargs):
             task = asyncio.current_task()
@@ -47,7 +96,7 @@ class CloakProxyBridge:
                 bridge._handlers.discard(task)
 
         bridge.server = await pproxy.Server("http://127.0.0.1:0").start_server(
-            {"rserver": [remote]}, stream_handler=handle
+            {"rserver": [upstream]}, stream_handler=handle
         )
         return bridge
 

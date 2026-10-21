@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from curl_cffi.requests import AsyncSession
 
 from ..core.logger import debug_logger
+from .browser.cloak_proxy import transport_proxy
 from .cache import rules as cache_rules
 from .flow.fingerprint import resolve_browser_impersonate
 
@@ -239,11 +240,14 @@ class FileCache:
 
             # Try method 1: curl_cffi with browser impersonation
             try:
-                async with AsyncSession(trust_env=False) as session:
+                async with (
+                    transport_proxy(proxy_url) as network_proxy,
+                    AsyncSession(trust_env=False) as session,
+                ):
                     response = await session.get(
                         url,
                         timeout=60,
-                        proxy=proxy_url,
+                        proxy=network_proxy,
                         headers=headers,
                         impersonate=resolve_browser_impersonate(headers.get("User-Agent", "")),
                         verify=False,
@@ -287,17 +291,21 @@ class FileCache:
                 if "sec-ch-ua-platform" in headers:
                     wget_cmd.append(f"--header=sec-ch-ua-platform: {headers['sec-ch-ua-platform']}")
 
-                if proxy_url:
-                    env = os.environ.copy()
-                    env["http_proxy"] = proxy_url
-                    env["https_proxy"] = proxy_url
-                    env["no_proxy"] = ""
-                    env["NO_PROXY"] = ""
-                else:
-                    env = None
-
                 wget_cmd.append(url)
-                result = subprocess.run(wget_cmd, capture_output=True, timeout=90, env=env)
+                async with transport_proxy(proxy_url) as network_proxy:
+                    if network_proxy:
+                        env = os.environ.copy()
+                        env["http_proxy"] = network_proxy
+                        env["https_proxy"] = network_proxy
+                        env["no_proxy"] = ""
+                        env["NO_PROXY"] = ""
+                    else:
+                        env = None
+                    # The loopback bridge runs on this event loop. Keep it
+                    # serving while the external downloader waits on HTTP.
+                    result = await asyncio.to_thread(
+                        subprocess.run, wget_cmd, capture_output=True, timeout=90, env=env
+                    )
 
                 if result.returncode == 0 and file_path.exists():
                     file_size = file_path.stat().st_size
@@ -348,11 +356,13 @@ class FileCache:
                     curl_cmd.extend(["-H", f"sec-ch-ua-mobile: {headers['sec-ch-ua-mobile']}"])
                 if "sec-ch-ua-platform" in headers:
                     curl_cmd.extend(["-H", f"sec-ch-ua-platform: {headers['sec-ch-ua-platform']}"])
-                if proxy_url:
-                    curl_cmd.extend(["-x", proxy_url, "--noproxy", ""])
-
-                curl_cmd.append(url)
-                result = subprocess.run(curl_cmd, capture_output=True, timeout=90)
+                async with transport_proxy(proxy_url) as network_proxy:
+                    if network_proxy:
+                        curl_cmd.extend(["-x", network_proxy, "--noproxy", ""])
+                    curl_cmd.append(url)
+                    result = await asyncio.to_thread(
+                        subprocess.run, curl_cmd, capture_output=True, timeout=90
+                    )
 
                 if result.returncode == 0 and file_path.exists():
                     file_size = file_path.stat().st_size

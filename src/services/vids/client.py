@@ -21,6 +21,8 @@ from urllib.request import Request
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.exceptions import RequestException
 
+from ..browser.cloak_proxy import transport_proxy
+
 DOCS_ORIGIN = "https://docs.google.com"
 BEFORE_PAID_REQUEST = ContextVar("vids_before_paid_request", default=None)
 MIME_TYPE = "application/vnd.google-apps.flix"
@@ -774,7 +776,12 @@ class VidsClient:
 
     async def _send(self, method, *args, checkpoint=True, **kwargs):
         try:
-            return await getattr(self.session, method)(*args, **kwargs)
+            async with transport_proxy(self.proxy) as network_proxy:
+                # Keep the logical binding and session Cookie jar stable;
+                # only this request's socket transport receives the host hop.
+                if network_proxy != self.proxy:
+                    kwargs["proxy"] = network_proxy
+                return await getattr(self.session, method)(*args, **kwargs)
         finally:
             # Never hide an accepted generation response behind a disk failure.
             # The gateway records persistence health and blocks new paid requests.
