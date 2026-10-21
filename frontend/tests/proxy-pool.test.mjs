@@ -30,7 +30,8 @@ function panel() {
         `${source}\nreturn {
         search, stateFilter, healthFilter, currentPage, pageSize, filteredRows, pageRows,
         selected, selectedCount, selectedRows, toggleRow, togglePage, selectFiltered, clearSelection,
-        emitBulk, onPageSizeChange, isBusy, enabledCount, healthyCount, failedCount, unknownCount, operationsLocked
+        emitBulk, onPageSizeChange, isBusy, enabledCount, healthyCount, failedCount, unknownCount, operationsLocked,
+        circuitLabel, circuitType, successLabel, probeLabel
     }`,
     )
     const state = execute(
@@ -106,6 +107,34 @@ test('proxy pool retains full addresses and exact health totals including unknow
     props.busy.add('pool:1:check')
     assert.equal(state.isBusy(props.rows[0], 'check'), true)
     assert.equal(state.isBusy(props.rows[0], 'delete'), false)
+})
+
+test('proxy scheduling states filter independently from connectivity and zero traffic is honest', () => {
+    const { state, props } = panel()
+    props.rows = [
+        { id: 1, last_check_ok: true, circuit_state: 'ready', success_count: 8, failure_count: 2, success_rate: 0.8 },
+        { id: 2, last_check_ok: true, circuit_state: 'cooling', cooldown_until: '2026-10-20T12:30:00Z' },
+        { id: 3, last_check_ok: false, circuit_state: 'probing', success_count: 0, failure_count: 2, success_rate: 0 },
+    ]
+    state.healthFilter.value = 'cooling'
+    assert.deepEqual(
+        state.filteredRows.value.map((row) => row.id),
+        [2],
+    )
+    state.healthFilter.value = 'probing'
+    assert.deepEqual(
+        state.filteredRows.value.map((row) => row.id),
+        [3],
+    )
+    assert.equal(state.circuitLabel(props.rows[1]), '熔断冷却')
+    assert.equal(state.circuitType(props.rows[2]), 'warning')
+    assert.equal(state.circuitLabel({ enabled: false, circuit_state: 'ready' }), '已停用')
+    assert.equal(state.circuitType({ enabled: false, circuit_state: 'ready' }), 'info')
+    assert.equal(state.successLabel(props.rows[0]), '80%')
+    assert.equal(state.successLabel(props.rows[1]), '暂无记录')
+    assert.equal(state.successLabel(props.rows[2]), '0%')
+    assert.match(state.probeLabel(props.rows[1]), /^最早 .+ 重探$/)
+    assert.equal(state.probeLabel({ cooldown_until: 'invalid' }), '')
 })
 
 test('proxy import locks selection and batch actions until the import finishes', () => {

@@ -598,14 +598,14 @@ onMounted(load)
                                             <span class="field-note">建议 1500 秒，支持 60–7200 秒</span>
                                         </el-form-item>
                                     </div>
-                                    <el-form-item label="最大重试次数">
+                                    <el-form-item label="最大尝试次数（含首次）">
                                         <el-input-number
                                             v-model="generation.max_retries"
                                             :min="1"
                                             :max="20"
                                             controls-position="right"
                                         />
-                                        <span class="field-note">短暂网络中断或上游错误时重新尝试</span>
+                                            <span class="field-note">每份作品独立计数，包含首次提交；验证码异常也遵循此上限，保存后对新任务生效</span>
                                     </el-form-item>
                                 </el-form>
                                 <div class="save-row">

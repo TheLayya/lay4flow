@@ -43,13 +43,32 @@ const isBusy = (row, action) => {
 const health = (row) => (row?.last_check_ok === true ? 'healthy' : row?.last_check_ok === false ? 'failed' : 'unknown')
 const healthLabel = (row) => ({ healthy: '连接正常', failed: '连接异常', unknown: '未检测' })[health(row)]
 const healthType = (row) => ({ healthy: 'success', failed: 'danger', unknown: 'info' })[health(row)]
+const circuitLabel = (row) =>
+    row.enabled === false
+        ? '已停用'
+        : { cooling: '熔断冷却', probing: '恢复探针中', ready: '可分配' }[row.circuit_state]
+const circuitType = (row) =>
+    row.enabled === false ? 'info' : { cooling: 'danger', probing: 'warning', ready: 'success' }[row.circuit_state]
+const hasTraffic = (row) => Number(row.success_count || 0) + Number(row.failure_count || 0) > 0
+const successLabel = (row) =>
+    hasTraffic(row) && Number.isFinite(row.success_rate) ? `${Math.round(row.success_rate * 100)}%` : '暂无记录'
+const probeLabel = (row) => {
+    if (!row.cooldown_until) return ''
+    const time = new Date(row.cooldown_until)
+    if (Number.isNaN(time.getTime())) return ''
+    return `最早 ${time.toLocaleTimeString('zh-CN', { hour12: false })} 重探`
+}
 
 const filteredRows = computed(() => {
     const query = search.value.trim().toLowerCase()
     return props.rows.filter((row) => {
         const matchesSearch = !query || `${row.proxy_url || ''} ${row.note || ''}`.toLowerCase().includes(query)
         const matchesState = stateFilter.value === 'all' || (stateFilter.value === 'enabled') === Boolean(row.enabled)
-        const matchesHealth = healthFilter.value === 'all' || health(row) === healthFilter.value
+        const matchesHealth =
+            healthFilter.value === 'all' ||
+            (['cooling', 'probing'].includes(healthFilter.value)
+                ? row.circuit_state === healthFilter.value
+                : health(row) === healthFilter.value)
         return matchesSearch && matchesState && matchesHealth
     })
 })
@@ -125,7 +144,7 @@ watch(
                     <h3>代理出口</h3>
                     <el-tag size="small" round>{{ rows.length }}</el-tag>
                 </div>
-                <p>统一管理连接、账号绑定与媒体下载出口</p>
+                <p>连接、账号绑定与生成调度；冷却出口自动重探</p>
             </div>
             <div class="pool-heading-actions">
                 <el-button :icon="Refresh" :loading="loading" :disabled="operationsLocked" @click="emit('reload')">
@@ -173,6 +192,8 @@ watch(
                 <el-option label="连接正常" value="healthy" />
                 <el-option label="连接异常" value="failed" />
                 <el-option label="未检测" value="unknown" />
+                <el-option label="熔断冷却" value="cooling" />
+                <el-option label="恢复探针中" value="probing" />
             </el-select>
             <span class="pool-result-count">{{ pageCountLabel }}</span>
         </div>
@@ -314,6 +335,23 @@ watch(
                         </span>
                     </template>
                 </el-table-column>
+                <el-table-column label="提交调度" min-width="216">
+                    <template #default="{ row }">
+                        <div v-if="row.circuit_state" class="pool-scheduling">
+                            <div>
+                                <el-tag :type="circuitType(row)" size="small" effect="plain">
+                                    {{ circuitLabel(row) }}
+                                </el-tag>
+                                <span>{{ row.inflight || 0 }} 份处理中</span>
+                            </div>
+                            <small>近期成功 {{ successLabel(row) }} · 连败 {{ row.consecutive_failures || 0 }}</small>
+                            <small v-if="row.cooldown_until && row.circuit_state === 'cooling'">
+                                {{ probeLabel(row) }}
+                            </small>
+                        </div>
+                        <span v-else class="pool-scheduling-empty">尚无调度记录</span>
+                    </template>
+                </el-table-column>
                 <el-table-column label="操作" min-width="258" fixed="right">
                     <template #default="{ row }">
                         <div class="row-actions">
@@ -389,6 +427,14 @@ watch(
                         @change="emit('toggle', row)"
                     />
                 </div>
+                <div v-if="row.circuit_state" class="pool-scheduling pool-mobile-scheduling">
+                    <div>
+                        <el-tag :type="circuitType(row)" size="small" effect="plain">{{ circuitLabel(row) }}</el-tag>
+                        <span>{{ row.inflight || 0 }} 份处理中</span>
+                    </div>
+                    <small>近期成功 {{ successLabel(row) }} · 连败 {{ row.consecutive_failures || 0 }}</small>
+                    <small v-if="row.cooldown_until && row.circuit_state === 'cooling'">{{ probeLabel(row) }}</small>
+                </div>
                 <footer class="row-actions">
                     <el-button size="small" @click="emit('expand', row, expandedId !== row.id)">
                         {{ expandedId === row.id ? '收起' : '展开' }}
@@ -439,6 +485,26 @@ watch(
 </template>
 
 <style scoped>
+.pool-scheduling {
+    display: grid;
+    gap: 5px;
+    font-size: 12px;
+    line-height: 1.5;
+}
+.pool-scheduling > div {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+.pool-scheduling small,
+.pool-scheduling-empty {
+    color: var(--muted);
+    font-size: 12px;
+}
+.pool-mobile-scheduling {
+    margin: 10px 0;
+}
 .proxy-pool-panel {
     min-width: 0;
     container: proxy-pool / inline-size;

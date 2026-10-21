@@ -93,6 +93,8 @@ with contextlib.redirect_stdout(io.StringIO()), TestClient(app) as client:
     if iteration == 0:
         changed = client.post("/api/admin/change-password", json={"old_password":"admin", "new_password":"smoke-updated-password"})
         assert changed.status_code == 200 and changed.json()["success"]
+        expired = client.get("/api/tokens")
+        assert expired.status_code == 401 and expired.headers["X-Admin-Session"] == "expired"
         assert client.get("/api/tokens").status_code == 401
         assert client.post("/api/login", json={"username":"admin", "password":"admin"}).status_code == 401
         assert client.post("/api/login", json={"username":"admin", "password":"smoke-updated-password"}).status_code == 200

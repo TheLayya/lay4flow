@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, Mock, patch
 from fastapi import HTTPException, Request, Response
 
 from src.api import admin
-from src.core.config import config
 from src.core.database import Database
 from src.core.models import Token
 from src.services.token_manager import TokenManager
@@ -81,6 +80,19 @@ class RefreshApiTests(unittest.IsolatedAsyncioTestCase):
             await admin.update_token(self.token_id, admin.UpdateTokenRequest(st="other-account-st"))
         self.assertEqual(caught.exception.status_code, 400)
         self.assertEqual((await self.db.get_token(self.token_id)).st, "expired-st")
+
+    async def test_changed_st_accepts_matching_googlemail_alias_and_keeps_saved_address(self):
+        await self.db.update_token(self.token_id, email="test@gmail.com")
+        self.manager._st_to_at_for_token.return_value["user"] = {"email": "test@googlemail.com"}
+        result = await admin.update_token(
+            self.token_id, admin.UpdateTokenRequest(st="googlemail-session"), token="test-admin"
+        )
+        self.assertTrue(result["success"])
+        saved = await self.db.get_token(self.token_id)
+        self.assertEqual(saved.email, "test@gmail.com")
+        self.assertEqual(saved.st, "googlemail-session")
+        self.assertFalse(saved.is_active)
+        self.assertEqual(saved.ban_reason, "manual")
 
     async def test_manual_update_keeps_verified_rotation(self):
         self.manager._st_to_at_for_token.return_value["_session_token"] = "latest-st"

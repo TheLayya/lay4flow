@@ -501,6 +501,54 @@ class ProfileVerifierTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1][0], "https://flow.google.com/api/credits")
 
+    async def test_account_verification_accepts_googlemail_alias(self):
+        class Probe:
+            async def verify(self, expected_email):
+                return {"email": "first.last@googlemail.com", "session_valid": True, "credits": 1}
+
+        result = await ProfileVerifier().verify_account("first.last@gmail.com", Probe())
+        self.assertEqual(result.reason, "account_ready")
+
+    async def test_browser_probe_accepts_matching_googlemail_alias(self):
+        probe, context, calls = self._browser_probe(
+            session_json={
+                "access_token": "valid-at",
+                "expires": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
+                "user": {"email": "user@googlemail.com"},
+            },
+            credits_response=SimpleNamespace(
+                status=200, json=AsyncMock(return_value={"credits": 8})
+            ),
+        )
+        probe.token.email = "user@gmail.com"
+        result = await probe.verify("USER@gmail.com", context)
+        self.assertTrue(result["session_valid"])
+        self.assertEqual(len(calls), 2)
+
+    async def test_browser_probe_rejects_other_googlemail_mailboxes(self):
+        for observed in (
+            "other@googlemail.com",
+            "user+tag@googlemail.com",
+            "u.ser@googlemail.com",
+            "user@example.com",
+        ):
+            with self.subTest(observed=observed):
+                probe, context, calls = self._browser_probe(
+                    session_json={
+                        "access_token": "valid-at",
+                        "expires": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
+                        "user": {"email": observed},
+                    },
+                    credits_response=SimpleNamespace(
+                        status=200, json=AsyncMock(return_value={"credits": 8})
+                    ),
+                )
+                probe.token.email = "user@gmail.com"
+                result = await probe.verify("user@gmail.com", context)
+                self.assertEqual(result["reason"], "identity_mismatch")
+                self.assertIsNone(probe.validated_session)
+                self.assertEqual(len(calls), 1)
+
     async def test_browser_probe_navigation_response_is_single_use_and_reads_current_cookie(self):
         expires = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
         session = {

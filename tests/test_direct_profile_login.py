@@ -241,19 +241,84 @@ class DirectProfileLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(saved.is_active)
         self.assertEqual(saved.ban_reason, "manual")
 
-    async def test_cancel_and_expiry_remove_only_owned_pending_row_and_profile(self):
-        for operation in ("cancel", "expire"):
-            receipt = await self.start()
-            profile = (await self.manager.spec("user@example.invalid")).profile_dir
-            if operation == "cancel":
-                await self.viewer.login.cancel(receipt["session_id"], "owner", receipt["viewer_id"])
-            else:
-                pending = self.viewer.login._sessions[receipt["session_id"]]
-                pending["timer"].cancel()
-                pending["expires_at"] = time.time() - 1
-                await self.viewer.login._expire(receipt["session_id"])
-            self.assertIsNone(await self.db.get_token(receipt["token_id"]))
-            self.assertFalse(profile.exists())
+    async def test_explicit_cancel_removes_owned_pending_row_and_profile(self):
+        receipt = await self.start()
+        profile = (await self.manager.spec("user@example.invalid")).profile_dir
+        await self.viewer.login.cancel(receipt["session_id"], "owner", receipt["viewer_id"])
+        self.assertIsNone(await self.db.get_token(receipt["token_id"]))
+        self.assertFalse(profile.exists())
+
+    async def test_shutdown_preserves_pending_credentials_profile_and_can_resume(self):
+        receipt = await self.start()
+        token_id = receipt["token_id"]
+        spec = await self.manager.spec("user@example.invalid")
+        protected = spec.profile_dir / "Default" / "persistent-site-state"
+        protected.write_bytes(b"synthetic logged-in state")
+        await self.renew(None)
+        await self.db.update_token(token_id, st="preserved-session", at="preserved-access")
+        timer = self.viewer.login._sessions[receipt["session_id"]]["timer"]
+        await self.viewer.close_all()
+        saved = await self.db.get_token(token_id)
+        self.assertEqual(saved.st, "preserved-session")
+        self.assertEqual(saved.at, "preserved-access")
+        self.assertFalse(saved.is_active)
+        self.assertEqual(protected.read_bytes(), b"synthetic logged-in state")
+        self.assertTrue(timer.cancelling() or timer.cancelled())
+        self.viewer = ProfileBrowserViewer(self.tokens)
+        self.addAsyncCleanup(self.viewer.close_all)
+        resumed = await self.viewer.login.start("user@example.invalid", "", "new-owner")
+        self.assertEqual(resumed["token_id"], token_id)
+        self.assertEqual(len(await self.db.get_all_tokens()), 1)
+        self.assertEqual(
+            spec.fingerprint_seed, (await self.manager.spec(saved.email)).fingerprint_seed
+        )
+        self.assertEqual(protected.read_bytes(), b"synthetic logged-in state")
+        self.assertTrue(
+            (
+                await self.viewer.login.complete(
+                    resumed["session_id"], "new-owner", resumed["viewer_id"]
+                )
+            )["success"]
+        )
+
+    async def test_expiry_preserves_profile_and_resumes_with_saved_proxy(self):
+        receipt = await self.start()
+        token_id = receipt["token_id"]
+        profile = (await self.manager.spec("user@example.invalid")).profile_dir
+        protected = profile / "Default" / "persistent-site-state"
+        protected.write_bytes(b"synthetic login progress")
+        pending = self.viewer.login._sessions[receipt["session_id"]]
+        pending["timer"].cancel()
+        pending["expires_at"] = time.time() - 1
+        await self.viewer.login._expire(receipt["session_id"])
+        self.assertIsNotNone(await self.db.get_token(token_id))
+        self.assertEqual(protected.read_bytes(), b"synthetic login progress")
+        self.assertIn(receipt["session_id"], self.viewer.login._sessions)
+        other_proxy = await self.db.add_proxy_pool_entry("socks5h://other.invalid:1080")
+        resumed = await self.viewer.login.start(
+            "user@example.invalid", "", "owner", proxy_pool_id=other_proxy
+        )
+        saved = await self.db.get_token(token_id)
+        self.assertEqual(resumed["token_id"], token_id)
+        self.assertEqual(saved.proxy_pool_id, self.proxy_id)
+        self.assertNotEqual(resumed["session_id"], receipt["session_id"])
+        self.assertNotIn(receipt["session_id"], self.viewer.login._sessions)
+        self.assertEqual(protected.read_bytes(), b"synthetic login progress")
+        await self.viewer.login.cancel(resumed["session_id"], "owner", resumed["viewer_id"])
+        self.assertIsNone(await self.db.get_token(token_id))
+        self.assertFalse(profile.exists())
+
+    async def test_failed_resume_keeps_saved_pending_row_and_profile(self):
+        receipt = await self.start()
+        await self.viewer.login.close_all()
+        profile = (await self.manager.spec("user@example.invalid")).profile_dir
+        with patch.object(
+            self.viewer, "_open", AsyncMock(side_effect=ViewerError(503, "synthetic"))
+        ):
+            with self.assertRaises(ViewerError):
+                await self.start()
+        self.assertIsNotNone(await self.db.get_token(receipt["token_id"]))
+        self.assertTrue(profile.exists())
 
     async def test_invalid_email_proxy_and_startup_failure_leave_no_pending_account(self):
         for email in ("invalid", "user\n@example.invalid", "user@example.invalid/path"):

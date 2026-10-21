@@ -1,5 +1,6 @@
 """Pure retry classification and budgets; execution and callbacks stay in FlowClient."""
 
+import re
 from collections.abc import Callable
 from typing import Optional, Union
 
@@ -46,6 +47,8 @@ def is_timeout_error(error: Exception) -> bool:
 def is_proxy_connection_error(error: Exception) -> bool:
     """识别本地/上游代理不可用导致的连接失败。"""
     error_lower = str(error).lower()
+    if any(cls.__name__.casefold() == "proxyerror" for cls in type(error).__mro__):
+        return True
     return any(
         keyword in error_lower
         for keyword in [
@@ -60,9 +63,24 @@ def is_proxy_connection_error(error: Exception) -> bool:
     )
 
 
+def proxy_connection_code(error: Exception) -> int | None:
+    """Return curl's non-secret proxy handshake code when available."""
+    value = getattr(error, "code", None)
+    if isinstance(value, int):
+        return value
+    match = re.search(r"curl:\s*\((\d+)\)", str(error), re.I)
+    return int(match.group(1)) if match else None
+
+
+def is_proxy_handshake_error(error: Exception) -> bool:
+    return is_proxy_connection_error(error) and proxy_connection_code(error) in {5, 7, 97}
+
+
 def is_retryable_network_error(error_str: str) -> bool:
     """识别可重试的 TLS/连接类网络错误。"""
     error_lower = (error_str or "").lower()
+    if "curl: (97)" in error_lower:
+        return True
     return any(
         keyword in error_lower
         for keyword in [
@@ -146,7 +164,7 @@ def get_retry_delay_seconds(
 
 
 def is_recaptcha_evaluation_error(error: Optional[Union[Exception, str]]) -> bool:
-    """Only evaluation rejection increases the generation attempt budget."""
+    """Identify an explicit captcha evaluation rejection for diagnostics."""
     if error is None:
         return False
     error_str = str(error)
@@ -159,8 +177,8 @@ def is_recaptcha_evaluation_error(error: Optional[Union[Exception, str]]) -> boo
 def generation_retry_budget(
     base_max_retries: int, *, captcha_rejected: bool = False, captcha_retries: int = 6
 ) -> int:
-    """Preserve total attempt counts, including the original six-attempt fallback."""
+    """Use the configured total attempts, with legacy keyword compatibility."""
     effective_max_retries = max(1, int(base_max_retries or 1))
-    if captcha_rejected:
-        return max(effective_max_retries, int(captcha_retries or 6))
+    # Settings owns the total attempts, including the first request. Captcha
+    # failures use that same bound rather than a hidden higher budget.
     return effective_max_retries

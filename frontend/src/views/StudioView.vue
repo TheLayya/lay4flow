@@ -46,6 +46,7 @@ const provider = ref(route.query.platform === 'vids' ? 'vids' : 'flow'),
     prompt = ref('')
 const loading = ref(false),
     busy = ref(false),
+    submitting = ref(false),
     materialBusy = ref(false),
     error = ref(''),
     catalogMessage = ref('内置能力目录')
@@ -74,7 +75,23 @@ const materials = ref([]),
     history = ref([]),
     clock = ref(Date.now())
 const historyStorageMessage = ref('')
+const generationJobs = ref([]),
+    generationJobsError = ref('')
+const submissionRequest = ref(null)
+const activeGenerationJobs = computed(() =>
+    generationJobs.value.filter((job) => ['queued', 'running'].includes(job.state)),
+)
+const queuedGenerationCount = computed(() =>
+    activeGenerationJobs.value.reduce(
+        (total, job) =>
+            total +
+            (job.items || []).filter((item) => ['queued', 'generating', 'in_progress'].includes(item.status)).length,
+        0,
+    ),
+)
 const mediaNamespace = studioMediaNamespace()
+const hiddenGenerationKeys = new Set()
+const hiddenGenerationStorageKey = `lay4flow_studio_hidden:${mediaNamespace}`
 const imageEditorOpen = ref(false),
     imageEditorSource = ref(null),
     editorLoading = ref(false)
@@ -295,7 +312,6 @@ const taskStatusNames = {
     no_result: '上游未返回成品',
     specification_mismatch: '输出规格校验未通过',
 }
-const pendingStates = ['generating', 'queued', 'in_progress', 'received', 'unknown', 'download_failed']
 const examples = computed(() =>
     kind.value === 'image'
         ? [
@@ -333,6 +349,7 @@ const examples = computed(() =>
 )
 const validation = computed(() => {
     if (kind.value === 'document') return ''
+    if (!Number.isInteger(params.count) || params.count < 1 || params.count > 20) return '生成数量请填写 1–20 的整数。'
     const min = modeLimits.value.minImages || 0,
         max = modeLimits.value.maxImages || 0
     if (materials.value.length < min) return `当前方式请添加至少 ${min} 张图片。`
@@ -525,10 +542,13 @@ async function readJSON(response) {
         .json()
         .catch(() => ({ error: { message: `服务端响应格式异常（HTTP ${response.status}）` } }))
     if (!response.ok)
-        throw Object.assign(new Error(data.error?.message || data.detail || `HTTP ${response.status}`), {
-            data,
-            status: response.status,
-        })
+        throw Object.assign(
+            new Error(data.error?.message || data.detail?.message || data.detail || `HTTP ${response.status}`),
+            {
+                data,
+                status: response.status,
+            },
+        )
     return data
 }
 function fileData(file) {
@@ -803,7 +823,7 @@ function buildBody() {
         if (kind.value === 'image')
             return imageEditing.value
                 ? { ...body, image_base64: materials.value[0].data.split(',')[1] }
-                : { ...body, n: params.count, aspect_ratio: params.aspectRatio, style: params.style }
+                : { ...body, n: 1, aspect_ratio: params.aspectRatio, style: params.style }
         if (params.mode !== 'upscale') Object.assign(body, { seconds: params.durationSeconds, size: vidsSize() })
         if (['text', 'ingredients', 'edit'].includes(params.mode)) body.shot_mode = params.shotMode
         if (sourceVideo.value && modeLimits.value.videoInput) body.video_base64 = sourceVideo.value.data.split(',')[1]
@@ -900,11 +920,16 @@ function persistHistory() {
             ended: entry.ended,
             key: String(entry.key || '').slice(0, 128),
             receipt: entry.receipt || '',
+            jobId: entry.jobId || '',
+            requestId: entry.requestId || '',
+            jobIndex: entry.jobIndex,
+            jobTotal: entry.jobTotal,
             signature: String(entry.signature || '').slice(0, 128),
             title: String(entry.title || '').slice(0, 100),
             description: String(entry.description || '').slice(0, 32000),
             settings: savedSettings(entry.settings),
             message: String(entry.message || '').slice(0, 1000),
+            retryTrace: entry.retryTrace,
             outputs: (entry.outputs || []).flatMap((output) =>
                 entry.provider === 'vids'
                     ? output.path
@@ -965,13 +990,119 @@ function mergeInactiveHistory(saved) {
             : entry
     })
 }
-async function receiptFor(key) {
-    if (!crypto.subtle) return ''
-    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key))
-    return 'vids_' + [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
-} // taste-skill-ignore: SHA-256 hex bytes require two-character zero padding.
+function generationRequestKey() {
+    return crypto.randomUUID?.() || `studio-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+let generationJobsVersion = 0
+function applyGenerationJob(job, snapshot = null) {
+    if (!job?.id || !['flow', 'vids'].includes(job.provider) || !Array.isArray(job.items))
+        throw new Error('后台任务响应格式异常，请刷新任务状态确认提交结果。')
+    if (snapshot) generationJobsVersion++
+    generationJobs.value = [job, ...generationJobs.value.filter((entry) => entry.id !== job.id)]
+    for (const item of job.items) {
+        const key = item.key || item.id || `${job.id}:${item.index}`
+        if (hiddenGenerationKeys.has(key)) continue
+        let current = history.value.find(
+            (entry) => entry.key === key || (entry.jobId === job.id && entry.jobIndex === item.index),
+        )
+        const isNew = !current
+        if (!current) {
+            current = reactive({
+                provider: job.provider,
+                kind: item.kind || job.kind || snapshot?.kind || 'image',
+                model: item.model || job.model || snapshot?.model || '',
+                started: (item.started_at || job.created_at || Date.now() / 1000) * 1000,
+                key,
+                receipt: '',
+                signature: snapshot?.signature || '',
+                title: snapshot?.title || job.title || job.prompt?.slice(0, 38) || '后台创作任务',
+                description: snapshot?.description || job.prompt || '',
+                settings: snapshot?.settings || {},
+                text: '',
+                progressLog: '',
+                outputs: [],
+                body: snapshot?.body,
+            })
+            history.value.unshift(current)
+        }
+        const wasCompleted = current.status === 'completed'
+        if (snapshot) {
+            current.settings = snapshot.settings
+            current.body = snapshot.body
+            current.description = snapshot.description
+        }
+        // A receipt recovery can finish after this job-list snapshot was read.
+        if (wasCompleted && item.status !== 'completed') continue
+        current.jobId = job.id
+        current.requestId = job.request_id || ''
+        current.jobIndex = item.index
+        current.jobTotal = job.total
+        if (item.started_at) current.started = item.started_at * 1000
+        if (item.completed_at) current.ended = item.completed_at * 1000
+        current.status = Object.hasOwn(taskStatusNames, item.status) ? item.status : 'unknown'
+        current.message = item.message || taskStatusNames[current.status]
+        current.text = item.text || ''
+        current.progressLog = item.progressLog || ''
+        if (item.retry_trace) current.retryTrace = item.retry_trace
+        if (job.provider === 'vids') {
+            if (item.receipt) current.receipt = item.receipt
+            if (item.vids_receipt) applyReceipt(current, item.vids_receipt)
+            for (const output of current.outputs) if (!output.url) output.url = output.path
+        } else if (Array.isArray(item.outputs) && item.outputs.length) {
+            current.outputs = item.outputs.flatMap((output) => {
+                const url = mediaURL(output.url || output.sourceURL)
+                if (!url) return []
+                return [
+                    current.outputs.find(
+                        (previous) =>
+                            previous.originalURL === url || previous.sourceURL === url || previous.url === url,
+                    ) || { ...output, url, sourceURL: url },
+                ]
+            })
+            if (pageActive && current.status === 'completed' && !wasCompleted) void cacheFlowImages(current)
+        }
+        if (isNew && snapshot) task.value = current
+    }
+    if (!task.value) task.value = history.value[0] || null
+    persistHistory()
+}
+let jobsRefreshPromise
+async function refreshGenerationJobs() {
+    if (!pageActive) return
+    if (jobsRefreshPromise) return jobsRefreshPromise
+    const requestedVersion = generationJobsVersion
+    jobsRefreshPromise = (async () => {
+        try {
+            const response = await api.raw('/api/admin/studio/jobs', { redirect: 'error' })
+            const data = await readJSON(response)
+            if (!pageActive) return
+            if (requestedVersion !== generationJobsVersion) return
+            if (!Array.isArray(data.jobs)) throw new Error('后台任务列表格式异常。')
+            generationJobs.value = data.jobs
+            for (const job of [...data.jobs].reverse()) applyGenerationJob(job)
+            const present = new Set(data.jobs.map((job) => job.id))
+            for (const entry of history.value) {
+                if (
+                    entry.jobId &&
+                    !present.has(entry.jobId) &&
+                    ['preparing', 'queued', 'generating', 'in_progress'].includes(entry.status)
+                ) {
+                    entry.status = 'unknown'
+                    entry.message = '后台任务记录已过期或服务已重启，请先查看请求日志确认原结果。'
+                }
+            }
+            generationJobsError.value = ''
+            persistHistory()
+        } catch (cause) {
+            generationJobsError.value = `任务状态同步暂未完成：${cause.message}。后台继续处理，可刷新状态。`
+        } finally {
+            jobsRefreshPromise = null
+        }
+    })()
+    return jobsRefreshPromise
+}
 async function generate() {
-    if (busy.value || materialBusy.value) return
+    if (submitting.value || materialBusy.value) return
     error.value = ''
     if (captchaRequired.value) {
         error.value = 'Flow 创作需要先申请打码服务，并在设置中保存 API 密钥。'
@@ -984,144 +1115,62 @@ async function generate() {
         error.value = cause.message
         return
     }
-    const signature = fingerprint(body)
-    const duplicate =
-        provider.value === 'vids' &&
-        history.value.find(
-            (item) => item.provider === 'vids' && item.signature === signature && pendingStates.includes(item.status),
-        )
-    if (duplicate) {
-        task.value = duplicate
-        error.value = '相同内容的原请求等待确认，请在作品区查询原收据。'
-        return
+    const count = kind.value === 'speech' ? 1 : params.count
+    const signature = fingerprint({ provider: provider.value, body, count })
+    // An uncertain acknowledgement keeps its request ID so retries retrieve the original submission.
+    if (!submissionRequest.value || submissionRequest.value.signature !== signature) {
+        submissionRequest.value = {
+            request_id: generationRequestKey(),
+            signature,
+            provider: provider.value,
+            body,
+            count,
+            snapshot: {
+                kind: kind.value,
+                model: selectedId.value,
+                signature,
+                title: prompt.value.slice(0, 38),
+                description: prompt.value,
+                settings: savedSettings(params),
+                body: redactBody(body),
+            },
+        }
     }
-    busy.value = true
-    const key = crypto.randomUUID?.() || `studio-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    const current = reactive({
-        provider: provider.value,
-        kind: kind.value,
-        model: selectedId.value,
-        status: 'preparing',
-        started: Date.now(),
-        key,
-        receipt: '',
-        signature,
-        title: prompt.value.slice(0, 38),
-        description: prompt.value,
-        settings: savedSettings(params),
-        text: '',
-        progressLog: '',
-        outputs: [],
-        body: redactBody(body),
-        message: '准备素材与生成请求…',
-    })
-    task.value = current
-    history.value.unshift(current)
+    const request = submissionRequest.value
+    submitting.value = true
     try {
-        if (current.provider === 'vids') {
-            current.receipt = await receiptFor(key)
-            current.status = 'generating'
-            current.message = '请求已发出，正在等待原生成收据。'
-            if (!persistHistory()) {
-                const cause = new Error('请先释放浏览器会话存储或允许本地存储，再提交新的 Vids 请求。')
-                cause.status = 400
-                throw cause
-            }
-            const response = await api.raw('/api/admin/vids/v1/vids/generations', {
-                method: 'POST',
-                redirect: 'error',
-                headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
-                body: JSON.stringify(body),
-            })
-            const data = await readJSON(response)
-            applyReceipt(current, data)
-            if (current.status === 'completed') await preview(current)
-        } else await generateFlow(current, body)
+        const response = await api.raw('/api/admin/studio/jobs', {
+            method: 'POST',
+            redirect: 'error',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                provider: request.provider,
+                body: request.body,
+                count: request.count,
+                request_id: request.request_id,
+            }),
+        })
+        const data = await readJSON(response)
+        applyGenerationJob(data.job, request.snapshot)
+        if (submissionRequest.value === request) submissionRequest.value = null
+        ElMessage.success(`已提交 ${request.count} 个后台任务，可以继续创作`)
     } catch (cause) {
-        if (cause.data?.vids_receipt) {
-            try {
-                applyReceipt(current, cause.data.vids_receipt)
-            } catch {
-                current.status = 'unknown'
-            }
-        } else if (current.status !== 'completed')
-            current.status =
-                current.provider === 'vids' && (!cause.status || cause.status >= 500) ? 'unknown' : 'failed'
-        current.message =
-            current.status === 'completed'
-                ? '成品生成已完成，预览读取失败。请点击「读取成品」重试。'
-                : current.status === 'unknown'
-                  ? '服务器接受状态等待确认。原收据与幂等键已保留，请查询原任务。'
-                  : cause.message
-        error.value = cause.message
+        await refreshGenerationJobs()
+        const accepted = generationJobs.value.find((job) => job.request_id === request.request_id)
+        if (accepted) {
+            applyGenerationJob(accepted, request.snapshot)
+            if (submissionRequest.value === request) submissionRequest.value = null
+            ElMessage.success(`已确认 ${request.count} 个后台任务，可继续创作`)
+        } else {
+            if (cause.status && cause.status < 500) submissionRequest.value = null
+            error.value =
+                cause.status && cause.status < 500
+                    ? cause.message
+                    : '提交结果等待确认，再次点击将核对同一次提交。请勿更换参数重复提交相同内容。'
+        }
     } finally {
-        current.ended = Date.now()
-        busy.value = false
-        persistHistory()
+        submitting.value = false
     }
-}
-async function generateFlow(current, body) {
-    current.status = 'generating'
-    current.message = '已连接生成接口，等待服务端事件。'
-    const response = await api.raw('/api/admin/studio/chat/completions', {
-        method: 'POST',
-        redirect: 'error',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    })
-    if (!response.ok) await readJSON(response)
-    if (!response.body) throw new Error('浏览器未收到可读取的响应流。')
-    const reader = response.body.getReader(),
-        decoder = new TextDecoder()
-    let buffer = '',
-        failed = ''
-    function consume(line) {
-        if (!line.startsWith('data:')) return
-        const value = line.slice(5).trim()
-        if (!value || value === '[DONE]') return
-        let data
-        try {
-            data = JSON.parse(value)
-        } catch {
-            failed = '服务端响应流包含未完成的事件，请检查原请求记录。'
-            return
-        }
-        if (data.error) {
-            failed = data.error.message || '生成接口返回错误'
-            return
-        }
-        const delta = data.choices?.[0]?.delta || {},
-            chunk = delta.content || '',
-            progress = delta.reasoning_content || ''
-        current.text += chunk
-        current.progressLog += progress
-        if (progress || chunk) current.message = (progress || chunk).trim().slice(-180) || current.message
-    }
-    while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-        lines.forEach(consume)
-    }
-    buffer += decoder.decode()
-    if (buffer) consume(buffer)
-    if (failed) throw new Error(failed)
-    for (const match of current.text.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)) {
-        const url = mediaURL(match[1])
-        if (url) current.outputs.push({ kind: 'image', url, sourceURL: url })
-    }
-    for (const match of current.text.matchAll(/<video[^>]+src=['"]([^'"]+)['"]/gi)) {
-        const url = mediaURL(match[1])
-        if (url) current.outputs.push({ kind: 'video', url, sourceURL: url })
-    }
-    if (!current.text.trim() && !current.outputs.length) throw new Error('响应已结束，服务端未返回作品内容。')
-    current.status = 'completed'
-    current.message = current.outputs.length
-        ? '作品已生成，打开预览或下载保存吧。'
-        : '已收到服务端文本响应，详细内容见请求记录。'
-    if (pageActive && current.outputs.length) void cacheFlowImages(current)
 }
 function mediaURL(value) {
     try {
@@ -1568,6 +1617,12 @@ async function removeEntry(entry) {
     }
     const index = history.value.indexOf(entry)
     if (index < 0) return
+    if (entry.jobId) {
+        hiddenGenerationKeys.add(entry.key)
+        try {
+            localStorage.setItem(hiddenGenerationStorageKey, JSON.stringify([...hiddenGenerationKeys]))
+        } catch {}
+    }
     history.value.splice(index, 1)
     if (task.value === entry) task.value = history.value[0] || null
     persistHistory()
@@ -1607,6 +1662,7 @@ async function reuseEntry(entry) {
     selectModel()
     prompt.value = entry.description || entry.title || ''
     for (const [name, value] of Object.entries(entry.settings || {})) if (name in params) params[name] = value
+    params.count = 1
     await nextTick()
     window.scrollTo?.({ top: 0, behavior: 'smooth' })
     ElMessage.success('已带入原提示词与生成参数，可直接修改后重新创作')
@@ -1623,6 +1679,7 @@ const taskDetails = computed(() =>
                   status: task.value.status,
                   receipt: task.value.receipt,
                   idempotency_key: task.value.key,
+                  retry: task.value.retryTrace,
                   request: task.value.body,
                   progress: task.value.progressLog,
                   response: task.value.text,
@@ -1635,6 +1692,8 @@ const taskDetails = computed(() =>
 )
 function restoreHistory() {
     try {
+        const hidden = JSON.parse(localStorage.getItem(hiddenGenerationStorageKey) || '[]')
+        if (Array.isArray(hidden)) for (const key of hidden) if (typeof key === 'string') hiddenGenerationKeys.add(key)
         const saved = readStudioHistory(localStorage, sessionStorage, mediaNamespace)
         history.value = []
         if (!Array.isArray(saved)) return
@@ -1670,7 +1729,8 @@ function restoreHistory() {
                     return []
                 }
             })
-            const interrupted = entry.provider === 'flow' && ['preparing', 'generating'].includes(entry.status)
+            const interrupted =
+                !entry.jobId && entry.provider === 'flow' && ['preparing', 'generating'].includes(entry.status)
             history.value.push({
                 provider: entry.provider,
                 kind: entry.kind,
@@ -1679,9 +1739,14 @@ function restoreHistory() {
                 ended: Number.isFinite(entry.ended) ? entry.ended : undefined,
                 key: String(entry.key || '').slice(0, 128),
                 receipt: entry.receipt || '',
+                jobId: entry.jobId || '',
+                requestId: entry.requestId || '',
+                jobIndex: entry.jobIndex,
+                jobTotal: entry.jobTotal,
                 signature: String(entry.signature || '').slice(0, 128),
                 text: '',
                 progressLog: '',
+                retryTrace: entry.retryTrace,
                 title: String(entry.title || '').slice(0, 100),
                 description: String(entry.description || '').slice(0, 32000),
                 settings: savedSettings(entry.settings),
@@ -1707,12 +1772,15 @@ onMounted(() => {
     localStorage.removeItem('studio_api_key')
     restoreHistory()
     restoreVidsReceipts()
+    refreshGenerationJobs()
     selectedId.value = models.value[0]?.id || ''
     selectModel()
     loadCatalog()
     interval = setInterval(() => {
         clock.value = Date.now()
-    }, 1000)
+        if (activeGenerationJobs.value.length || generationJobsError.value || submissionRequest.value)
+            refreshGenerationJobs()
+    }, 2000)
 })
 onUnmounted(() => {
     document.removeEventListener('paste', pasteImages)
@@ -1742,7 +1810,7 @@ onUnmounted(() => {
                     { label: 'Flow 创作', value: 'flow' },
                     { label: 'Vids 媒体', value: 'vids' },
                 ]"
-                :disabled="busy || materialBusy || kind === 'speech'"
+                :disabled="materialBusy || kind === 'speech'"
             />
             <div class="studio-kind-tabs" role="tablist" aria-label="创作类型" @keydown="navigateKind">
                 <button
@@ -1755,7 +1823,7 @@ onUnmounted(() => {
                     :aria-selected="kind === item.value"
                     :tabindex="kind === item.value ? 0 : -1"
                     :class="{ active: kind === item.value }"
-                    :disabled="busy || materialBusy"
+                    :disabled="materialBusy"
                     @click="kind = item.value"
                 >
                     <el-icon><component :is="item.icon" /></el-icon>
@@ -1825,7 +1893,7 @@ onUnmounted(() => {
                     </div>
                     <el-tag effect="plain">{{ provider === 'flow' ? 'FLOW' : 'VIDS' }}</el-tag>
                 </div>
-                <el-form label-position="top" :disabled="busy || materialBusy">
+                <el-form label-position="top" :disabled="materialBusy">
                     <el-form-item label="生成模型" class="model-field">
                         <el-select v-model="selectedId" filterable placeholder="选择模型" :loading="loading">
                             <el-option
@@ -1883,7 +1951,7 @@ onUnmounted(() => {
                         v-if="kind !== 'speech'"
                         :materials="materials"
                         :maximum="modeLimits.maxImages || 1"
-                        :disabled="busy || materialBusy"
+                        :disabled="materialBusy"
                         :busy="materialBusy"
                         :first-last="params.mode === 'first_last_frame'"
                         :provider="provider"
@@ -1904,6 +1972,33 @@ onUnmounted(() => {
                         class="studio-error"
                     />
                     <div class="generate-area">
+                        <div v-if="kind === 'image' || kind === 'video'" class="generation-count">
+                            <label for="studio-generation-count">
+                                生成数量
+                                <small>{{ kind === 'image' ? '张' : '个' }}</small>
+                            </label>
+                            <div class="generation-count-controls">
+                                <el-input-number
+                                    id="studio-generation-count"
+                                    v-model="params.count"
+                                    :min="1"
+                                    :max="20"
+                                    :precision="0"
+                                    aria-label="生成数量"
+                                />
+                                <el-button
+                                    v-for="amount in [1, 4, 8]"
+                                    :key="amount"
+                                    size="small"
+                                    :type="params.count === amount ? 'primary' : 'default'"
+                                    plain
+                                    @click="params.count = amount"
+                                >
+                                    {{ amount }}
+                                </el-button>
+                            </div>
+                            <small>每份独立生成，按实际生成消耗额度，单批最多 20 份。</small>
+                        </div>
                         <p v-if="captchaRequired" class="studio-captcha-setup" role="alert">
                             Flow 创作需要打码密钥，
                             <el-button link type="primary" @click="configureCaptcha">现在填写</el-button>
@@ -1912,25 +2007,23 @@ onUnmounted(() => {
                             type="primary"
                             size="large"
                             :icon="MagicStick"
-                            :loading="busy || materialBusy"
+                            :loading="submitting || materialBusy"
                             :disabled="!prompt.trim() || !available || !!validation || captchaRequired"
                             @click="generate"
                         >
                             {{
-                                busy
-                                    ? '正在把灵感变成作品…'
+                                submitting
+                                    ? '正在提交后台任务…'
                                     : materialBusy
                                       ? '正在读取素材…'
                                       : kind === 'image'
-                                        ? '开始绘梦'
+                                        ? `提交 ${params.count} 张图片`
                                         : kind === 'video'
-                                          ? '开始生成映像'
+                                          ? `提交 ${params.count} 个视频`
                                           : '生成我的声线'
                             }}
                         </el-button>
-                        <span>
-                            {{ provider === 'vids' ? '使用对应媒体额度生成' : '已登录，直接开始创作' }} · Ctrl + Enter
-                        </span>
+                        <span>后台生成，可继续修改与提交 · Ctrl + Enter</span>
                     </div>
                     <div v-if="!available" class="connection-help">
                         <el-icon><Connection /></el-icon>
@@ -2003,17 +2096,6 @@ onUnmounted(() => {
                                             :label="styleNames[style] || style"
                                         />
                                     </el-select>
-                                </el-form-item>
-                                <el-form-item
-                                    v-if="kind === 'image' && provider === 'vids' && !imageEditing"
-                                    label="生成数量"
-                                >
-                                    <el-input-number
-                                        v-model="params.count"
-                                        :min="1"
-                                        :max="Math.max(...(capabilities.counts || [1]))"
-                                        controls-position="right"
-                                    />
                                 </el-form-item>
                                 <el-form-item v-if="kind === 'video' && params.mode !== 'upscale'" label="清晰度">
                                     <el-select v-model="params.resolution">
@@ -2176,7 +2258,7 @@ onUnmounted(() => {
                                     :limit="1"
                                     :accept="provider === 'vids' ? 'video/mp4' : 'video/mp4,video/webm,video/quicktime'"
                                     :on-change="addVideo"
-                                    :disabled="busy || materialBusy"
+                                    :disabled="materialBusy"
                                 >
                                     <el-icon class="upload-icon"><VideoCamera /></el-icon>
                                     <div>
@@ -2253,6 +2335,22 @@ onUnmounted(() => {
                             <el-icon><Timer /></el-icon>
                             {{ elapsed }} 秒 · {{ task.provider === 'vids' ? 'Vids' : 'Flow' }}
                         </span>
+                    </div>
+                    <div v-if="generationJobs.length || generationJobsError" class="generation-queue" role="status">
+                        <div>
+                            <strong>
+                                {{
+                                    queuedGenerationCount
+                                        ? `${queuedGenerationCount} 个任务排队或生成中`
+                                        : '后台任务已处理'
+                                }}
+                            </strong>
+                            <el-button size="small" text :icon="Refresh" @click="refreshGenerationJobs">
+                                刷新状态
+                            </el-button>
+                        </div>
+                        <p v-if="generationJobsError">{{ generationJobsError }}</p>
+                        <p v-else>任务已交给服务器，切换页面或刷新后会自动同步；每份结果在下方分别显示。</p>
                     </div>
                     <StudioGallery
                         class="studio-results"
@@ -2653,7 +2751,7 @@ onUnmounted(() => {
     display: grid;
     gap: 9px;
 }
-.generate-area .el-button {
+.generate-area > .el-button {
     width: 100%;
     min-height: 47px;
     font-size: 14px;
@@ -2664,6 +2762,52 @@ onUnmounted(() => {
     color: var(--muted);
     text-align: center;
     font-size: 12px;
+}
+.generation-count {
+    display: grid;
+    gap: 8px;
+    margin-bottom: 5px;
+}
+.generation-count label {
+    font-size: 13px;
+    font-weight: 650;
+}
+.generation-count small {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.6;
+    font-weight: 400;
+}
+.generation-count-controls {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+.generation-count-controls .el-input-number {
+    flex: 1;
+    min-width: 110px;
+}
+.generation-count-controls .el-button {
+    margin: 0;
+    min-width: 36px;
+}
+.generation-queue {
+    margin-bottom: 16px;
+    padding: 10px 0;
+    border-block: 1px solid var(--line);
+    font-size: 13px;
+}
+.generation-queue > div {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.generation-queue p {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.7;
+    margin: 5px 0 0;
 }
 .connection-help {
     display: flex;

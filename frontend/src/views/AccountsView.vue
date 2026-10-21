@@ -189,6 +189,7 @@ function quickDraft(row) {
     if (quickDrafts[row.id]) return quickDrafts[row.id]
     const draft = {
         proxy_pool_id: row.proxy_pool_id ?? null,
+        submission_proxy_mode: row.submission_proxy_mode || 'fixed',
         remark: row.remark || '',
         image_enabled: row.image_enabled !== false,
         video_enabled: row.video_enabled !== false,
@@ -203,7 +204,7 @@ watch(accounts, (rows) => {
         const draft = quickDrafts[row.id]
         const baseline = quickBaselines[row.id]
         if (!draft || !baseline) continue
-        for (const key of ['proxy_pool_id', ...quickFields]) {
+        for (const key of ['proxy_pool_id', 'submission_proxy_mode', ...quickFields]) {
             const value = row[key] ?? (key === 'proxy_pool_id' ? null : defaults()[key])
             if (draft[key] === baseline[key]) draft[key] = value
             baseline[key] = value
@@ -214,6 +215,8 @@ function accountProxy(row) {
     return proxyPool.value.find((proxy) => proxy.id === row.proxy_pool_id)
 }
 function accountProxySummary(row) {
+    if (row.submission_proxy_mode === 'pool_random')
+        return `生成 · 代理池随机${row.proxy_pool_id ? ` · 登录 #${row.proxy_pool_id}` : ''}`
     const url = accountProxy(row)?.proxy_url || row.proxy_url
     const prefix = row.proxy_pool_id ? `代理 #${row.proxy_pool_id}` : url ? '固定代理' : '绑定代理'
     if (!url) return prefix
@@ -260,6 +263,13 @@ async function saveQuickAccount(row, kind = 'proxy') {
         }
         selectedProxy = { ...target }
         body = { proxy_pool_id: target.id }
+    } else if (kind === 'strategy') {
+        if (!['fixed', 'pool_random'].includes(draft.submission_proxy_mode)) {
+            quickErrors[row.id] = '请选择生成提交出口'
+            return
+        }
+        if (draft.submission_proxy_mode === (row.submission_proxy_mode || 'fixed')) return
+        body = { submission_proxy_mode: draft.submission_proxy_mode }
     } else {
         if (!Number.isInteger(draft.refresh_interval_minutes) || draft.refresh_interval_minutes < 1) {
             quickErrors[row.id] = '刷新间隔至少 1 分钟'
@@ -300,7 +310,12 @@ async function saveQuickAccount(row, kind = 'proxy') {
                 if (proxy.id === selectedProxy.id) proxy.bound_account_count = (proxy.bound_account_count || 0) + 1
             }
         }
-        quickSaved[row.id] = kind === 'proxy' ? `已绑定代理 #${body.proxy_pool_id}` : '账号配置已保存'
+        quickSaved[row.id] =
+            kind === 'proxy'
+                ? `已绑定代理 #${body.proxy_pool_id}`
+                : kind === 'strategy'
+                  ? `生成出口已设置为${body.submission_proxy_mode === 'pool_random' ? '代理池随机' : '账号固定代理'}`
+                  : '账号配置已保存'
         ElMessage.success(quickSaved[row.id])
     } catch (error) {
         quickErrors[row.id] = error.message
@@ -344,6 +359,7 @@ const defaults = () => ({
     login_account: '',
     login_password: '',
     proxy_pool_id: null,
+    submission_proxy_mode: 'fixed',
     auto_refresh_enabled: true,
     refresh_interval_minutes: 120,
     browser_profile_source: 'cookies',
@@ -2142,11 +2158,20 @@ onUnmounted(() => {
                         </div>
                     </el-tab-pane>
                     <el-tab-pane label="网络与刷新" name="network">
+                        <el-form-item label="生成提交出口">
+                            <el-select v-model="form.submission_proxy_mode" aria-label="生成提交出口">
+                                <el-option label="账号固定代理" value="fixed" />
+                                <el-option label="代理池随机（每次生成取健康出口）" value="pool_random" />
+                            </el-select>
+                            <span class="field-note">
+                                每份 Flow 生成任务使用一个出口；Cloak 登录和自动续期仍使用账号绑定代理。
+                            </span>
+                        </el-form-item>
                         <el-form-item label="账号代理">
                             <template v-if="editing?.browser_profile_source === 'cloak'">
                                 <el-input :model-value="currentProxyLabel" readonly />
                                 <span class="field-note">
-                                    Cloak、会话刷新与 API 复用这个固定出口，保持 Profile 环境一致。
+                                    Cloak 登录和会话刷新使用这个固定出口，保持 Profile 环境一致。
                                 </span>
                             </template>
                             <el-select v-else v-model="form.proxy_pool_id" placeholder="请选择固定出口" filterable>
@@ -3051,7 +3076,7 @@ onUnmounted(() => {
     list-style: none;
 }
 .profile-import-job summary::before {
-    content: '?';
+    content: '\203a';
     color: var(--muted);
     font-size: 18px;
 }

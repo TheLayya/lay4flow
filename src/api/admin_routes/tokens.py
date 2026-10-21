@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
+from ...core.account_identity import same_google_identity
 from ...services.proxy_manager import ProxyManager
 from ..admin_schemas import AddTokenRequest, ImportTokensRequest, ST2ATRequest, UpdateTokenRequest
 
@@ -79,6 +80,7 @@ def create_token_router(
                 "login_password": row.get("login_password") or "",
                 "proxy_url": row.get("proxy_url") or "",
                 "proxy_pool_id": row.get("proxy_pool_id"),
+                "submission_proxy_mode": row.get("submission_proxy_mode") or "fixed",
                 "auto_refresh_enabled": bool(row.get("auto_refresh_enabled", True)),
                 "refresh_interval_minutes": row.get("refresh_interval_minutes") or 120,
                 "browser_profile_source": row.get("browser_profile_source") or "cookies",
@@ -141,6 +143,7 @@ def create_token_router(
                 login_password=request.login_password,
                 proxy_url=request.proxy_url,
                 proxy_pool_id=request.proxy_pool_id,
+                submission_proxy_mode=request.submission_proxy_mode,
                 auto_refresh_enabled=request.auto_refresh_enabled,
                 refresh_interval_minutes=request.refresh_interval_minutes,
                 browser_profile_source=request.browser_profile_source,
@@ -226,7 +229,7 @@ def create_token_router(
                         status_code=400, detail="新Session Token验证失败，请检查登录状态和代理"
                     )
                 email = str(result.get("user", {}).get("email") or "").strip()
-                if email.casefold() != existing.email.strip().casefold():
+                if not same_google_identity(email, existing.email):
                     raise HTTPException(status_code=400, detail="新Session Token与当前账号不一致")
                 st = result.get("_session_token") or st
                 at_expires = get_token_manager()._parse_at_expires(result.get("expires"))
@@ -253,6 +256,7 @@ def create_token_router(
                 login_password=request.login_password,
                 proxy_url=request.proxy_url,
                 proxy_pool_id=request.proxy_pool_id,
+                submission_proxy_mode=request.submission_proxy_mode,
                 auto_refresh_enabled=request.auto_refresh_enabled,
                 refresh_interval_minutes=request.refresh_interval_minutes,
                 browser_profile_source=request.browser_profile_source,
@@ -442,6 +446,7 @@ def create_token_router(
                             login_account=item.login_account,
                             login_password=item.login_password,
                             proxy_url=item.proxy_url,
+                            submission_proxy_mode=item.submission_proxy_mode,
                             auto_refresh_enabled=item.auto_refresh_enabled,
                             refresh_interval_minutes=item.refresh_interval_minutes,
                         )
@@ -462,6 +467,7 @@ def create_token_router(
                         existing.login_account = item.login_account or ""
                         existing.login_password = item.login_password or ""
                         existing.proxy_url = item.proxy_url or ""
+                        existing.submission_proxy_mode = item.submission_proxy_mode
                         existing.auto_refresh_enabled = item.auto_refresh_enabled
                         existing.refresh_interval_minutes = item.refresh_interval_minutes
                         if get_concurrency_manager():
@@ -471,6 +477,7 @@ def create_token_router(
                                 video_concurrency=existing.video_concurrency,
                             )
                         updated += 1
+                        imported.append({"token_id": existing.id, "email": email})
                     else:
                         # 添加新Token
                         new_token = await get_token_manager().add_token(
@@ -487,6 +494,7 @@ def create_token_router(
                             login_account=item.login_account,
                             login_password=item.login_password,
                             proxy_url=item.proxy_url,
+                            submission_proxy_mode=item.submission_proxy_mode,
                             auto_refresh_enabled=item.auto_refresh_enabled,
                             refresh_interval_minutes=item.refresh_interval_minutes,
                         )
@@ -502,14 +510,7 @@ def create_token_router(
                                 video_concurrency=new_token.video_concurrency,
                             )
                         added += 1
-
-                    imported.append(
-                        {
-                            "index": idx,
-                            "token_id": existing.id if existing else new_token.id,
-                            "email": email,
-                        }
-                    )
+                        imported.append({"token_id": new_token.id, "email": email})
 
                 except Exception as e:
                     errors.append(f"第{idx + 1}项: {str(e)}")

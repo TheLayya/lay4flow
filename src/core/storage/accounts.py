@@ -26,11 +26,11 @@ class AccountRepository:
                                    image_enabled, video_enabled, image_concurrency, video_concurrency,
                                    captcha_proxy_url,
                                    protocol_mode, google_cookies, login_account, login_password,
-                                   proxy_url, proxy_pool_id, auto_refresh_enabled, refresh_interval_minutes,
+                                   proxy_url, proxy_pool_id, submission_proxy_mode, auto_refresh_enabled, refresh_interval_minutes,
                                    browser_profile_source, last_st_refresh_at, last_st_refresh_result,
                                    refresh_status, refresh_error, refresh_failures,
                                    next_refresh_at, last_refresh_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     token.st,
@@ -55,6 +55,7 @@ class AccountRepository:
                     token.login_password,
                     token.proxy_url,
                     token.proxy_pool_id,
+                    token.submission_proxy_mode,
                     token.auto_refresh_enabled,
                     token.refresh_interval_minutes,
                     token.browser_profile_source,

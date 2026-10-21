@@ -29,7 +29,7 @@ from ..core.model_catalog import (
 from .file_cache import FileCache
 from .flow import media as media_protocol
 from .flow_client import validate_video_trim
-from .proxy_manager import AccountProxyUnavailable
+from .proxy_manager import AccountProxyUnavailable, ProxyManager
 
 
 def _known_video_model_keys() -> set[str]:
@@ -63,6 +63,7 @@ class GenerationHandler:
         self.load_balancer = load_balancer
         self.db = db
         self.concurrency_manager = concurrency_manager
+        self.proxy_manager = proxy_manager
         self.file_cache = FileCache(
             cache_dir=str(cache_dir),
             default_timeout=config.cache_timeout,
@@ -283,6 +284,8 @@ class GenerationHandler:
         generation_type = None
         pending_token_state = {"active": False}
         slot_acquired = False
+        submission_lease = None
+        submission_error = None
         request_id = f"gen-{int(start_time * 1000)}-{id(asyncio.current_task())}"
         perf_trace: Dict[str, Any] = {
             "request_id": request_id,
@@ -539,11 +542,22 @@ class GenerationHandler:
             prefill_action = (
                 "IMAGE_GENERATION" if generation_type == "image" else "VIDEO_GENERATION"
             )
-            await self.flow_client.prefill_remote_browser_pool(
-                project_id=project_id,
-                action=prefill_action,
-                token_id=token.id,
+            acquire_proxy = getattr(
+                getattr(self, "proxy_manager", None), "acquire_submission_proxy", None
             )
+            if acquire_proxy is not None:
+                submission_lease = await acquire_proxy(token)
+                account_proxy = submission_lease.proxy_url
+                perf_trace["submission_proxy"] = {
+                    "mode": getattr(token, "submission_proxy_mode", "fixed"),
+                    "pool_id": submission_lease.entry_id,
+                }
+            with self._account_proxy_context(token, account_proxy):
+                await self.flow_client.prefill_remote_browser_pool(
+                    project_id=project_id,
+                    action=prefill_action,
+                    token_id=token.id,
+                )
 
             # 5. 根据类型处理
             generation_pipeline_started_at = time.time()
@@ -603,8 +617,12 @@ class GenerationHandler:
             # 6. 记录使用
             if not generation_result.get("success"):
                 error_msg = generation_result.get("error_message") or "生成未成功完成"
+                submission_error = error_msg
                 debug_logger.log_warning(f"[GENERATION] 生成未成功，不扣次数: {error_msg}")
-                if token:
+                if token and not (
+                    submission_error is not None
+                    and ProxyManager.is_submission_transport_error(submission_error)
+                ):
                     await self.token_manager.record_error(token.id)
                 duration = time.time() - start_time
                 record_generation_result(generation_type, "failed", duration)
@@ -659,6 +677,8 @@ class GenerationHandler:
                 response_data["url"] = response_state["url"]
             if response_state.get("generated_assets"):
                 response_data["generated_assets"] = response_state["generated_assets"]
+            if response_state.get("upscale_retry_trace"):
+                response_data["upscale_retry_trace"] = response_state["upscale_retry_trace"]
             image_perf = (
                 perf_trace.get("image_generation", {}) if isinstance(perf_trace, dict) else {}
             )
@@ -711,6 +731,7 @@ class GenerationHandler:
             )
             raise
         except Exception as e:
+            submission_error = e
             error_msg = f"生成失败: {str(e)}"
             debug_logger.log_error(f"[GENERATION] 生成失败: {error_msg}")
             if token:
@@ -739,24 +760,37 @@ class GenerationHandler:
                 status_text="failed",
                 progress=request_log_state.get("progress", 0),
             )
+            retry_trace = self._safe_retry_trace(perf_trace)
             if stream:
+                if retry_trace:
+                    yield self._create_stream_chunk(
+                        f"本项已尝试 {retry_trace['attempts']} / {retry_trace['max_attempts']} 次（包含首次）\n"
+                    )
                 yield self._create_stream_chunk(f"错误: {error_msg}\n")
-            yield self._create_error_response(error_msg, status_code=500)
+            yield self._create_error_response(error_msg, status_code=500, retry_trace=retry_trace)
         finally:
             try:
-                if slot_acquired:
-                    if generation_type == "image":
-                        await concurrency_manager.release_image(selected_token_id)
-                    else:
-                        await concurrency_manager.release_video(selected_token_id)
-            finally:
-                if pending_token_state.get("active") and self.load_balancer:
-                    await self.load_balancer.release_pending(
-                        selected_token_id,
-                        for_image_generation=(generation_type == "image"),
-                        for_video_generation=(generation_type == "video"),
+                if submission_lease is not None:
+                    await self.proxy_manager.release_submission_proxy(
+                        submission_lease,
+                        success=bool(generation_result.get("success")),
+                        error=submission_error,
                     )
-                    pending_token_state["active"] = False
+            finally:
+                try:
+                    if slot_acquired:
+                        if generation_type == "image":
+                            await concurrency_manager.release_image(selected_token_id)
+                        else:
+                            await concurrency_manager.release_video(selected_token_id)
+                finally:
+                    if pending_token_state.get("active") and self.load_balancer:
+                        await self.load_balancer.release_pending(
+                            selected_token_id,
+                            for_image_generation=(generation_type == "image"),
+                            for_video_generation=(generation_type == "video"),
+                        )
+                        pending_token_state["active"] = False
 
     def _get_no_token_error_message(self, generation_type: str) -> str:
         """获取无可用Token时的详细错误信息"""
@@ -773,6 +807,8 @@ class GenerationHandler:
         """
         error_text = str(error or "").strip().lower()
         if isinstance(error, AccountProxyUnavailable):
+            return False
+        if ProxyManager.is_submission_transport_error(error):
             return False
         if not error_text:
             return True
@@ -876,17 +912,35 @@ class GenerationHandler:
                 )
 
             generate_started_at = time.time()
-            result, generation_session_id, upstream_trace = await self.flow_client.generate_image(
-                at=token.at,
-                project_id=project_id,
-                prompt=prompt,
-                model_name=model_config["model_name"],
-                aspect_ratio=model_config["aspect_ratio"],
-                image_inputs=image_inputs,
-                token_id=token.id,
-                token_image_concurrency=token.image_concurrency,
-                progress_callback=_image_progress_callback,
-            )
+            try:
+                (
+                    result,
+                    generation_session_id,
+                    upstream_trace,
+                ) = await self.flow_client.generate_image(
+                    at=token.at,
+                    project_id=project_id,
+                    prompt=prompt,
+                    model_name=model_config["model_name"],
+                    aspect_ratio=model_config["aspect_ratio"],
+                    image_inputs=image_inputs,
+                    token_id=token.id,
+                    token_image_concurrency=token.image_concurrency,
+                    progress_callback=_image_progress_callback,
+                )
+            except Exception as exc:
+                if image_trace is not None:
+                    retry_trace = getattr(exc, "flow_retry_trace", None)
+                    if isinstance(retry_trace, dict):
+                        image_trace["upstream_trace"] = retry_trace
+                    image_trace["generate_api_ms"] = int((time.time() - generate_started_at) * 1000)
+                    safe_error = getattr(self.flow_client, "_remote_safe_error", None)
+                    image_trace["generation_error"] = (
+                        safe_error(exc)[:240]
+                        if callable(safe_error)
+                        else self._normalize_error_message(exc, max_length=240)
+                    )
+                raise
             if image_trace is not None:
                 image_trace["generate_api_ms"] = int((time.time() - generate_started_at) * 1000)
                 image_trace["upstream_trace"] = upstream_trace
@@ -1711,16 +1765,49 @@ class GenerationHandler:
                                         "⚠️ 放大任务创建失败，返回原始视频\n"
                                     )
                         except Exception as e:
-                            debug_logger.log_error(f"Video upsample failed: {str(e)}")
+                            safe_error = getattr(self.flow_client, "_remote_safe_error", None)
+                            log_error = (
+                                safe_error(e, redact=True)[:240]
+                                if callable(safe_error)
+                                else f"{type(e).__name__}: request failed"
+                            )
+                            debug_logger.log_error(f"Video upsample failed: {log_error}")
                             response_state.setdefault("warnings", []).append(
                                 {
                                     "code": "upscale_failed",
                                     "message": "Video upscaling failed; original returned",
                                 }
                             )
+                            retry_trace = getattr(e, "flow_retry_trace", None)
+                            display_error = log_error
+                            if isinstance(retry_trace, dict):
+                                safe_trace = self._safe_upsample_retry_trace(retry_trace)
+                                if safe_trace:
+                                    response_state["upscale_retry_trace"] = safe_trace
+                                    latest = (safe_trace.get("history") or [{}])[-1]
+                                    reason = str(latest.get("reason") or "")
+                                    display_error = str(latest.get("error") or display_error)
+                                    display_error = {
+                                        "pool_empty": "打码代理池没有启用的出口，请添加或启用代理",
+                                        "pool_cooling": "打码代理池出口正在冷却，等待预算内未恢复",
+                                        "pool_unhealthy": "打码代理池没有健康出口，请检查代理连接",
+                                        "pool_busy": "打码服务繁忙，已用完本次重试预算",
+                                        "provider_error": "打码服务异常，已用完本次重试预算",
+                                        "recaptcha_rejected": "reCAPTCHA 验证被拒，已用完本次重试预算",
+                                        "submission_error": "放大任务提交失败",
+                                    }.get(reason, display_error)
                             if stream:
+                                if isinstance(retry_trace, dict):
+                                    safe_trace = self._safe_upsample_retry_trace(retry_trace) or {}
+                                    attempts = int(safe_trace.get("attempts") or 0)
+                                    maximum = int(safe_trace.get("max_attempts") or attempts or 1)
+                                    submissions = int(safe_trace.get("submissions") or 0)
+                                    yield self._create_stream_chunk(
+                                        f"本次放大已尝试 {attempts} / {maximum} 次（包含首次）；"
+                                        f"验证码尝试 {attempts} / {maximum} 次，实际提交 {submissions} 次\n"
+                                    )
                                 yield self._create_stream_chunk(
-                                    f"⚠️ 放大失败: {str(e)}，返回原始视频\n"
+                                    f"⚠️ 放大失败: {display_error}，返回原始视频\n"
                                 )
 
                     # ========== Extend 视频拼接 ==========
@@ -2034,7 +2121,82 @@ class GenerationHandler:
 
         return json.dumps(response, ensure_ascii=False)
 
-    def _create_error_response(self, error_message: str, status_code: int = 500) -> str:
+    @staticmethod
+    def _safe_upsample_retry_trace(trace: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not isinstance(trace, dict):
+            return None
+        history = []
+        for item in (trace.get("generation_attempts") or [])[:20]:
+            if not isinstance(item, dict):
+                continue
+            submitted = bool(item.get("submitted", item.get("recaptcha_ok")))
+            stage = "submission" if submitted else "captcha"
+            reason = str(item.get("reason") or "")
+            if reason not in {
+                "pool_empty",
+                "pool_cooling",
+                "pool_unhealthy",
+                "pool_busy",
+                "provider_error",
+                "recaptcha_rejected",
+                "submission_error",
+            }:
+                reason = ""
+            history.append(
+                {
+                    "attempt": int(item.get("attempt") or len(history) + 1),
+                    "success": bool(item.get("success")),
+                    "recaptcha_ok": bool(item.get("recaptcha_ok")),
+                    "stage": stage,
+                    "submitted": submitted,
+                    "reason": reason,
+                    "duration_ms": int(item.get("duration_ms") or 0),
+                    "error": str(item.get("error") or "")[:240],
+                }
+            )
+        if not history:
+            return None
+        return {
+            "max_attempts": int(trace.get("max_retries") or len(history)),
+            "attempts": len(history),
+            "submissions": sum(item["submitted"] for item in history),
+            "history": history,
+        }
+
+    @staticmethod
+    def _safe_retry_trace(perf_trace: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        image_trace = perf_trace.get("image_generation") if isinstance(perf_trace, dict) else None
+        trace = image_trace.get("upstream_trace") if isinstance(image_trace, dict) else None
+        attempts = trace.get("generation_attempts") if isinstance(trace, dict) else None
+        if not isinstance(attempts, list) or not attempts:
+            return None
+        history = []
+        for item in attempts[:20]:
+            if not isinstance(item, dict):
+                continue
+            history.append(
+                {
+                    "attempt": int(item.get("attempt") or len(history) + 1),
+                    "success": bool(item.get("success")),
+                    "recaptcha_ok": bool(item.get("recaptcha_ok")),
+                    "duration_ms": int(item.get("duration_ms") or 0),
+                    "error": str(item.get("error") or "")[:240],
+                }
+            )
+        if not history:
+            return None
+        return {
+            "max_attempts": int(trace.get("max_retries") or len(history)),
+            "attempts": len(history),
+            "history": history,
+        }
+
+    def _create_error_response(
+        self,
+        error_message: str,
+        status_code: int = 500,
+        retry_trace: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """创建错误响应"""
         import json
 
@@ -2046,6 +2208,8 @@ class GenerationHandler:
                 "status_code": status_code,
             }
         }
+        if isinstance(retry_trace, dict):
+            error["retry_trace"] = retry_trace
 
         return json.dumps(error, ensure_ascii=False)
 

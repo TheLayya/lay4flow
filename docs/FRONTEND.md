@@ -26,9 +26,13 @@ npm --prefix frontend run dev
 
 代理池位于独立菜单，支持账号固定出口与媒体独立分配。远程打码固定接入 <https://cap.tk218.top/>，设置页提供申请链接、API 密钥与超时。缺少密钥时，全局提示并引导到设置页；Flow 创作提交前提示配置，Vids 维持独立会话链。本地 Cloak 用于账号登录与刷新。
 
+账号快速展开及网络编辑页可保存 `submission_proxy_mode: fixed | pool_random`，只影响 Flow 生成提交，登录绑定保留。代理池行显示 `success_rate`、`inflight`、`consecutive_failures`、`cooldown_until` 和 `circuit_state`，与服务端熔断探针结果一致。随机策略按任务预留出口并在结束时释放，整份任务保持同一出口。
+
 构建产物中的 JS、CSS 与图片需要完整随镜像更新。生产入口 HTML 使用 `no-store`，部署新版本后刷新页面读取新资源。功能验证应覆盖登录、账号状态、代理编辑、远程配置和移动端布局；生成测试使用模拟服务，真实额度验收单独记录。
 
 ## README 截图
+
+创作工作台通过 `POST /api/admin/studio/jobs` 提交 Flow / Vids 后台批次，图片和视频支持 1–20 份；生成时编辑表单保持可用。`GET /api/admin/studio/jobs` 恢复逐项结果与进度，Vids 内容仍使用原收据端点。`node frontend/tests/studio-batch.e2e.mjs` 在端口 38129 的合成预览上验证连续提交、两种媒体数量、刷新恢复和桌面/手机布局。
 
 公开截图位于 `docs/screenshots/`，由实际前端渲染，账号、代理和配额全部使用合成数据。作品使用仓库已有 lay 插画。先构建前端并启动临时预览，再在另一终端执行：
 

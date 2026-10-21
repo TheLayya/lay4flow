@@ -185,6 +185,31 @@ function makeStudio({
     }
 }
 
+function fixtureJob(request, id = 1) {
+    const provider = request.provider || 'flow'
+    const kind = request.body?.kind || 'image'
+    return {
+        id: `studio_fixture_${id}`,
+        request_id: request.request_id,
+        state: 'queued',
+        provider,
+        kind,
+        total: request.count || 1,
+        created_at: 1700000000,
+        title: 'Synthetic background job',
+        items: Array.from({ length: request.count || 1 }, (_, index) => ({
+            id: `fixture_${id}_${index}`,
+            key: `fixture_${id}_${index}`,
+            index,
+            provider,
+            kind,
+            status: 'queued',
+            message: 'Waiting in background',
+            outputs: [],
+        })),
+    }
+}
+
 async function flush() {
     await Vue.nextTick()
     await new Promise((resolve) => setImmediate(resolve))
@@ -231,67 +256,50 @@ test('missing captcha setup blocks Flow submissions while Vids remains independe
     assert.equal(studio.captchaRequired.value, false)
 })
 
-test('Flow SSE preserves reasoning and content from one event and parses an unclosed final line', async () => {
-    const payload = JSON.stringify({
-        choices: [
-            {
-                delta: {
-                    reasoning_content: 'checking capabilities',
-                    content: '![result](http://fixture.local/tmp/result.jpg)',
-                },
-            },
-        ],
-    })
-    const line = `data: ${payload}\n`
-    let offset = 0
-    const stream = new ReadableStream({
-        pull(controller) {
-            if (offset === 0) {
-                controller.enqueue(new TextEncoder().encode(line.slice(0, 19)))
-                offset = 19
-                return
-            }
-            if (offset === 19) {
-                controller.enqueue(new TextEncoder().encode(line.slice(19) + 'data: [DONE]'))
-                offset = -1
-                return
-            }
-            controller.close()
-        },
-    })
-    const current = { status: 'preparing', text: '', progressLog: '', outputs: [], message: '' }
-    const { studio } = makeStudio({ responder: async () => new Response(stream) })
-    await studio.generateFlow(current, { model: 'fixture' })
-    assert.equal(current.status, 'completed')
-    assert.equal(current.progressLog, 'checking capabilities')
-    assert.match(current.text, /result\.jpg/)
-    assert.equal(current.outputs.length, 1)
-})
-
-test('Vids unknown receipt blocks duplicate POST and keeps the original SHA-256 receipt', async () => {
-    let postCount = 0
+test('Flow background task updates each card without blocking a second submission', async () => {
+    const jobs = []
     const { studio, requests } = makeStudio({
         responder: async (path, options) => {
-            if (options.method === 'POST') postCount += 1
+            if (!options.method) return new Response(JSON.stringify({ jobs }))
+            const request = JSON.parse(options.body)
+            const job = fixtureJob(request, jobs.length + 1)
+            jobs.push(job)
+            return new Response(JSON.stringify({ success: true, job }), { status: 202 })
+        },
+    })
+    studio.prompt.value = 'Synthetic meadow image'
+    studio.params.count = 3
+    await studio.generate()
+    assert.equal(studio.submitting.value, false)
+    assert.equal(studio.busy.value, false)
+    assert.equal(studio.history.value.length, 3)
+    assert.equal(studio.queuedGenerationCount.value, 3)
+    studio.prompt.value = 'A second synthetic image'
+    studio.params.count = 2
+    await studio.generate()
+    assert.equal(studio.history.value.length, 5)
+    assert.equal(requests.filter((entry) => entry.options.method === 'POST').length, 2)
+    assert.notEqual(jobs[0].request_id, jobs[1].request_id)
+    assert.ok(studio.history.value.every((entry) => entry.status === 'queued'))
+})
+
+test('an uncertain job acknowledgement retries its original request ID and never issues a legacy generation', async () => {
+    const { studio, requests } = makeStudio({
+        responder: async (path, options) => {
+            if (!options.method) return new Response(JSON.stringify({ jobs: [] }))
             throw new TypeError('synthetic connection closed')
         },
     })
-    studio.provider.value = 'vids'
-    studio.kind.value = 'image'
-    studio.selectedId.value = 'vids-image'
-    studio.selectModel()
-    studio.vidsStatus.value = { configured: true, available: { image: 1 }, recoverable: {} }
-    studio.prompt.value = 'A tiny paper theatre under a moonlit sky'
+    studio.prompt.value = 'Synthetic uncertain acknowledgement'
     await studio.generate()
-    await flush()
-    assert.equal(studio.task.value.status, 'unknown')
-    assert.match(studio.task.value.receipt, /^vids_[a-f0-9]{64}$/)
-    const requestsAfterFirst = requests.length
+    const requestID = studio.submissionRequest.value.request_id
+    assert.match(studio.error.value, /等待确认/)
     await studio.generate()
-    await flush()
-    assert.equal(postCount, 1)
-    assert.equal(requests.length, requestsAfterFirst)
-    assert.equal(studio.task.value.receipt, studio.history.value[0].receipt)
+    const posts = requests.filter((request) => request.options.method === 'POST')
+    assert.equal(posts.length, 2)
+    assert.ok(posts.every((request) => request.path === '/api/admin/studio/jobs'))
+    assert.equal(JSON.parse(posts[0].options.body).request_id, requestID)
+    assert.equal(JSON.parse(posts[1].options.body).request_id, requestID)
 })
 
 test('malformed persisted receipts are isolated while valid unknown receipts survive for recovery', () => {
@@ -354,40 +362,42 @@ test('receipt content URLs require the original receipt, local origin, single sa
         assert.throws(() => studio.contentPath(value, receipt))
 })
 
-test('Flow reports a truncated final SSE data event instead of marking partial output complete', async () => {
-    const first =
-        'data: ' +
-        JSON.stringify({ choices: [{ delta: { content: '![result](http://fixture.local/tmp/partial.jpg)' } }] }) +
-        '\n'
-    const { studio } = makeStudio({ responder: async () => new Response(first + 'data: {"choices":[') })
-    const current = { status: 'preparing', text: '', progressLog: '', outputs: [], message: '' }
-    await assert.rejects(studio.generateFlow(current, { model: 'fixture' }), /未完成的事件/)
-    assert.notEqual(current.status, 'completed')
+test('background failures retain the real error per item without locking the editor', () => {
+    const { studio } = makeStudio()
+    const job = fixtureJob({ provider: 'flow', count: 2, request_id: 'fixture' }, 1)
+    job.state = 'partial'
+    job.items[0].status = 'failed'
+    job.items[0].message = 'Synthetic upstream quota error'
+    job.items[1].status = 'completed'
+    job.items[1].outputs = [{ kind: 'image', url: '/stable/result.jpg' }]
+    studio.applyGenerationJob(job)
+    assert.equal(studio.history.value.length, 2)
+    assert.equal(
+        studio.history.value.find((entry) => entry.status === 'failed').message,
+        'Synthetic upstream quota error',
+    )
+    assert.equal(studio.busy.value, false)
+    assert.equal(studio.submitting.value, false)
 })
 
-test('Flow and Vids Studio reuse the admin session without a separate service key', async () => {
+test('background submissions and Vids recovery reuse the admin session', async () => {
     const receipt = 'vids_' + 'c'.repeat(64)
     const { studio, requests } = makeStudio({
         realHttp: true,
-        responder: async (path) =>
-            path === '/api/admin/studio/chat/completions'
-                ? new Response(
-                      'data: ' + JSON.stringify({ choices: [{ delta: { content: 'completed fixture text' } }] }) + '\n',
-                  )
+        responder: async (path, options) =>
+            path === '/api/admin/studio/jobs'
+                ? new Response(JSON.stringify({ job: fixtureJob(JSON.parse(options.body), 1) }), { status: 202 })
                 : new Response(JSON.stringify({ id: receipt, kind: 'image', status: 'unknown' })),
     })
-    await studio.generateFlow(
-        { status: 'preparing', text: '', progressLog: '', outputs: [], message: '' },
-        { model: 'fixture' },
-    )
-    assert.equal(requests[0].path, '/api/admin/studio/chat/completions')
+    studio.prompt.value = 'Synthetic admin session fixture'
+    await studio.generate()
+    assert.equal(requests[0].path, '/api/admin/studio/jobs')
     assert.equal(requests[0].options.headers.get('Authorization'), 'Bearer fixture-admin-token')
     assert.equal(requests[0].options.credentials, 'include')
     assert.equal(requests[0].options.redirect, 'error')
     await studio.inspect({ receipt, kind: 'image', status: 'unknown', outputs: [] })
     assert.equal(requests[1].options.headers.get('Authorization'), 'Bearer fixture-admin-token')
     assert.equal(requests[1].options.credentials, 'include')
-    assert.equal(requests[1].options.redirect, 'error')
 })
 
 test('a signed-in Flow Studio works without a locally stored service key and uses the live catalog', async () => {
@@ -512,35 +522,25 @@ test('session history restores 300 recent requests plus older unresolved Vids re
     assert.equal(studio.history.value[300].signature, 'pending-original')
 })
 
-test('blocked session storage reports an actionable message and stops a new Vids POST', async () => {
-    const { studio, requests } = makeStudio({ storageFailure: true })
-    studio.provider.value = 'vids'
-    studio.kind.value = 'image'
-    studio.selectModel()
-    await flush()
-    studio.vidsStatus.value = { configured: true, available: { image: 1 } }
-    studio.prompt.value = 'A synthetic storage failure fixture'
+test('backend-owned jobs can submit when local history storage is unavailable', async () => {
+    const { studio, requests } = makeStudio({
+        storageFailure: true,
+        responder: async (path, options) =>
+            new Response(JSON.stringify({ job: fixtureJob(JSON.parse(options.body), 1) }), { status: 202 }),
+    })
+    studio.prompt.value = 'Synthetic storage failure fixture'
     await studio.generate()
-    assert.equal(requests.filter((request) => request.options.method === 'POST').length, 0)
-    assert.equal(studio.task.value.status, 'failed')
+    assert.equal(requests.filter((request) => request.options.method === 'POST').length, 1)
+    assert.equal(studio.history.value[0].status, 'queued')
     assert.match(studio.historyStorageMessage.value, /尚未保存/)
-    assert.match(studio.error.value, /释放浏览器会话存储/)
+    assert.equal(studio.submitting.value, false)
 })
 
-test('an unresolved Vids request older than 300 results still blocks a duplicate after reload', async () => {
-    const { studio, requests } = makeStudio({
-        responder: async () => {
-            throw new TypeError('synthetic connection closed')
-        },
-    })
-    studio.provider.value = 'vids'
-    studio.kind.value = 'image'
-    studio.selectModel()
-    await flush()
-    studio.vidsStatus.value = { configured: true, available: { image: 1 } }
-    studio.prompt.value = 'A synthetic old unresolved request'
-    await studio.generate()
-    const receipt = studio.task.value.receipt
+test('unsettled Flow backend jobs survive the history window and resume after reload', () => {
+    const { studio } = makeStudio()
+    const job = fixtureJob({ provider: 'flow', count: 1, request_id: 'fixture' }, 1)
+    job.items[0].status = 'generating'
+    studio.applyGenerationJob(job)
     studio.history.value.unshift(
         ...Array.from({ length: 330 }, (_, index) => ({
             provider: 'flow',
@@ -553,10 +553,11 @@ test('an unresolved Vids request older than 300 results still blocks a duplicate
     )
     studio.persistHistory()
     studio.restoreHistory()
-    await studio.generate()
-    assert.equal(requests.filter((request) => request.options.method === 'POST').length, 1)
-    assert.equal(studio.task.value.receipt, receipt)
-    assert.match(studio.error.value, /原请求等待确认/)
+    const restored = studio.history.value.find((entry) => entry.jobId === job.id)
+    assert.ok(restored)
+    assert.equal(restored.status, 'generating')
+    studio.applyGenerationJob(job)
+    assert.equal(studio.history.value.filter((entry) => entry.jobId === job.id).length, 1)
 })
 
 test('a typed recovery receipt stays bound to that ID, not a different server response', async () => {
@@ -676,43 +677,26 @@ test('the workspace Chinese copy survives source encoding and retains readable m
         assert.ok(descriptor.template.content.includes(label), `missing Chinese label: ${label}`)
 })
 
-test('a late Vids result preserves its receipt after navigation without starting a media fetch', async () => {
+test('a job accepted after navigation remains on the server and is restored without reposting', async () => {
     let finishRequest
     const { studio, requests, store, unmount } = makeStudio({
         responder: async (path, options) =>
             new Promise((resolve) => {
-                finishRequest = async () => {
-                    const receipt = await studio.receiptFor(options.headers['Idempotency-Key'])
+                finishRequest = () =>
                     resolve(
-                        new Response(
-                            JSON.stringify({
-                                id: receipt,
-                                kind: 'image',
-                                status: 'completed',
-                                content_url: `/api/admin/vids/v1/vids/generations/${receipt}/content`,
-                            }),
-                        ),
+                        new Response(JSON.stringify({ job: fixtureJob(JSON.parse(options.body), 1) }), { status: 202 }),
                     )
-                }
             }),
     })
-    studio.provider.value = 'vids'
-    studio.kind.value = 'image'
-    studio.selectModel()
-    await flush()
-    studio.vidsStatus.value = { configured: true, available: { image: 1 } }
-    studio.prompt.value = 'A synthetic late image result'
+    studio.prompt.value = 'Synthetic late acknowledgement'
     const pending = studio.generate()
     while (!finishRequest) await flush()
     unmount()
-    await finishRequest()
+    finishRequest()
     await pending
     assert.equal(requests.length, 1)
-    assert.equal(studio.task.value.status, 'completed')
-    const saved = JSON.parse(store.get('lay4flow_studio_receipts'))
-    assert.equal(saved[0].receipt, studio.task.value.receipt)
-    assert.equal(saved[0].outputs[0].path.endsWith('/content'), true)
-    assert.equal(studio.task.value.outputs[0].url, undefined)
+    assert.equal(studio.task.value.status, 'queued')
+    assert.equal(studio.task.value.outputs.length, 0)
 })
 
 test('a preview response arriving after unmount creates no Blob URL', async () => {
@@ -917,4 +901,102 @@ test('a late previous-page receipt update preserves newer records and does not r
     assert.equal(persisted.length, 1)
     assert.equal(persisted[0].key, 'new-tab-result')
     assert.equal(persisted[0].receipt, undefined)
+})
+
+test('Flow and Vids image and video batches use the chosen count once', async () => {
+    const { studio, requests } = makeStudio({
+        responder: async (path, options) =>
+            new Response(JSON.stringify({ job: fixtureJob(JSON.parse(options.body), requests.length) }), {
+                status: 202,
+            }),
+    })
+    for (const provider of ['flow', 'vids']) {
+        for (const kind of ['image', 'video']) {
+            studio.provider.value = provider
+            studio.kind.value = kind
+            await flush()
+            studio.selectModel()
+            await flush()
+            studio.vidsStatus.value = { configured: true, available: { image: 1, video: 1 } }
+            studio.params.count = 8
+            studio.prompt.value = `Synthetic ${provider} ${kind} batch`
+            await studio.generate()
+            const submitted = JSON.parse(requests.at(-1).options.body)
+            assert.equal(submitted.count, 8)
+            assert.equal(submitted.provider, provider)
+            if (provider === 'vids' && kind === 'image') assert.equal(submitted.body.n, 1)
+            assert.equal(studio.submitting.value, false)
+        }
+    }
+    assert.equal(requests.filter((entry) => entry.options.method === 'POST').length, 4)
+    assert.equal(studio.history.value.length, 32)
+    studio.params.count = 21
+    await studio.generate()
+    assert.equal(requests.filter((entry) => entry.options.method === 'POST').length, 4)
+})
+
+test('a lost acknowledgement is reconciled from the server request ID before retrying', async () => {
+    let accepted
+    const { studio, requests } = makeStudio({
+        responder: async (path, options) => {
+            if (options.method === 'POST') {
+                accepted = fixtureJob(JSON.parse(options.body), 1)
+                throw new TypeError('synthetic lost acknowledgement')
+            }
+            return new Response(JSON.stringify({ jobs: [accepted] }))
+        },
+    })
+    studio.prompt.value = 'Synthetic acknowledged background batch'
+    studio.params.count = 4
+    await studio.generate()
+    assert.equal(studio.history.value.length, 4)
+    assert.equal(studio.submissionRequest.value, null)
+    assert.equal(studio.error.value, '')
+    assert.equal(requests.filter((entry) => entry.options.method === 'POST').length, 1)
+})
+
+test('a removed backend result stays removed when polling and reloading', async () => {
+    const { studio } = makeStudio()
+    const job = fixtureJob({ provider: 'flow', count: 1, request_id: 'remove-fixture' }, 1)
+    job.state = 'failed'
+    job.items[0].status = 'failed'
+    studio.applyGenerationJob(job)
+    await studio.removeEntry(studio.history.value[0])
+    studio.applyGenerationJob(job)
+    assert.equal(studio.history.value.length, 0)
+    studio.restoreHistory()
+    studio.applyGenerationJob(job)
+    assert.equal(studio.history.value.length, 0)
+})
+
+test('failed background retries remain visible in request details and after reload', async () => {
+    const fixture = makeStudio()
+    const job = fixtureJob({ provider: 'flow', count: 1, request_id: 'failed-retries' }, 1)
+    job.items[0].status = 'failed'
+    job.items[0].retry_trace = {
+        max_attempts: 3, attempts: 3,
+        history: [{ attempt: 1, success: false, error: 'HTTP Error 403' }],
+    }
+    fixture.studio.applyGenerationJob(job)
+    const entry = fixture.studio.history.value[0]
+    fixture.studio.task.value = entry
+    assert.equal(JSON.parse(fixture.studio.taskDetails.value).retry.attempts, 3)
+    fixture.studio.persistHistory()
+    fixture.studio.restoreHistory()
+    assert.equal(fixture.studio.history.value[0].retryTrace.max_attempts, 3)
+})
+
+test('an earlier polling response never hides a newly accepted batch', async () => {
+    let finishPoll
+    const { studio } = makeStudio({
+        responder: async () => new Promise((resolve) => { finishPoll = resolve }),
+    })
+    const polling = studio.refreshGenerationJobs()
+    while (!finishPoll) await flush()
+    const job = fixtureJob({ provider: 'flow', count: 1, request_id: 'new-batch' }, 1)
+    studio.applyGenerationJob(job, { description: 'Synthetic new batch', settings: {} })
+    finishPoll(new Response(JSON.stringify({ jobs: [] })))
+    await polling
+    assert.equal(studio.history.value[0].status, 'queued')
+    assert.equal(studio.activeGenerationJobs.value.length, 1)
 })

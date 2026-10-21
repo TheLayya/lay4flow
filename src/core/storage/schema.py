@@ -332,6 +332,7 @@ class SchemaManager:
                     ("login_password", "TEXT DEFAULT ''"),  # 预留
                     ("proxy_url", "TEXT DEFAULT ''"),  # 协议刷新代理
                     ("proxy_pool_id", "INTEGER"),
+                    ("submission_proxy_mode", "TEXT DEFAULT 'fixed'"),
                     ("auto_refresh_enabled", "BOOLEAN DEFAULT 1"),
                     ("refresh_interval_minutes", "INTEGER DEFAULT 120"),
                     ("last_st_refresh_at", "TIMESTAMP"),
@@ -364,6 +365,16 @@ class SchemaManager:
                 await db.execute(
                     "ALTER TABLE proxy_pool ADD COLUMN captcha_enabled BOOLEAN DEFAULT 1"
                 )
+
+            for name, kind in (
+                ("success_count", "INTEGER DEFAULT 0"),
+                ("failure_count", "INTEGER DEFAULT 0"),
+                ("consecutive_failures", "INTEGER DEFAULT 0"),
+                ("success_rate", "REAL DEFAULT 0.5"),
+                ("cooldown_until", "TIMESTAMP"),
+            ):
+                if not await self._database._column_exists(db, "proxy_pool", name):
+                    await db.execute(f"ALTER TABLE proxy_pool ADD COLUMN {name} {kind}")
 
             # Check and add missing columns to admin_config table
             if await self._database._table_exists(db, "admin_config"):
@@ -553,6 +564,7 @@ class SchemaManager:
                     login_password TEXT DEFAULT '',
                     proxy_url TEXT DEFAULT '',
                     proxy_pool_id INTEGER,
+                    submission_proxy_mode TEXT DEFAULT 'fixed',
                     auto_refresh_enabled BOOLEAN DEFAULT 1,
                     refresh_interval_minutes INTEGER DEFAULT 120,
                     last_st_refresh_at TIMESTAMP,
@@ -679,6 +691,11 @@ class SchemaManager:
                     note TEXT DEFAULT '',
                     last_check_ok BOOLEAN,
                     last_check_at TIMESTAMP,
+                    success_count INTEGER DEFAULT 0,
+                    failure_count INTEGER DEFAULT 0,
+                    consecutive_failures INTEGER DEFAULT 0,
+                    success_rate REAL DEFAULT 0.5,
+                    cooldown_until TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)

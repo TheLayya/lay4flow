@@ -1,6 +1,10 @@
 """The Studio bridge uses the admin cookie and never exposes the service key."""
 
+import asyncio
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -144,6 +148,129 @@ class StudioRouteTests(unittest.IsolatedAsyncioTestCase):
             json={"messages": []},
         )
         self.assertEqual(response.status_code, 422)
+
+    async def test_batch_submit_returns_while_generation_is_pending_and_accepts_more_work(self):
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def stream(*_):
+            started.set()
+            await release.wait()
+            yield 'data: {"choices":[{"delta":{"content":"![result](https://synthetic.test/image.png)"}}]}\n\n'
+            yield "data: [DONE]\n\n"
+
+        with tempfile.TemporaryDirectory() as directory:
+            handler = Mock()
+            handler.db.db_path = str(Path(directory) / "app.db")
+            with (
+                patch.object(routes, "generation_handler", handler),
+                patch.object(routes, "_iterate_openai_stream", stream),
+            ):
+                payload = {
+                    "provider": "flow",
+                    "count": 2,
+                    "request_id": "browser-request-1",
+                    "body": {
+                        "model": "gemini-3.1-flash-image",
+                        "messages": [{"role": "user", "content": "synthetic artwork"}],
+                        "stream": True,
+                    },
+                }
+                response = await asyncio.wait_for(
+                    self.client.post(
+                        "/api/admin/studio/jobs",
+                        headers={"Origin": "https://studio.example.test"},
+                        json=payload,
+                    ),
+                    1,
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                await started.wait()
+                identifier = response.json()["job"]["id"]
+                self.assertNotIn("_fingerprint", response.text)
+                response = await self.client.get(f"/api/admin/studio/jobs/{identifier}")
+                self.assertEqual(response.json()["job"]["state"], "running")
+                payload["request_id"] = "browser-request-2"
+                response = await asyncio.wait_for(
+                    self.client.post(
+                        "/api/admin/studio/jobs",
+                        headers={"Origin": "https://studio.example.test"},
+                        json=payload,
+                    ),
+                    1,
+                )
+                self.assertEqual(response.status_code, 202)
+                release.set()
+                await self.app.state.studio_jobs._queues["flow"].join()
+                response = await self.client.get(f"/api/admin/studio/jobs/{identifier}")
+                self.assertEqual(response.json()["job"]["completed"], 2)
+                await self.app.state.studio_jobs.close()
+
+    async def test_job_submission_retains_admin_and_same_origin_checks_and_json_errors(self):
+        response = await self.client.post("/api/admin/studio/jobs", json={})
+        self.assertEqual(response.status_code, 403)
+        response = await self.client.post(
+            "/api/admin/studio/jobs",
+            headers={"Origin": "https://studio.example.test", "Content-Type": "application/json"},
+            content="broken-json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.client.cookies.clear()
+        response = await self.client.get("/api/admin/studio/jobs")
+        self.assertEqual(response.status_code, 401)
+
+    async def test_failed_flow_job_keeps_retry_trace_from_error_response(self):
+        retry_trace = {
+            "max_attempts": 4,
+            "attempts": 4,
+            "history": [{"attempt": 4, "success": False, "error": "reCAPTCHA evaluation failed"}],
+        }
+
+        async def stream(*_):
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "retry_trace": retry_trace,
+                        "error": {"message": "reCAPTCHA evaluation failed"},
+                    }
+                )
+                + "\n\n"
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            handler = Mock()
+            handler.db.db_path = str(Path(directory) / "app.db")
+            with (
+                patch.object(routes, "generation_handler", handler),
+                patch.object(routes, "_iterate_openai_stream", stream),
+            ):
+                response = await self.client.post(
+                    "/api/admin/studio/jobs",
+                    headers={"Origin": "https://studio.example.test"},
+                    json={
+                        "provider": "flow",
+                        "count": 1,
+                        "request_id": "failed-retry-trace",
+                        "body": {
+                            "model": "gemini-3.1-flash-image",
+                            "messages": [{"role": "user", "content": "synthetic artwork"}],
+                            "stream": True,
+                        },
+                    },
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                jobs = self.app.state.studio_jobs
+                try:
+                    await jobs._queues["flow"].join()
+                    response = await self.client.get(
+                        "/api/admin/studio/jobs/" + response.json()["job"]["id"]
+                    )
+                    item = response.json()["job"]["items"][0]
+                    self.assertEqual(item["status"], "failed")
+                    self.assertEqual(item["retry_trace"], retry_trace)
+                    self.assertEqual(item["message"], "reCAPTCHA evaluation failed")
+                finally:
+                    await jobs.close()
 
 
 if __name__ == "__main__":

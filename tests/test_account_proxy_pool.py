@@ -161,6 +161,43 @@ class AccountProxyPoolTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "媒体出口"):
             await self.manager.select_media_proxy()
 
+    async def test_submission_random_lease_balances_and_fixed_keeps_binding(self):
+        first = await self.manager.add_proxy_pool_entry("http://first.invalid:8080")
+        second = await self.manager.add_proxy_pool_entry("http://second.invalid:8080")
+        random_token = Token(
+            st="random", email="random@example.test", submission_proxy_mode="pool_random"
+        )
+        leases = [await self.manager.acquire_submission_proxy(random_token) for _ in range(2)]
+        self.assertEqual(sum(item.entry_id in (first, second) for item in leases), 2)
+        await self.manager.release_submission_proxy(leases[0], success=True)
+        await self.manager.release_submission_proxy(leases[1], error=RuntimeError("ProxyError"))
+        fixed = Token(
+            st="fixed",
+            email="fixed@example.test",
+            proxy_url="http://first.invalid:8080",
+            proxy_pool_id=first,
+        )
+        lease = await self.manager.acquire_submission_proxy(fixed)
+        self.assertEqual((lease.entry_id, lease.proxy_url), (first, fixed.proxy_url))
+        await self.manager.release_submission_proxy(lease, success=True)
+
+    async def test_submission_transport_failure_cools_after_three_and_probe_recovers(self):
+        entry = await self.manager.add_proxy_pool_entry("http://probe.invalid:8080")
+        url = (await self.db.get_proxy_pool_entry(entry)).proxy_url
+        for _ in range(3):
+            await self.db.record_proxy_pool_result(entry, url, False)
+        saved = await self.db.get_proxy_pool_entry(entry)
+        self.assertEqual(saved.consecutive_failures, 3)
+        self.assertIsNotNone(saved.cooldown_until)
+        with self.assertRaises(ValueError):
+            await self.manager.acquire_submission_proxy(
+                Token(st="r", email="r@example.test", submission_proxy_mode="pool_random")
+            )
+        await self.db.record_proxy_pool_result(entry, url, True, probe=True)
+        saved = await self.db.get_proxy_pool_entry(entry)
+        self.assertEqual(saved.consecutive_failures, 0)
+        self.assertIsNone(saved.cooldown_until)
+
 
 if __name__ == "__main__":
     unittest.main()

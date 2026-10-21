@@ -38,8 +38,14 @@ class AdminSchemaTests(unittest.TestCase):
                 value = model.model_json_schema()
                 # The new optional binding is additive; compare every original
                 # property/default against the pre-extraction contract.
-                if name in {"AddTokenRequest", "UpdateTokenRequest"}:
-                    value["properties"].pop("proxy_pool_id")
+                if name in {"AddTokenRequest", "UpdateTokenRequest", "ImportTokenItem"}:
+                    if name in {"AddTokenRequest", "UpdateTokenRequest"}:
+                        value["properties"].pop("proxy_pool_id")
+                    value["properties"].pop("submission_proxy_mode", None)
+                if name == "ImportTokensRequest":
+                    for definition in value.get("$defs", {}).values():
+                        if isinstance(definition, dict):
+                            definition.get("properties", {}).pop("submission_proxy_mode", None)
                 schema = json.dumps(value, sort_keys=True, separators=(",", ":"))
                 self.assertEqual(
                     hashlib.sha256(schema.encode("utf-8")).hexdigest(), expected_digest
@@ -81,6 +87,19 @@ class AdminSchemaTests(unittest.TestCase):
                 with self.subTest(model=model.__name__, value=value):
                     with self.assertRaises(ValidationError):
                         model(**required, proxy_pool_id=value)
+
+    def test_submission_proxy_mode_defaults_fixed_and_rejects_unknown(self):
+        self.assertEqual(
+            admin_schemas.AddTokenRequest(st="synthetic").submission_proxy_mode, "fixed"
+        )
+        self.assertEqual(
+            admin_schemas.UpdateTokenRequest(
+                submission_proxy_mode="pool_random"
+            ).submission_proxy_mode,
+            "pool_random",
+        )
+        with self.assertRaises(ValidationError):
+            admin_schemas.UpdateTokenRequest(submission_proxy_mode="rotate")
 
     def test_pool_import_requires_text_and_retains_physical_lines(self):
         text = "\r\nproxy.invalid:80\r\n\r\nsecond.invalid:80\r\n"

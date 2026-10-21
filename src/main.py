@@ -189,6 +189,16 @@ async def _flow_lifespan(app: FastAPI):
                 print(f"Auto-unban task error: {e}")
 
     auto_unban_task_handle = asyncio.create_task(auto_unban_task())
+
+    async def probe_proxy_pool():
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await proxy_manager.probe_due_proxy_entries(limit=3)
+            except Exception as error:
+                print(f"Proxy pool probe failed: {type(error).__name__}")
+
+    proxy_probe_task = asyncio.create_task(probe_proxy_pool())
     token_manager.start_protocol_refresher()
     if not _SKIP_VIDS:
         await video_job_service.start()
@@ -211,6 +221,8 @@ async def _flow_lifespan(app: FastAPI):
         yield
     finally:
         print("lay4flow-remote Shutting down...")
+        proxy_probe_task.cancel()
+        await asyncio.gather(proxy_probe_task, return_exceptions=True)
         if not _SKIP_VIDS:
             await video_job_service.close()
         await generation_handler.file_cache.stop_cleanup_task()
@@ -245,6 +257,9 @@ async def lifespan(app: FastAPI):
                         app.state.vids_auto_onboarding.schedule(token.id)
             yield
         finally:
+            studio_jobs = getattr(app.state, "studio_jobs", None)
+            if studio_jobs is not None:
+                await studio_jobs.close()
             # Stop imports before their Profile/Vids dependencies are closed.
             import_jobs = getattr(token_manager, "_profile_import_jobs", None)
             if import_jobs is not None:
@@ -348,7 +363,9 @@ app.include_router(compat_router)
 app.include_router(compat_images_router)
 app.include_router(create_compat_videos_router(lambda: video_job_service))
 app.include_router(admin.router)
-app.include_router(create_studio_router(admin.verify_admin_token))
+app.include_router(
+    create_studio_router(admin.verify_admin_token, get_vids=lambda: services.vids_dispatcher)
+)
 app.include_router(
     create_vids_admin_router(
         services.vids_dispatcher,

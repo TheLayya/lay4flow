@@ -124,6 +124,41 @@ class GenerationConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         await generator.aclose()
         self.assertEqual(await self.cm.get_image_inflight(7), 0)
 
+    async def test_failed_stream_reports_attempt_summary_and_safe_trace(self):
+        await self.cm.initialize([self.token])
+
+        async def failed(*args, **kwargs):
+            kwargs["perf_trace"]["image_generation"] = {
+                "upstream_trace": {
+                    "max_retries": 4,
+                    "generation_attempts": [
+                        {
+                            "attempt": number,
+                            "success": False,
+                            "recaptcha_ok": True,
+                            "duration_ms": 10,
+                            "error": "reCAPTCHA evaluation failed",
+                        }
+                        for number in range(1, 5)
+                    ],
+                }
+            }
+            raise RuntimeError("reCAPTCHA evaluation failed")
+            yield
+
+        self.handler._handle_image_generation = failed
+        chunks = [
+            chunk
+            async for chunk in self.handler.handle_generation("image-test", "prompt", stream=True)
+        ]
+        summary = [chunk for chunk in chunks if "本项已尝试" in chunk]
+        self.assertEqual(len(summary), 1)
+        self.assertIn("4 / 4 次（包含首次）", summary[0])
+        failure = json.loads(chunks[-1])
+        self.assertEqual(failure["retry_trace"]["attempts"], 4)
+        self.assertEqual(failure["retry_trace"]["max_attempts"], 4)
+        self.assertEqual(failure["error"]["code"], "generation_failed")
+
     async def test_cancel_waiting_does_not_release_running_request(self):
         await self.cm.initialize([self.token])
         await self.cm.acquire_image(7)

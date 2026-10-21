@@ -274,6 +274,31 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.manager._st_to_at_for_token.assert_not_awaited()
         self.manager._get_credits_for_token.assert_awaited_once_with(token, valid["access_token"])
 
+    async def test_session_googlemail_alias_preserves_stored_email_and_credit_validation(self):
+        token = Token(st="old-st", email="user@gmail.com")
+        response = {**await self.session(token, token.st), "user": {"email": "user@googlemail.com"}}
+        result = await self.manager._validate_refresh_session(token, token.st, session=response)
+        self.assertEqual(result["credits"], 100)
+        self.assertEqual(token.email, "user@gmail.com")
+        self.manager._get_credits_for_token.assert_awaited_once_with(
+            token, response["access_token"]
+        )
+
+    async def test_session_googlemail_alias_does_not_accept_other_mailboxes(self):
+        token = Token(st="old-st", email="user@gmail.com")
+        for email in (
+            "other@googlemail.com",
+            "user+tag@googlemail.com",
+            "u.ser@googlemail.com",
+            "user@example.com",
+        ):
+            with self.subTest(email=email):
+                response = {**await self.session(token, token.st), "user": {"email": email}}
+                with self.assertRaises(Exception) as failure:
+                    await self.manager._validate_refresh_session(token, token.st, session=response)
+                self.assertEqual(failure.exception.code, "invalid_cookies")
+        self.manager._get_credits_for_token.assert_not_awaited()
+
     async def add(self, **values):
         values = dict(
             {

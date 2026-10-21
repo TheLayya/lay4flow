@@ -405,6 +405,9 @@ function previewFromKeyboard(event) {
                                   : statusNames[card.entry.status] || card.entry.status
                         }}
                     </strong>
+                    <span v-if="card.entry.jobTotal > 1" class="batch-position">
+                        批次 {{ card.entry.jobIndex + 1 }} / {{ card.entry.jobTotal }}
+                    </span>
                     <p>
                         {{
                             hasPreviewError(card)
@@ -453,7 +456,15 @@ function previewFromKeyboard(event) {
                 </div>
                 <div class="gallery-card-body">
                     <div class="gallery-card-meta">
-                        <span>{{ card.entry.provider === 'vids' ? 'Vids' : 'Flow' }} · {{ time(card.entry) }}</span>
+                        <span>
+                            {{ card.entry.provider === 'vids' ? 'Vids' : 'Flow' }} · {{ time(card.entry) }}
+                            <template v-if="card.entry.jobTotal > 1">
+                                · {{ card.entry.jobIndex + 1 }} / {{ card.entry.jobTotal }}
+                            </template>
+                            <template v-if="card.entry.retryTrace?.attempts">
+                                · 已尝试 {{ card.entry.retryTrace.attempts }} / {{ card.entry.retryTrace.max_attempts }} 次
+                            </template>
+                        </span>
                         <el-tag
                             v-if="hasPreviewError(card) || !card.output?.url || card.entry.status !== 'completed'"
                             size="small"

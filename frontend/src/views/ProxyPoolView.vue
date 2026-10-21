@@ -53,6 +53,7 @@ const bindingOptions = computed(() => {
 })
 const accountSettings = (account) => ({
     remark: account.remark || '',
+    submission_proxy_mode: account.submission_proxy_mode || 'fixed',
     auto_refresh_enabled: account.auto_refresh_enabled !== false,
     image_enabled: account.image_enabled !== false,
     video_enabled: account.video_enabled !== false,
@@ -159,7 +160,10 @@ async function bindSelectedAccounts(row) {
     bindRefreshWarning.value = false
     try {
         const switching = (accountRows.value || []).filter(
-            (account) => ids.includes(account.id) && account.browser_profile_source === 'cloak' && !sameProxy(account.proxy_url, row.proxy_url),
+            (account) =>
+                ids.includes(account.id) &&
+                account.browser_profile_source === 'cloak' &&
+                !sameProxy(account.proxy_url, row.proxy_url),
         )
         if (switching.length) {
             try {
@@ -522,7 +526,7 @@ onMounted(loadPool)
         <header class="page-heading">
             <div>
                 <h1>代理池</h1>
-                <p>账号固定出口，媒体下载按请求分配；验证码出口由远程服务管理。</p>
+                <p>账号绑定与生成提交出口统一管理；随机调度分散负载，连续失败冷却后自动重探。</p>
             </div>
         </header>
         <section class="surface proxy-pool-surface">
@@ -821,6 +825,19 @@ onMounted(loadPool)
                                             busy.size > 0 || accountsLoading || poolBulk.running || poolImporting
                                         "
                                     />
+                                    <label class="bound-submission-mode">
+                                        生成提交出口
+                                        <el-select
+                                            v-model="accountDrafts[account.id].submission_proxy_mode"
+                                            :aria-label="`${account.email} 的生成提交出口`"
+                                            :disabled="
+                                                busy.size > 0 || accountsLoading || poolBulk.running || poolImporting
+                                            "
+                                        >
+                                            <el-option label="账号固定代理" value="fixed" />
+                                            <el-option label="代理池随机（每次生成取健康出口）" value="pool_random" />
+                                        </el-select>
+                                    </label>
                                     <div class="bound-account-settings">
                                         <el-checkbox
                                             v-model="accountDrafts[account.id].auto_refresh_enabled"
@@ -890,8 +907,8 @@ onMounted(loadPool)
             class="proxy-import-dialog"
         >
             <p class="field-note">
-                每行一个代理，主机:端口:用户名:密码 默认使用 SOCKS5（远端 DNS）；也支持显式填写完整代理 URL。
-                远端 DNS 兼容 Clash TUN 的 FakeIP，避免将本机虚拟 IP 发送给远端代理。
+                每行一个代理，主机:端口:用户名:密码 默认使用 SOCKS5（远端 DNS）；也支持显式填写完整代理 URL。 远端 DNS
+                兼容 Clash TUN 的 FakeIP，避免将本机虚拟 IP 发送给远端代理。
             </p>
             <el-input
                 v-model="poolImportText"
@@ -1242,6 +1259,13 @@ onMounted(loadPool)
     gap: 8px 12px;
     flex-wrap: wrap;
     align-items: center;
+}
+.bound-submission-mode {
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr);
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
 }
 .bound-account-settings .el-checkbox {
     margin-right: 0;

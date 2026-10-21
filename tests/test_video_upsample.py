@@ -127,7 +127,7 @@ class VideoUpsampleTests(unittest.IsolatedAsyncioTestCase):
 
                 self.handler.flow_client.upsample_video.assert_awaited_once()
                 self.handler.flow_client.check_video_status.assert_awaited_once()
-                self.assertTrue(any("upstream rejected upscale" in chunk for chunk in chunks))
+                self.assertTrue(any("RuntimeError: request failed" in chunk for chunk in chunks))
                 self.assertIn(self.base_url, chunks[-1])
                 self.assertNotIn(self.upscaled_url, chunks[-1])
                 self.assertEqual(self.response_state["url"], self.base_url)
@@ -135,6 +135,100 @@ class VideoUpsampleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     self.handler.db.update_task.await_args.args[0], self.base_operation["mediaName"]
                 )
+
+    async def test_exhausted_upscale_keeps_attempt_trace_and_original_without_outer_retry(self):
+        self.make_handler("veo_3_1_t2v_fast")
+        error = RuntimeError("HTTP Error 403: reCAPTCHA evaluation failed")
+        error.flow_retry_trace = {
+            "max_retries": 2,
+            "generation_attempts": [
+                {
+                    "attempt": n,
+                    "success": False,
+                    "recaptcha_ok": True,
+                    "error": "HTTP Error 403: reCAPTCHA evaluation failed",
+                    "proxy": "private",
+                }
+                for n in (1, 2)
+            ],
+        }
+        self.handler.flow_client.upsample_video.side_effect = error
+        chunks = await self.poll("VIDEO_RESOLUTION_1080P", "veo_3_1_upsampler_1080p")
+        self.handler.flow_client.upsample_video.assert_awaited_once()
+        self.handler.flow_client.check_video_status.assert_awaited_once()
+        self.assertIn("本次放大已尝试 2 / 2 次（包含首次）", "".join(chunks))
+        self.assertIn(self.base_url, chunks[-1])
+        self.assertTrue(self.generation_result["success"])
+        trace = self.response_state["upscale_retry_trace"]
+        self.assertEqual((trace["attempts"], trace["max_attempts"]), (2, 2))
+        self.assertNotIn("proxy", repr(trace))
+        self.assertEqual(self.response_state["warnings"][0]["code"], "upscale_failed")
+
+    async def test_empty_pool_trace_distinguishes_captcha_attempt_from_submission(self):
+        self.make_handler("veo_3_1_t2v_fast")
+        error = RuntimeError("Protocol captcha proxy pool is empty; add egress proxies first")
+        error.flow_retry_trace = {
+            "max_retries": 6,
+            "generation_attempts": [
+                {
+                    "attempt": 1,
+                    "stage": "submission",
+                    "submitted": True,
+                    "success": False,
+                    "recaptcha_ok": True,
+                    "reason": "recaptcha_rejected",
+                },
+                {
+                    "attempt": 2,
+                    "stage": "submission",
+                    "submitted": True,
+                    "success": False,
+                    "recaptcha_ok": True,
+                    "reason": "recaptcha_rejected",
+                },
+                {
+                    "attempt": 3,
+                    "stage": "captcha",
+                    "submitted": False,
+                    "success": False,
+                    "recaptcha_ok": False,
+                    "reason": "pool_empty",
+                },
+            ],
+        }
+        self.handler.flow_client.upsample_video.side_effect = error
+        chunks = await self.poll("VIDEO_RESOLUTION_1080P", "veo_3_1_upsampler_1080p")
+        self.assertIn("验证码尝试 3 / 6 次，实际提交 2 次", "".join(chunks))
+        trace = self.response_state["upscale_retry_trace"]
+        self.assertEqual((trace["attempts"], trace["submissions"]), (3, 2))
+        self.assertEqual(trace["history"][-1]["stage"], "captcha")
+        self.assertEqual(trace["history"][-1]["reason"], "pool_empty")
+        self.handler.flow_client.upsample_video.assert_awaited_once()
+        self.handler.flow_client.check_video_status.assert_awaited_once()
+        self.assertIn(self.base_url, chunks[-1])
+
+    async def test_provider_exception_does_not_leak_private_details_into_progress(self):
+        self.make_handler("veo_3_1_t2v_fast")
+        error = RuntimeError("provider-secret token=private socks5://user:pass@private.test:1080")
+        error.flow_retry_trace = {
+            "max_retries": 2,
+            "generation_attempts": [
+                {
+                    "attempt": 1,
+                    "stage": "captcha",
+                    "submitted": False,
+                    "reason": "provider_error",
+                    "error": "remote REST request failed (RuntimeError)",
+                }
+            ],
+        }
+        self.handler.flow_client.upsample_video.side_effect = error
+        chunks = await self.poll("VIDEO_RESOLUTION_1080P", "veo_3_1_upsampler_1080p")
+        progress = "".join(chunks)
+        self.assertNotIn("provider-secret", progress)
+        self.assertNotIn("private", progress)
+        self.assertIn("实际提交 0 次", progress)
+        self.assertIn("打码服务异常", progress)
 
 
 if __name__ == "__main__":

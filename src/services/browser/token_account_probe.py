@@ -3,6 +3,8 @@
 from datetime import datetime, timezone
 from typing import Any
 
+from ...core.account_identity import same_google_identity
+
 try:  # Playwright is optional until the browser-profile feature is enabled.
     from playwright.async_api import (
         Error as PlaywrightError,
@@ -80,7 +82,7 @@ class TokenManagerAccountProbe:
         # Navigation and this probe share a Cookie jar. Consume its response
         # once so a post-OAuth verification always reads the renewed session.
         session_response, self._session_response = self._session_response, None
-        if str(getattr(self.token, "email", "")).casefold() != expected_email.strip().casefold():
+        if not same_google_identity(getattr(self.token, "email", ""), expected_email):
             return {
                 "email": "",
                 "session_valid": False,
@@ -128,7 +130,7 @@ class TokenManagerAccountProbe:
                 email = str((session.get("user") or {}).get("email") or "")
                 if not at or not expires or expires <= datetime.now(timezone.utc):
                     return {"reason": "session_invalid"}
-                if email.casefold() != str(self.token.email).casefold():
+                if not same_google_identity(email, self.token.email):
                     return {"reason": "identity_mismatch"}
                 url = self.token_manager.flow_client.api_base_url + "/credits"
                 request_pending = True

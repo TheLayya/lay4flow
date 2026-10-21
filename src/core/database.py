@@ -317,6 +317,13 @@ class Database:
         """Record a proxy pool health check."""
         return await self._settings.update_proxy_pool_check(entry_id, ok, expected_proxy_url)
 
+    async def record_proxy_pool_result(
+        self, entry_id: int, expected_proxy_url: str, ok: bool, *, probe: bool = False
+    ):
+        return await self._settings.record_proxy_pool_result(
+            entry_id, expected_proxy_url, ok, probe=probe
+        )
+
     async def get_generation_config(self) -> Optional[GenerationConfig]:
         """Get generation configuration"""
         return await self._settings.get_generation_config()

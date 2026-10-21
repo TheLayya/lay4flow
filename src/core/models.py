@@ -52,6 +52,7 @@ class Token(BaseModel):
     login_password: str = ""
     proxy_url: str = ""
     proxy_pool_id: Optional[int] = None
+    submission_proxy_mode: Literal["fixed", "pool_random"] = "fixed"
     auto_refresh_enabled: bool = True
     refresh_interval_minutes: int = 120
     last_st_refresh_at: Optional[datetime] = None
@@ -169,6 +170,13 @@ class ProxyPoolEntry(BaseModel):
     note: str = ""
     last_check_ok: Optional[bool] = None
     last_check_at: Optional[datetime] = None
+    success_count: int = 0
+    failure_count: int = 0
+    consecutive_failures: int = 0
+    success_rate: float = 0.5
+    cooldown_until: Optional[datetime] = None
+    inflight: int = 0
+    circuit_state: str = "ready"
     created_at: Optional[datetime] = None
 
 

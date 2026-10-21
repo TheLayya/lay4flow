@@ -7,6 +7,72 @@ from src.services.generation_handler import GenerationHandler
 
 
 class ImageUpsampleRetryTests(unittest.IsolatedAsyncioTestCase):
+    def test_safe_retry_trace_keeps_only_public_attempt_fields(self):
+        trace = GenerationHandler._safe_retry_trace(
+            {
+                "image_generation": {
+                    "upstream_trace": {
+                        "max_retries": 4,
+                        "generation_attempts": [
+                            {
+                                "attempt": 1,
+                                "success": False,
+                                "recaptcha_ok": True,
+                                "duration_ms": 123,
+                                "error": "HTTP Error 403: reCAPTCHA evaluation failed",
+                                "proxy": "socks5h://secret",
+                                "token": "secret-token",
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+        self.assertEqual(trace["max_attempts"], 4)
+        self.assertEqual(trace["attempts"], 1)
+        self.assertEqual(trace["history"][0]["duration_ms"], 123)
+        self.assertNotIn("proxy", trace["history"][0])
+        self.assertNotIn("token", trace["history"][0])
+
+    async def test_failed_generation_keeps_retry_trace_in_request_performance(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+        retry_trace = {
+            "max_retries": 3,
+            "generation_attempts": [
+                {"attempt": 1, "success": False, "error": "reCAPTCHA evaluation failed"},
+                {"attempt": 2, "success": False, "error": "reCAPTCHA evaluation failed"},
+                {"attempt": 3, "success": False, "error": "reCAPTCHA evaluation failed"},
+            ],
+        }
+        error = RuntimeError("reCAPTCHA evaluation failed")
+        error.flow_retry_trace = retry_trace
+        handler.flow_client = types.SimpleNamespace(generate_image=AsyncMock(side_effect=error))
+        handler._update_request_log_progress = AsyncMock()
+        token = types.SimpleNamespace(
+            id=1,
+            at="synthetic-at",
+            image_concurrency=1,
+            user_paygate_tier="PAYGATE_TIER_NOT_PAID",
+        )
+        perf_trace = {}
+
+        with self.assertRaisesRegex(RuntimeError, "reCAPTCHA evaluation failed"):
+            async for _ in handler._handle_image_generation(
+                token,
+                "synthetic-project",
+                {"model_name": "NARWHAL", "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE"},
+                "A test image",
+                None,
+                True,
+                perf_trace=perf_trace,
+            ):
+                pass
+
+        image_trace = perf_trace["image_generation"]
+        self.assertIs(image_trace["upstream_trace"], retry_trace)
+        self.assertEqual(image_trace["generation_error"], "reCAPTCHA evaluation failed")
+        self.assertGreaterEqual(image_trace["generate_api_ms"], 0)
+
     async def test_handler_does_not_retry_client_upsample_or_claim_success(self):
         handler = GenerationHandler.__new__(GenerationHandler)
         handler.flow_client = types.SimpleNamespace(

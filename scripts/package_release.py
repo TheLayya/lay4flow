@@ -26,6 +26,7 @@ TOP_LEVEL = (
     "docs/FRONTEND.md",
     "docs/REMOTE_BROWSER_FINGERPRINT.md",
     "docs/RELEASE_PACKAGE.md",
+    "docs/CHANGELOG.md",
     "docs/images/qq-group.jpg",
     "docs/screenshots/README.md",
     "docs/screenshots/login.webp",

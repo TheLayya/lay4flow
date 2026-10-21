@@ -12,6 +12,7 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
+from ...core.account_identity import same_google_identity
 from ...core.models import Token
 from ..flow.google_cookies import GoogleCookieJar
 from ..proxy_manager import ProxyManager
@@ -30,6 +31,7 @@ SETTINGS = (
     "video_enabled",
     "image_concurrency",
     "video_concurrency",
+    "submission_proxy_mode",
 )
 LAUNCH_KEYS = {
     "stealth_args",
@@ -302,6 +304,8 @@ class ProfileTransfer:
             value = account.get(key)
             if isinstance(value, bool) or not isinstance(value, int) or not -1 <= value <= 1000:
                 raise ProfileTransferError("invalid_settings", "迁移包并发设置无效")
+        if account.get("submission_proxy_mode", "fixed") not in {"fixed", "pool_random"}:
+            raise ProfileTransferError("invalid_settings", "迁移包提交代理策略无效")
         if account.get("remark") is not None and not isinstance(account["remark"], str):
             raise ProfileTransferError("invalid_settings", "迁移包备注无效")
         manager = self.refresher.manager
@@ -450,7 +454,7 @@ class ProfileTransfer:
         async with self._import_lock:
             email = account["email"].strip()
             if any(
-                token.email.strip().casefold() == email.casefold()
+                same_google_identity(token.email, email)
                 for token in await self.tokens.db.get_all_tokens()
             ):
                 raise ProfileTransferError(
@@ -569,6 +573,7 @@ class ProfileTransfer:
                     video_concurrency=account["video_concurrency"],
                     proxy_url=token.proxy_url,
                     proxy_pool_id=proxy_pool_id,
+                    submission_proxy_mode=account.get("submission_proxy_mode", "fixed"),
                     login_account=email,
                     login_password="",
                     protocol_mode="session",

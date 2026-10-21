@@ -43,7 +43,9 @@ export function isUnsettledVids(entry) {
 
 // Keep unresolved receipts even beyond the ordinary history window: they prevent duplicate generation charges.
 export function selectStudioHistory(entries, limit = STUDIO_HISTORY_LIMIT) {
-  return entries.filter((entry, index) => index < limit || isUnsettledVids(entry))
+  return entries.filter(
+    (entry, index) => index < limit || isUnsettledVids(entry) || (entry?.jobId && unsettledStates.has(entry.status)),
+  )
 }
 
 export function writeStudioHistory(storage, entries, key = STUDIO_HISTORY_KEY) {

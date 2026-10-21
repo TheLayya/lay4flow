@@ -16,6 +16,9 @@ const emit = defineEmits(['save', 'copy', 'reload'])
 const current = computed(() => props.proxies.find((row) => row.id === props.account.proxy_pool_id))
 const picked = computed(() => props.proxies.find((row) => row.id === props.draft.proxy_pool_id))
 const proxyChanged = computed(() => props.draft.proxy_pool_id !== (props.account.proxy_pool_id ?? null))
+const strategyChanged = computed(
+    () => props.draft.submission_proxy_mode !== (props.account.submission_proxy_mode || 'fixed'),
+)
 const shownURL = computed(() => picked.value?.proxy_url || props.account.proxy_url || current.value?.proxy_url || '')
 const decode = (value) => {
     try {
@@ -88,8 +91,37 @@ const optionLabel = (row) =>
                     账号代理
                     <small>{{ account.proxy_pool_id ? '当前 #' + account.proxy_pool_id : '尚未绑定代理池' }}</small>
                 </h3>
+                <label class="quick-strategy-label" :for="`submission-proxy-${account.id}`">生成提交出口</label>
+                <div class="quick-proxy-picker quick-submission-picker">
+                    <el-select
+                        :id="`submission-proxy-${account.id}`"
+                        v-model="draft.submission_proxy_mode"
+                        :aria-label="`${account.email || account.id} 的生成提交出口`"
+                        :disabled="locked"
+                    >
+                        <el-option label="账号固定代理" value="fixed" />
+                        <el-option label="代理池随机（每次生成取健康出口）" value="pool_random" />
+                    </el-select>
+                    <el-button
+                        type="primary"
+                        :loading="saving && savingKind === 'strategy'"
+                        :disabled="locked || !strategyChanged"
+                        @click="emit('save', 'strategy')"
+                    >
+                        保存策略
+                    </el-button>
+                </div>
+                <p class="quick-hint quick-strategy-hint">
+                    {{
+                        draft.submission_proxy_mode === 'pool_random'
+                            ? '每份 Flow 生成任务随机取一个可用出口，整份任务保持同一出口。Cloak 登录和续期仍使用下方绑定。'
+                            : 'Flow 生成任务使用下方账号绑定的固定出口。'
+                    }}
+                </p>
+                <label class="quick-strategy-label" :for="`account-proxy-${account.id}`">账号绑定出口</label>
                 <div class="quick-proxy-picker">
                     <el-select
+                        :id="`account-proxy-${account.id}`"
                         v-model="draft.proxy_pool_id"
                         :aria-label="`为 ${account.email || account.id} 选择代理`"
                         placeholder="搜索地址、用户名或备注"
@@ -252,6 +284,15 @@ dd {
 .quick-proxy-picker .el-select {
     flex: 1;
     min-width: 0;
+}
+.quick-strategy-label {
+    display: block;
+    color: var(--muted);
+    font-size: 12px;
+    margin: 14px 0 7px;
+}
+.quick-strategy-hint {
+    margin-bottom: 14px;
 }
 .quick-proxy-url {
     margin: 13px 0 8px;

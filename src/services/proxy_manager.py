@@ -1,10 +1,22 @@
 """Proxy configuration manager."""
 
+import asyncio
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
 from ..core.database import Database
 from ..core.models import ProxyConfig
 from .proxy_urls import normalize_proxy_url
+from .flow.retry import is_proxy_connection_error, is_retryable_network_error
+
+
+@dataclass
+class SubmissionProxyLease:
+    entry_id: int | None
+    proxy_url: str | None
+    released: bool = False
 
 
 class AccountProxyUnavailable(ValueError):
@@ -20,6 +32,10 @@ class ProxyManager:
     def __init__(self, db: Database):
         self.db = db
         self._media_last_id = 0
+        self._submission_lock = asyncio.Lock()
+        self._submission_inflight: dict[int, int] = {}
+        self._submission_last_used: dict[int, float] = {}
+        self._probe_pending: set[int] = set()
 
     def _parse_proxy_line(self, line: str) -> Optional[str]:
         """Compatibility alias for the old parser entry point."""
@@ -91,7 +107,124 @@ class ProxyManager:
 
     async def list_proxy_pool(self) -> list:
         """List all proxy pool entries."""
-        return await self.db.list_proxy_pool()
+        entries = await self.db.list_proxy_pool()
+        now = datetime.now(timezone.utc)
+        for entry in entries:
+            entry.inflight = self._submission_inflight.get(entry.id, 0)
+            if entry.id in self._probe_pending:
+                entry.circuit_state = "probing"
+            elif entry.cooldown_until is not None:
+                entry.circuit_state = (
+                    "cooling" if self._utc(entry.cooldown_until) > now else "probing"
+                )
+        return entries
+
+    @staticmethod
+    def _utc(value):
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+    async def acquire_submission_proxy(self, token) -> SubmissionProxyLease:
+        """Reserve one exit for a whole generation task; login bindings stay unchanged."""
+        if getattr(token, "submission_proxy_mode", "fixed") != "pool_random":
+            proxy = await self.resolve_account_proxy(token)
+            entry_id = getattr(token, "proxy_pool_id", None)
+            async with self._submission_lock:
+                if entry_id is not None:
+                    self._submission_inflight[entry_id] = (
+                        self._submission_inflight.get(entry_id, 0) + 1
+                    )
+            return SubmissionProxyLease(entry_id, proxy)
+
+        async with self._submission_lock:
+            entries = [
+                entry
+                for entry in await self.db.list_proxy_pool()
+                if entry.enabled
+                and entry.id not in self._probe_pending
+                and entry.cooldown_until is None
+            ]
+            if not entries:
+                raise ValueError("代理池出口正在冷却或已停用，请稍后重试或检查代理池")
+            now = time.monotonic()
+            # Least-recently-used first, then least loaded, so exits rotate
+            # uniformly instead of success-weighted picks hammering one egress.
+            selected = min(
+                entries,
+                key=lambda entry: (
+                    self._submission_last_used.get(entry.id, 0.0),
+                    self._submission_inflight.get(entry.id, 0),
+                ),
+            )
+            proxy = normalize_proxy_url(selected.proxy_url)
+            if not proxy:
+                raise AccountProxyUnavailable()
+            self._submission_inflight[selected.id] = (
+                self._submission_inflight.get(selected.id, 0) + 1
+            )
+            self._submission_last_used[selected.id] = now
+            return SubmissionProxyLease(selected.id, proxy)
+
+    @staticmethod
+    def is_submission_transport_error(error) -> bool:
+        text = str(error or "")
+        # HTTP policy, quota and content errors are not proxy health failures.
+        if any(marker in text.lower() for marker in ("http error 403", "http error 429")):
+            return False
+        return bool(error) and (
+            is_proxy_connection_error(error)
+            or is_retryable_network_error(text)
+            or "proxyerror" in text.lower()
+        )
+
+    async def release_submission_proxy(
+        self, lease: SubmissionProxyLease, *, success: bool = False, error=None
+    ) -> None:
+        """Release capacity once, recording only complete success or transport failure."""
+        async with self._submission_lock:
+            if lease.released:
+                return
+            lease.released = True
+            if lease.entry_id is not None:
+                remaining = max(0, self._submission_inflight.get(lease.entry_id, 0) - 1)
+                if remaining:
+                    self._submission_inflight[lease.entry_id] = remaining
+                else:
+                    self._submission_inflight.pop(lease.entry_id, None)
+        if lease.entry_id is not None and (success or self.is_submission_transport_error(error)):
+            await self.db.record_proxy_pool_result(lease.entry_id, lease.proxy_url, success)
+
+    async def probe_due_proxy_entries(self, limit: int = 3) -> None:
+        """Probe expired circuits and idle exits periodically, without submitting generation."""
+        now = datetime.now(timezone.utc)
+        due = []
+        async with self._submission_lock:
+            entries = sorted(
+                await self.db.list_proxy_pool(),
+                key=lambda entry: (
+                    entry.cooldown_until is None,
+                    self._utc(entry.last_check_at).timestamp() if entry.last_check_at else 0,
+                    entry.id,
+                ),
+            )
+            for entry in entries:
+                if not entry.enabled or entry.id in self._probe_pending:
+                    continue
+                if self._submission_inflight.get(entry.id, 0):
+                    continue
+                cooldown = self._utc(entry.cooldown_until) if entry.cooldown_until else None
+                checked = self._utc(entry.last_check_at) if entry.last_check_at else None
+                if cooldown and cooldown > now:
+                    continue
+                if not cooldown and checked and (now - checked).total_seconds() < 60:
+                    continue
+                due.append(entry.id)
+                if len(due) >= limit:
+                    break
+            self._probe_pending.update(due)
+        try:
+            await asyncio.gather(*(self.check_proxy_pool_entry(entry_id) for entry_id in due))
+        finally:
+            self._probe_pending.difference_update(due)
 
     async def add_proxy_pool_entry(
         self, proxy_url: str, note: str = "", captcha_enabled: bool = True
@@ -134,7 +267,7 @@ class ProxyManager:
         await self.db.set_proxy_pool_enabled(entry_id, enabled)
 
     async def check_proxy_pool_entry(self, entry_id: int) -> bool:
-        """Test a proxy pool entry against Google and record the result."""
+        """Probe a real Flow REST host; HTTP policy responses still prove transport."""
         entry = await self.db.get_proxy_pool_entry(entry_id)
         if entry is None:
             return False
@@ -143,20 +276,23 @@ class ProxyManager:
             from curl_cffi.requests import AsyncSession
 
             async with AsyncSession(trust_env=False, proxy=proxy, timeout=15) as session:
-                response = await session.get("https://www.google.com/recaptcha/enterprise/anchor")
-            ok = response.status_code == 200
+                response = await session.get("https://aisandbox-pa.googleapis.com/v1/credits")
+            ok = response.status_code in {200, 401, 403, 404, 429}
         except Exception:
             ok = False
-        await self.db.update_proxy_pool_check(entry_id, ok, expected_proxy_url=entry.proxy_url)
+        await self.db.record_proxy_pool_result(entry_id, entry.proxy_url, ok, probe=True)
         return ok
 
     async def get_enabled_proxy_urls(self) -> list[str]:
         """Return the enabled proxy pool URLs, used as mint egress sources."""
+        now = datetime.now(timezone.utc)
         entries = await self.list_proxy_pool()
         return [
             entry.proxy_url
             for entry in entries
             if entry.enabled and getattr(entry, "captcha_enabled", True)
+            and entry.last_check_ok is not False
+            and (entry.cooldown_until is None or self._utc(entry.cooldown_until) <= now)
         ]
 
     async def select_account_proxy(

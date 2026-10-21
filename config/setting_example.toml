@@ -76,7 +76,7 @@ captcha_method = "remote_browser"
 remote_browser_base_url = "https://cap.tk218.top"
 remote_browser_api_key = ""
 remote_browser_timeout = 60
-browser_captcha_generation_retries = 6
+# Generation attempts, including captcha rejections, follow flow.max_retries.
 # Per-account Flow project rotation, independent from captcha worker capacity.
 personal_project_pool_size = 4
 

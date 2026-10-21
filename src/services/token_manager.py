@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from ..core.account_identity import same_google_identity
 from ..core.config import config
 from ..core.database import Database
 from ..core.logger import debug_logger
@@ -328,6 +329,7 @@ class TokenManager:
         refresh_interval_minutes: int = 120,
         browser_profile_source: str = "cookies",
         proxy_pool_id: Optional[int] = None,
+        submission_proxy_mode: str = "fixed",
     ) -> Token:
         """Add a new token and prepare its pooled projects."""
         if self._normalize_browser_profile_source(browser_profile_source) == "cloak":
@@ -429,6 +431,7 @@ class TokenManager:
             login_password=login_password or "",
             proxy_url=self._normalize_token_proxy_url(proxy_url),
             proxy_pool_id=proxy_pool_id,
+            submission_proxy_mode=submission_proxy_mode,
             auto_refresh_enabled=bool(auto_refresh_enabled),
             refresh_interval_minutes=self._normalize_refresh_interval(refresh_interval_minutes),
             browser_profile_source=self._normalize_browser_profile_source(browser_profile_source),
@@ -474,12 +477,18 @@ class TokenManager:
         refresh_interval_minutes: Optional[int] = None,
         browser_profile_source: Optional[str] = None,
         proxy_pool_id: Optional[int] = None,
+        submission_proxy_mode: Optional[str] = None,
     ):
         """Update token (支持修改project_id和project_name)
 
         当用户编辑保存token时，如果token未过期，自动清空429禁用状态
         """
         update_fields = {}
+
+        if submission_proxy_mode is not None:
+            if submission_proxy_mode not in {"fixed", "pool_random"}:
+                raise ValueError("submission_proxy_mode must be fixed or pool_random")
+            update_fields["submission_proxy_mode"] = submission_proxy_mode
 
         if st is not None:
             update_fields["st"] = st
@@ -869,7 +878,7 @@ class TokenManager:
                 "ST 未返回有效且未过期的 AT", "session_invalid", validation_stage="access_token"
             )
         user = session.get("user") or {}
-        if not user.get("email") or user["email"].casefold() != token.email.casefold():
+        if not same_google_identity(user.get("email"), token.email):
             raise RefreshFailure(
                 "刷新返回的账号与当前账号不一致，请检查 Cookie 所属账号",
                 "invalid_cookies",

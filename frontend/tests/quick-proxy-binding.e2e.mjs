@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 // Synthetic account/proxy UI regression; every API and external request is intercepted.
 const root = fileURLToPath(new URL('../..', import.meta.url))
-const output = resolve(root, '../../output/quick-binding-review')
+const output = resolve(root, 'tmp/quick-binding-review')
 const base = process.env.FRONTEND_PREVIEW_URL || 'http://127.0.0.1:38127'
 const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_BROWSER_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe',
@@ -28,6 +28,23 @@ const proxies = [
     { id: 2, proxy_url: urlB, note: '创作出口 B', enabled: true, last_check_ok: true },
     { id: 3, proxy_url: 'socks5://paused:pass@192.0.2.13:1080', note: '已停用出口', enabled: false },
 ]
+Object.assign(proxies[0], {
+    circuit_state: 'ready',
+    inflight: 2,
+    success_count: 8,
+    failure_count: 2,
+    success_rate: 0.8,
+    consecutive_failures: 0,
+})
+Object.assign(proxies[1], {
+    circuit_state: 'cooling',
+    inflight: 0,
+    success_count: 5,
+    failure_count: 3,
+    success_rate: 0.625,
+    consecutive_failures: 3,
+    cooldown_until: '2099-01-01T00:00:00Z',
+})
 const accounts = [
     {
         id: 11,
@@ -65,6 +82,7 @@ const accounts = [
     video_enabled: true,
     auto_refresh_enabled: true,
     refresh_interval_minutes: 120,
+    submission_proxy_mode: 'fixed',
     at_expires: '2099-01-01T00:00:00Z',
     credits: 100,
     browser_profile_status: 'ready',
@@ -120,6 +138,7 @@ await context.route('**/*', async (route) => {
     if (url.pathname === '/health') return json(route, { backend_running: true, has_active_tokens: true })
     if (url.pathname === '/api/stats') return json(route, { total_tokens: 3, active_tokens: 3 })
     if (url.pathname === '/api/tokens') return json(route, accounts)
+    if (url.pathname === '/api/profile-transfer/jobs') return json(route, { success: true, jobs: [] })
     if (url.pathname === '/api/proxy/pool')
         return json(route, {
             success: true,
@@ -154,6 +173,9 @@ try {
     )
     await panel.getByRole('button', { name: '复制地址', exact: true }).click()
     assert.equal((await page.evaluate(() => window.bindingCopies)).at(-1), urlA)
+    assert.match(await visible('.pool-table-dense').innerText(), /近期成功 80%/)
+    assert.match(await visible('.pool-table-dense').innerText(), /熔断冷却/)
+    assert.match(await visible('.pool-table-dense').innerText(), /最早.+重探/)
     const box = panel.locator('.inline-binding .el-select')
     await box.click()
     await page.getByRole('option').filter({ hasText: 'free@example.test' }).click()
@@ -211,7 +233,7 @@ try {
     const quick = visible('.account-quick-panel[data-account-id="11"]')
     await quick.waitFor()
     assert.match(await quick.innerText(), /plain-password/)
-    await quick.locator('.quick-proxy-picker .el-select').click()
+    await quick.locator('.quick-proxy-picker:not(.quick-submission-picker) .el-select').click()
     await page.getByRole('option').filter({ hasText: '创作出口 B' }).click()
     await quick.locator('.quick-bind-save').click()
     await quick.getByRole('status').filter({ hasText: '已绑定代理 #2' }).waitFor()
@@ -222,6 +244,22 @@ try {
     assert.match(await quick.innerText(), /plain-at-11/)
     await quick.screenshot({ path: resolve(output, 'account-binding-1600.png'), animations: 'disabled' })
     record('Account row binds a new proxy and copies decoded credentials without a drawer, dialog or route change')
+    await quick.locator('.quick-submission-picker .el-select').click()
+    await page.getByRole('option', { name: '代理池随机（每次生成取健康出口）', exact: true }).click()
+    await quick.getByRole('button', { name: '保存策略', exact: true }).click()
+    await quick.getByRole('status').filter({ hasText: '生成出口已设置为代理池随机' }).waitFor()
+    assert.deepEqual(writes.at(-1), { id: 11, body: { submission_proxy_mode: 'pool_random' } })
+    assert.equal(accounts.find((item) => item.id === 11).proxy_pool_id, 2)
+    assert.equal(accounts.find((item) => item.id === 11).proxy_url, urlB)
+    await page.locator('.el-message').last().waitFor({ state: 'hidden' })
+    await quick.screenshot({ path: resolve(output, 'submission-strategy-1600.png'), animations: 'disabled' })
+    record('Submission strategy saves separately and the account retains its fixed login exit')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await noOverflow()
+    await visible('.account-quick-panel[data-account-id="11"]').screenshot({
+        path: resolve(output, 'submission-strategy-1440.png'),
+        animations: 'disabled',
+    })
     await page.setViewportSize({ width: 390, height: 844 })
     await noOverflow()
     await visible('.account-quick-panel[data-account-id="11"]').waitFor()

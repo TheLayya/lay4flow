@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+from ...core.account_identity import same_google_identity
 from .environment import EnvironmentSnapshot, EnvironmentSnapshotStore
 
 
@@ -106,7 +107,7 @@ class ProfileVerifier:
             credits = value.get("credits", 0)
             if isinstance(credits, bool) or not isinstance(credits, int) or credits < 0:
                 return AccountVerification(False, session_valid, 0, "credits_invalid")
-            if not email or email.casefold() != expected_email.strip().casefold():
+            if not same_google_identity(email, expected_email):
                 return AccountVerification(False, session_valid, credits, "identity_mismatch")
             if not session_valid:
                 return AccountVerification(True, False, credits, "session_invalid")

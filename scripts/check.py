@@ -33,6 +33,8 @@ COMPONENTS = [
     "src/api/admin_routes",
     "src/core/storage",
     "src/services/factory.py",
+    "src/services/studio_jobs.py",
+    "tests/test_studio_jobs.py",
     "src/services/flow",
     "src/services/vids",
     "src/services/browser",

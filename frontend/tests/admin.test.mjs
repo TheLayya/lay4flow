@@ -152,7 +152,9 @@ test('login avoids returning to the root login redirect and preserves a protecte
         const { state } = view('Login', { context: { useRouter: () => ({}), useRoute: () => ({ query: { next } }) } })
         assert.equal(state.nextPath(), '/dashboard', next)
     }
-    const { state } = view('Login', { context: { useRouter: () => ({}), useRoute: () => ({ query: { next: '/accounts?platform=vids' } }) } })
+    const { state } = view('Login', {
+        context: { useRouter: () => ({}), useRoute: () => ({ query: { next: '/accounts?platform=vids' } }) },
+    })
     assert.equal(state.nextPath(), '/accounts?platform=vids')
 })
 
@@ -863,6 +865,63 @@ test('account polling updates untouched quick fields while retaining pending edi
     s.toggleQuickAccount(s.accounts.value[0])
     s.toggleQuickAccount(s.accounts.value[0])
     assert.equal(s.quickDraft(s.accounts.value[0]).remark, 'pending edit')
+})
+
+test('submission strategy saves independently of the login binding and retains failed choices', async () => {
+    let fail = true
+    const writes = [],
+        confirmations = []
+    const { state: s } = view('Accounts', {
+        api: {
+            put: async (path, body) => {
+                writes.push({ path, body: plain(body) })
+                if (fail) throw new Error('策略保存失败')
+                return { success: true }
+            },
+        },
+        context: { ElMessageBox: { confirm: async (...args) => confirmations.push(args) } },
+    })
+    const row = {
+        id: 13,
+        browser_profile_source: 'cloak',
+        proxy_pool_id: 2,
+        proxy_url: 'socks5h://fixed:password@login.fixture:1080',
+    }
+    s.accounts.value = [row]
+    s.proxyPool.value = [{ id: 2, enabled: true, proxy_url: row.proxy_url, bound_account_count: 1 }]
+    const draft = s.quickDraft(row)
+    assert.equal(draft.submission_proxy_mode, 'fixed')
+    draft.submission_proxy_mode = 'pool_random'
+    await s.saveQuickAccount(row, 'strategy')
+    assert.equal(s.quickErrors[13], '策略保存失败')
+    assert.equal(draft.submission_proxy_mode, 'pool_random')
+    assert.equal(s.accounts.value[0].submission_proxy_mode, undefined)
+    fail = false
+    await s.saveQuickAccount(row, 'strategy')
+    assert.deepEqual(writes, [
+        { path: '/api/tokens/13', body: { submission_proxy_mode: 'pool_random' } },
+        { path: '/api/tokens/13', body: { submission_proxy_mode: 'pool_random' } },
+    ])
+    assert.equal(s.accounts.value[0].proxy_pool_id, 2)
+    assert.equal(s.accounts.value[0].proxy_url, row.proxy_url)
+    assert.equal(s.proxyPool.value[0].bound_account_count, 1)
+    assert.equal(confirmations.length, 0)
+    assert.match(s.accountProxySummary(s.accounts.value[0]), /生成 · 代理池随机 · 登录 #2/)
+    assert.match(s.quickSaved[13], /代理池随机/)
+})
+
+test('polling synchronizes an untouched strategy without discarding an unsaved strategy choice', async () => {
+    const { state: s } = view('Accounts')
+    const row = { id: 22, submission_proxy_mode: 'fixed' }
+    s.accounts.value = [row]
+    const draft = s.quickDraft(row)
+    s.accounts.value = [{ ...row, submission_proxy_mode: 'pool_random' }]
+    await nextTick()
+    assert.equal(draft.submission_proxy_mode, 'pool_random')
+    draft.submission_proxy_mode = 'fixed'
+    s.accounts.value = [{ ...row, submission_proxy_mode: 'pool_random', remark: 'updated' }]
+    await nextTick()
+    assert.equal(draft.submission_proxy_mode, 'fixed')
 })
 
 test('account binding permits canonical equivalents of historical Cloak proxy snapshots', () => {

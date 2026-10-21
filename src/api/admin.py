@@ -21,6 +21,7 @@ from fastapi import (  # noqa: F401 - legacy admin import/patch compatibility
     Response,
 )
 
+from ..core.account_identity import same_google_identity
 from ..core.admin_sessions import AdminSessionStore
 from ..core.auth import AuthManager
 from ..core.config import config
@@ -448,7 +449,13 @@ async def import_legacy_account(bundle, *, proxy_url=None, proxy_pool_id=None):
         settings = UpdateTokenRequest.model_validate(
             {
                 key: bundle[key]
-                for key in ("remark", "project_id", "project_name", "browser_profile_source")
+                for key in (
+                    "remark",
+                    "project_id",
+                    "project_name",
+                    "browser_profile_source",
+                    "submission_proxy_mode",
+                )
                 if key in bundle
             }
         )
@@ -488,7 +495,7 @@ async def import_legacy_account(bundle, *, proxy_url=None, proxy_pool_id=None):
         )
     verified = imported[0]
     account = await token_manager.get_token(verified["token_id"])
-    if account is None or account.email.casefold() != verified["email"].casefold():
+    if account is None or not same_google_identity(account.email, verified["email"]):
         raise ProfileTransferError("legacy_import_unverified", "账号身份已变化，原配置已保留", 409)
     if settings.model_fields_set:
         await update_token(account.id, settings, token="background-import")

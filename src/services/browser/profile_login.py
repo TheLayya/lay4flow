@@ -37,36 +37,54 @@ class DirectProfileLogin:
             refresher = self.tokens.profile_refresher
             if refresher is None:
                 raise ViewerError(503, "服务器未配置账号 Profile")
-            if await self.tokens.db.get_token_by_email(email):
-                raise ViewerError(409, "账号已存在，请在账号列表打开其浏览器")
             manager = refresher.manager
             profile = manager.root_dir / manager._normalize_account_key(email)
-            if profile.exists() and any(profile.iterdir()):
-                raise ViewerError(409, "该邮箱已有 Profile，请先核对现有账号")
-            try:
-                proxy_pool_id, proxy_url = await ProxyManager(self.tokens.db).select_account_proxy(
-                    proxy_pool_id, proxy_url
-                )
-            except ValueError:
-                raise ViewerError(400, "请选择可用的代理池出口，或先在代理池添加出口") from None
-            session_id = secrets.token_urlsafe(24)
-            token_id = await self.tokens.db.add_token(
-                Token(
-                    st="profile-login:" + session_id,
-                    email=email,
-                    name=email.split("@", 1)[0],
-                    remark="Cloak 登录中",
-                    is_active=False,
-                    image_enabled=False,
-                    video_enabled=False,
-                    auto_refresh_enabled=False,
-                    login_account=email,
-                    proxy_url=proxy_url,
-                    proxy_pool_id=proxy_pool_id,
-                    browser_profile_source="cloak",
-                    refresh_status="login_required",
-                )
+            existing = await self.tokens.db.get_token_by_email(email)
+            resumed = bool(
+                existing
+                and not existing.is_active
+                and existing.ban_reason == "profile_login"
+                and existing.browser_profile_source == "cloak"
             )
+            if existing and not resumed:
+                raise ViewerError(409, "账号已存在，请在账号列表打开其浏览器")
+            if profile.exists() and any(profile.iterdir()) and not resumed:
+                raise ViewerError(409, "该邮箱已有 Profile，请先核对现有账号")
+            if resumed:
+                token_id = existing.id
+                proxy_pool_id, proxy_url = existing.proxy_pool_id, existing.proxy_url
+            else:
+                try:
+                    proxy_pool_id, proxy_url = await ProxyManager(
+                        self.tokens.db
+                    ).select_account_proxy(proxy_pool_id, proxy_url)
+                except ValueError:
+                    raise ViewerError(400, "请选择可用的代理池出口，或先在代理池添加出口") from None
+            session_id = secrets.token_urlsafe(24)
+            if not resumed:
+                token_id = await self.tokens.db.add_token(
+                    Token(
+                        st="profile-login:" + session_id,
+                        email=email,
+                        name=email.split("@", 1)[0],
+                        remark="Cloak 登录中",
+                        is_active=False,
+                        image_enabled=False,
+                        video_enabled=False,
+                        auto_refresh_enabled=False,
+                        login_account=email,
+                        proxy_url=proxy_url,
+                        proxy_pool_id=proxy_pool_id,
+                        browser_profile_source="cloak",
+                        refresh_status="login_required",
+                    )
+                )
+            for old_id, old in list(self._sessions.items()):
+                if old["token_id"] == token_id:
+                    timer = old.get("timer")
+                    if timer is not None:
+                        timer.cancel()
+                    self._sessions.pop(old_id, None)
             pending = {"token_id": token_id, "email": email, "owner": owner}
             self._sessions[session_id] = pending
             try:
@@ -95,7 +113,7 @@ class DirectProfileLogin:
                     "viewer_url": f"/api/profile-browser/{token_id}",
                 }
             except BaseException:
-                await asyncio.shield(self._discard(session_id, pending))
+                await asyncio.shield(self._discard(session_id, pending, delete=not resumed))
                 raise
 
     def _pending(self, session_id: str, owner: str, viewer_id: str) -> dict:
@@ -202,21 +220,29 @@ class DirectProfileLogin:
     async def cancel(self, session_id: str, owner: str, viewer_id: str) -> dict:
         async with self._guard, self.viewer._switch_guard:
             pending = self._pending(session_id, owner, viewer_id)
-            await self._discard(session_id, pending)
+            await self._discard(session_id, pending, delete=True)
             return {"success": True, "status": "closed"}
 
-    async def _discard(self, session_id: str, pending: dict) -> None:
+    async def _discard(self, session_id: str, pending: dict, *, delete: bool = True) -> None:
         if "result" not in pending:
             token_id = pending["token_id"]
             if self.viewer._token_id == token_id:
-                await self.viewer.close(token_id, pending["owner"], pending.get("viewer_id"))
+                try:
+                    await self.viewer.close(token_id, pending["owner"], pending.get("viewer_id"))
+                except ViewerError:
+                    if delete:
+                        raise
             manager = self.tokens.profile_refresher.manager
-            if manager._normalize_account_key(pending["email"]) in manager._failed_handles:
+            if (
+                delete
+                and manager._normalize_account_key(pending["email"]) in manager._failed_handles
+            ):
                 raise ViewerError(503, "账号浏览器尚未确认关闭，已保留登录数据")
             token = await self.tokens.db.get_token(token_id)
-            if token and not token.is_active and token.ban_reason == "profile_login":
+            if delete and token and not token.is_active and token.ban_reason == "profile_login":
                 await self.tokens.delete_token(token_id)
-        self._sessions.pop(session_id, None)
+        if delete:
+            self._sessions.pop(session_id, None)
         timer = pending.get("timer")
         if timer is not None and timer is not asyncio.current_task():
             timer.cancel()
@@ -227,7 +253,7 @@ class DirectProfileLogin:
         async with self._guard, self.viewer._switch_guard:
             if self._sessions.get(session_id) is pending:
                 try:
-                    await self._discard(session_id, pending)
+                    await self._discard(session_id, pending, delete=False)
                 except ViewerError:
                     # An unconfirmed close retains ownership and the pending row.
                     pass
@@ -235,4 +261,4 @@ class DirectProfileLogin:
     async def close_all(self) -> None:
         async with self._guard, self.viewer._switch_guard:
             for session_id, pending in list(self._sessions.items()):
-                await self._discard(session_id, pending)
+                await self._discard(session_id, pending, delete=False)

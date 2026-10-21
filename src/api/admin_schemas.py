@@ -40,6 +40,7 @@ class AddTokenRequest(BaseModel):
     login_password: Optional[str] = None
     proxy_url: Optional[str] = None
     proxy_pool_id: Optional[int] = Field(default=None, ge=1, strict=True)
+    submission_proxy_mode: Literal["fixed", "pool_random"] = "fixed"
     auto_refresh_enabled: bool = True
     refresh_interval_minutes: int = 120
     browser_profile_source: str = "cookies"
@@ -61,6 +62,7 @@ class UpdateTokenRequest(BaseModel):
     login_password: Optional[str] = None
     proxy_url: Optional[str] = None
     proxy_pool_id: Optional[int] = Field(default=None, ge=1, strict=True)
+    submission_proxy_mode: Optional[Literal["fixed", "pool_random"]] = None
     auto_refresh_enabled: Optional[bool] = None
     refresh_interval_minutes: Optional[int] = None
     browser_profile_source: Optional[str] = None
@@ -165,6 +167,7 @@ class ImportTokenItem(BaseModel):
     login_account: Optional[str] = None
     login_password: Optional[str] = None
     proxy_url: Optional[str] = None
+    submission_proxy_mode: Literal["fixed", "pool_random"] = "fixed"
     auto_refresh_enabled: bool = True
     refresh_interval_minutes: int = 120
     browser_profile_source: str = "cookies"

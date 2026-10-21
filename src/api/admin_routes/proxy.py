@@ -27,6 +27,15 @@ def _pool_entry_to_dict(entry) -> dict:
         "note": entry.note,
         "last_check_ok": entry.last_check_ok,
         "last_check_at": entry.last_check_at.isoformat() if entry.last_check_at else None,
+        "success_count": getattr(entry, "success_count", 0),
+        "failure_count": getattr(entry, "failure_count", 0),
+        "consecutive_failures": getattr(entry, "consecutive_failures", 0),
+        "success_rate": getattr(entry, "success_rate", 0.5),
+        "cooldown_until": getattr(entry, "cooldown_until", None).isoformat()
+        if getattr(entry, "cooldown_until", None)
+        else None,
+        "inflight": getattr(entry, "inflight", 0),
+        "circuit_state": getattr(entry, "circuit_state", "ready"),
         "created_at": entry.created_at.isoformat() if entry.created_at else None,
     }
 

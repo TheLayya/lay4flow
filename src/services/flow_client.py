@@ -158,7 +158,14 @@ class FlowClient:
         if status:
             return self._remote_http_error(int(status.group(1)), text)
         if self._is_proxy_connection_error(error):
-            return "proxy error: curl: (7)"
+            code = retry_policy.proxy_connection_code(error)
+            return (
+                f"proxy error: handshake failed (curl: ({code}))"
+                if code in {5, 7, 97}
+                else f"proxy error: connection failed (curl: ({code}))"
+                if code
+                else "proxy error: connection failed (ProxyError)"
+            )
         if self._is_retryable_network_error(text) or self._should_fallback_to_urllib(text):
             return (
                 "network connection timed out"
@@ -656,7 +663,14 @@ class FlowClient:
                 debug_logger.log_error(f"[API FAILED] Request Body: {request_body_for_log}")
                 debug_logger.log_error(f"[API FAILED] Exception: {error_msg}")
 
-            if allow_urllib_fallback and self._should_fallback_to_urllib(error_msg):
+            # urllib's ProxyHandler has no SOCKS transport. Preserve the chosen
+            # account exit and let the generation retry acquire a fresh solve.
+            socks_proxy = bool(proxy_url and urlparse(proxy_url).scheme in {"socks5", "socks5h"})
+            if (
+                allow_urllib_fallback
+                and not socks_proxy
+                and self._should_fallback_to_urllib(error_msg)
+            ):
                 debug_logger.log_warning(
                     f"[HTTP FALLBACK] curl_cffi 请求失败，回退 urllib: {method.upper()} {url}"
                 )
@@ -949,14 +963,8 @@ class FlowClient:
     def _resolve_generation_retry_budget(
         self, base_max_retries: int, error: Optional[Union[Exception, str]] = None
     ) -> int:
-        """计算当前生成链路允许的总重试次数。"""
+        """Read the configured total attempts, including the first submission."""
         effective_max_retries = retry_policy.generation_retry_budget(base_max_retries)
-        if retry_policy.is_recaptcha_evaluation_error(error):
-            return retry_policy.generation_retry_budget(
-                effective_max_retries,
-                captcha_rejected=True,
-                captcha_retries=config.browser_captcha_generation_retries,
-            )
         return effective_max_retries
 
     def _build_realistic_video_submit_headers(self) -> Dict[str, str]:
@@ -1824,6 +1832,13 @@ class FlowClient:
             "generation_attempts": [],
         }
 
+        def _raise_with_trace(error: BaseException):
+            try:
+                setattr(error, "flow_retry_trace", perf_trace)
+            except Exception:
+                pass
+            raise error
+
         retry_attempt = 0
         while retry_attempt < max_retries:
             attempt_trace: Dict[str, Any] = {
@@ -1848,13 +1863,20 @@ class FlowClient:
                 attempt_trace["error"] = str(last_error)
                 attempt_trace["duration_ms"] = int((time.time() - attempt_started_at) * 1000)
                 perf_trace["generation_attempts"].append(attempt_trace)
-                raise last_error
+                _raise_with_trace(last_error)
 
             launch_gate_acquired = True
             try:
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id, action="IMAGE_GENERATION", token_id=token_id
                 )
+            except Exception as error:
+                attempt_trace["recaptcha_ms"] = int((time.time() - recaptcha_started_at) * 1000)
+                attempt_trace["success"] = False
+                attempt_trace["error"] = self._remote_safe_error(error)[:240]
+                attempt_trace["duration_ms"] = int((time.time() - attempt_started_at) * 1000)
+                perf_trace["generation_attempts"].append(attempt_trace)
+                _raise_with_trace(error)
             finally:
                 if launch_gate_acquired:
                     await self._release_image_launch_gate(token_id)
@@ -1878,7 +1900,7 @@ class FlowClient:
                     perf_trace["max_retries"] = max_retries
                     retry_attempt += 1
                     continue
-                raise last_error
+                _raise_with_trace(last_error)
             if progress_callback is not None:
                 await progress_callback("submitting_image", 48)
             session_id = self._generate_session_id()
@@ -1928,7 +1950,7 @@ class FlowClient:
             except Exception as e:
                 last_error = e
                 attempt_trace["success"] = False
-                attempt_trace["error"] = str(e)[:240]
+                attempt_trace["error"] = self._remote_safe_error(e)[:240]
                 attempt_trace["duration_ms"] = int((time.time() - attempt_started_at) * 1000)
                 perf_trace["generation_attempts"].append(attempt_trace)
                 should_retry = await self._handle_retryable_generation_error(
@@ -1944,13 +1966,13 @@ class FlowClient:
                     perf_trace["max_retries"] = max_retries
                     retry_attempt += 1
                     continue
-                raise
+                _raise_with_trace(e)
             finally:
                 await self._notify_browser_captcha_request_finished(browser_id)
 
         # 所有重试都失败
         perf_trace["final_success_attempt"] = None
-        raise last_error
+        _raise_with_trace(last_error or RuntimeError("Image generation failed"))
 
     async def upsample_image(
         self,
@@ -3717,100 +3739,172 @@ class FlowClient:
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
     ) -> dict:
-        """视频放大到 4K/1080P，返回 task_id
-
-        Args:
-            at: Access Token
-            project_id: 项目ID
-            video_media_id: 视频的 mediaId
-            aspect_ratio: 视频宽高比 VIDEO_ASPECT_RATIO_PORTRAIT/LANDSCAPE
-            resolution: VIDEO_RESOLUTION_4K 或 VIDEO_RESOLUTION_1080P
-            model_key: veo_3_1_upsampler_4k 或 veo_3_1_upsampler_1080p
-
-        Returns:
-            同 generate_video_text
-        """
+        """Submit one video upscale request with policy retries and a safe trace."""
         url = self.api_base_url + endpoints.UPSAMPLE_VIDEO
-
-        # 403/reCAPTCHA 重试逻辑 - reCAPTCHA evaluation failed 时允许更高重试上限
         max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
-        last_error = None
+        retry_trace: Dict[str, Any] = {"max_retries": max_retries, "generation_attempts": []}
+        # Acquisition failures have not submitted an upscale request, so retry
+        # them independently of submission's no-replay policy.
+        retry_deadline = time.monotonic() + max(
+            1, int(getattr(config, "video_timeout", 1500) or 1500)
+        )
+
+        def _captcha_acquisition_meta(error: BaseException) -> tuple[str, bool, float | None]:
+            reason = str(getattr(error, "captcha_failure_reason", "") or "").strip().lower()
+            allowed = {
+                "pool_empty",
+                "pool_cooling",
+                "pool_unhealthy",
+                "pool_busy",
+                "provider_error",
+            }
+            if reason not in allowed:
+                text = str(error).lower()
+                if "proxy pool is empty" in text or "no enabled" in text:
+                    reason = "pool_empty"
+                elif "source is busy" in text or "pool is busy" in text:
+                    reason = "pool_busy"
+                else:
+                    reason = "provider_error"
+            retryable_attr = getattr(error, "retryable", None)
+            retryable = (
+                bool(retryable_attr)
+                if retryable_attr is not None
+                else reason in {"pool_busy", "provider_error"}
+            )
+            retry_after = getattr(error, "retry_after", None)
+            try:
+                retry_after = (
+                    max(0.0, min(600.0, float(retry_after))) if retry_after is not None else None
+                )
+            except (TypeError, ValueError):
+                retry_after = None
+            return reason, retryable, retry_after
+
+        async def _retry_captcha_acquisition(error: BaseException, retry_attempt: int) -> bool:
+            reason, retryable, retry_after = _captcha_acquisition_meta(error)
+            if not retryable or retry_attempt >= max_retries - 1:
+                return False
+            delay = retry_after if retry_after is not None else 2.0
+            remaining = retry_deadline - time.monotonic()
+            if remaining <= delay:
+                return False
+            debug_logger.log_warning(
+                f"[VIDEO UPSAMPLE] captcha acquisition {reason}; retrying "
+                f"({retry_attempt + 2}/{max_retries}) after {delay:g}s"
+            )
+            await asyncio.sleep(delay)
+            return True
+
+        def raise_with_trace(error: BaseException):
+            try:
+                setattr(error, "flow_retry_trace", retry_trace)
+            except Exception:
+                pass
+            raise error
+
+        last_error: Optional[Exception] = None
         retry_attempt = 0
         session_id = self._generate_session_id()
         batch_id = str(uuid.uuid4())
         scene_id = str(uuid.uuid4())
         video_context_warmed = False
         while retry_attempt < max_retries:
-            launch_gate_acquired = False
+            started = time.time()
+            trace: Dict[str, Any] = {
+                "attempt": retry_attempt + 1,
+                "stage": "captcha",
+                "submitted": False,
+                "success": False,
+                "recaptcha_ok": False,
+            }
+            browser_id = None
             launch_ok, _, _ = await self._acquire_video_launch_gate(
-                token_id=token_id,
-                token_video_concurrency=token_video_concurrency,
+                token_id=token_id, token_video_concurrency=token_video_concurrency
             )
             if not launch_ok:
                 last_error = Exception("Video launch queue wait timeout")
-                raise last_error
-
-            launch_gate_acquired = True
+                trace["error"] = self._remote_safe_error(last_error, redact=True)[:240]
+                trace["duration_ms"] = int((time.time() - started) * 1000)
+                retry_trace["generation_attempts"].append(trace)
+                raise_with_trace(last_error)
+            acquisition_error = None
             try:
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id, action="VIDEO_GENERATION", token_id=token_id
                 )
+            except Exception as error:
+                acquisition_error = error
             finally:
-                if launch_gate_acquired:
-                    await self._release_video_launch_gate(token_id)
-            if not recaptcha_token:
-                last_error = Exception("Failed to obtain reCAPTCHA token")
-                should_retry = await self._handle_missing_recaptcha_token(
-                    retry_attempt=retry_attempt,
-                    max_retries=max_retries,
-                    browser_id=browser_id,
-                    project_id=project_id,
-                    log_prefix="[VIDEO UPSAMPLE] 放大",
-                )
+                await self._release_video_launch_gate(token_id)
+            if acquisition_error is not None:
+                last_error = acquisition_error
+                trace["reason"] = _captcha_acquisition_meta(acquisition_error)[0]
+                trace["error"] = self._remote_safe_error(acquisition_error, redact=True)[:240]
+                trace["duration_ms"] = int((time.time() - started) * 1000)
+                retry_trace["generation_attempts"].append(trace)
+                should_retry = await _retry_captcha_acquisition(acquisition_error, retry_attempt)
                 if should_retry:
                     retry_attempt += 1
                     continue
-                raise last_error
-            if not video_context_warmed:
-                await self._warmup_flow_video_frontend_context(
-                    at=at,
+                raise_with_trace(acquisition_error)
+            trace["recaptcha_ok"] = bool(recaptcha_token)
+            if not recaptcha_token:
+                last_error = Exception("Failed to obtain reCAPTCHA token")
+                trace["reason"] = "provider_error"
+                trace["error"] = str(last_error)
+                trace["duration_ms"] = int((time.time() - started) * 1000)
+                retry_trace["generation_attempts"].append(trace)
+                await self._notify_browser_captcha_error(
+                    browser_id=browser_id,
                     project_id=project_id,
-                    token_id=token_id,
-                    session_id=session_id,
-                    user_paygate_tier=user_paygate_tier,
-                    prompt="",
-                    model_key=model_key,
-                    aspect_ratio=aspect_ratio,
+                    error_reason="captcha provider returned no token",
+                    error_message=str(last_error),
                 )
-                video_context_warmed = True
-
-            request_seed = random.randint(1, 99999)
-            json_data = {
-                "mediaGenerationContext": self._build_video_media_generation_context(batch_id),
-                "requests": [
-                    {
-                        "aspectRatio": aspect_ratio,
-                        "resolution": resolution,
-                        "seed": request_seed,
-                        "videoInput": {"mediaId": video_media_id},
-                        "videoModelKey": model_key,
-                        "metadata": {"sceneId": scene_id},
-                    }
-                ],
-                "clientContext": {
-                    "recaptchaContext": {
-                        "token": recaptcha_token,
-                        "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
-                    },
-                    "sessionId": session_id,
-                    "projectId": project_id,
-                    "tool": "PINHOLE",
-                    "userPaygateTier": user_paygate_tier,
-                },
-                "useV2ModelConfig": True,
-            }
-
+                should_retry = await _retry_captcha_acquisition(last_error, retry_attempt)
+                if should_retry:
+                    retry_attempt += 1
+                    continue
+                raise_with_trace(last_error)
             try:
+                if not video_context_warmed:
+                    await self._warmup_flow_video_frontend_context(
+                        at=at,
+                        project_id=project_id,
+                        token_id=token_id,
+                        session_id=session_id,
+                        user_paygate_tier=user_paygate_tier,
+                        prompt="",
+                        model_key=model_key,
+                        aspect_ratio=aspect_ratio,
+                    )
+                    video_context_warmed = True
+                json_data = {
+                    "mediaGenerationContext": self._build_video_media_generation_context(batch_id),
+                    "requests": [
+                        {
+                            "aspectRatio": aspect_ratio,
+                            "resolution": resolution,
+                            "seed": random.randint(1, 99999),
+                            "videoInput": {"mediaId": video_media_id},
+                            "videoModelKey": model_key,
+                            "metadata": {"sceneId": scene_id},
+                        }
+                    ],
+                    "clientContext": {
+                        "recaptchaContext": {
+                            "token": recaptcha_token,
+                            "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
+                        },
+                        "sessionId": session_id,
+                        "projectId": project_id,
+                        "tool": "PINHOLE",
+                        "userPaygateTier": user_paygate_tier,
+                    },
+                    "useV2ModelConfig": True,
+                }
+                trace["stage"] = "submission"
+                trace["submitted"] = True
                 result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
@@ -3820,30 +3914,43 @@ class FlowClient:
                     token_id=token_id,
                     action="VIDEO_GENERATION",
                 )
-                return self._normalize_video_generation_response(
+                normalized = self._normalize_video_generation_response(
                     result, fallback_project_id=project_id
                 )
-            except Exception as e:
-                last_error = e
+                trace["success"] = True
+                trace["duration_ms"] = int((time.time() - started) * 1000)
+                retry_trace["generation_attempts"].append(trace)
+                normalized["flow_retry_trace"] = retry_trace
+                return normalized
+            except Exception as error:
+                last_error = error
+                trace["reason"] = (
+                    "recaptcha_rejected"
+                    if retry_policy.is_recaptcha_evaluation_error(error)
+                    else "submission_error"
+                )
+                trace["error"] = self._remote_safe_error(error, redact=True)[:240]
+                trace["duration_ms"] = int((time.time() - started) * 1000)
+                retry_trace["generation_attempts"].append(trace)
                 should_retry = await self._handle_retryable_generation_error(
-                    error=e,
+                    error=error,
                     retry_attempt=retry_attempt,
                     max_retries=max_retries,
                     browser_id=browser_id,
                     project_id=project_id,
-                    log_prefix="[VIDEO UPSAMPLE] 放大",
+                    log_prefix="[VIDEO UPSAMPLE] upscale",
                     defer_browser_error_notification=True,
                 )
                 if should_retry:
-                    max_retries = self._resolve_generation_retry_budget(max_retries, e)
+                    max_retries = self._resolve_generation_retry_budget(max_retries, error)
+                    retry_trace["max_retries"] = max_retries
                     retry_attempt += 1
                     continue
-                raise
+                raise_with_trace(error)
             finally:
                 await self._notify_browser_captcha_request_finished(browser_id)
             retry_attempt += 1
-
-        raise last_error
+        raise_with_trace(last_error or RuntimeError("Video upscaling failed"))
 
     # ========== 任务轮询 (使用AT) ==========
 

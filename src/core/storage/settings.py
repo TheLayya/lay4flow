@@ -1,5 +1,6 @@
 """Configuration persistence behind Database's existing methods and connection policy."""
 
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Optional
 
 import aiosqlite
@@ -179,7 +180,9 @@ class SettingsRepository:
                 await db.execute(
                     """
                     UPDATE proxy_pool
-                    SET proxy_url = ?, note = ?, last_check_ok = NULL, last_check_at = NULL
+                    SET proxy_url = ?, note = ?, last_check_ok = NULL, last_check_at = NULL,
+                        success_count = 0, failure_count = 0, consecutive_failures = 0,
+                        success_rate = 0.5, cooldown_until = NULL
                     WHERE id = ?
                     """,
                     (proxy_url, note, entry_id),
@@ -234,6 +237,45 @@ class SettingsRepository:
                 query += " AND proxy_url = ?"
                 params.append(expected_proxy_url)
             await db.execute(query, params)
+            await db.commit()
+
+    async def record_proxy_pool_result(
+        self, entry_id: int, expected_proxy_url: str, ok: bool, *, probe: bool = False
+    ) -> None:
+        """Keep health across restarts, without disabling an exit after transient failure."""
+        async with self._database._connect(write=True) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM proxy_pool WHERE id = ? AND proxy_url = ?",
+                (entry_id, expected_proxy_url),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return
+            failures = 0 if ok else row["consecutive_failures"] + 1
+            cooldown = None if ok else row["cooldown_until"]
+            if failures >= 3 and not ok:
+                seconds = min(300, 30 * 2 ** min(failures - 3, 4))
+                cooldown = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+            success_count = row["success_count"] + int(ok and not probe)
+            failure_count = row["failure_count"] + int(not ok and not probe)
+            rate = row["success_rate"] if probe else row["success_rate"] * 0.8 + int(ok) * 0.2
+            await db.execute(
+                "UPDATE proxy_pool SET success_count = ?, failure_count = ?, "
+                "consecutive_failures = ?, success_rate = ?, cooldown_until = ?, "
+                "last_check_ok = ?, last_check_at = ? WHERE id = ? AND proxy_url = ?",
+                (
+                    success_count,
+                    failure_count,
+                    failures,
+                    rate,
+                    cooldown,
+                    int(ok),
+                    datetime.now(timezone.utc).isoformat(),
+                    entry_id,
+                    expected_proxy_url,
+                ),
+            )
             await db.commit()
 
     async def get_generation_config(self) -> Optional[GenerationConfig]:
