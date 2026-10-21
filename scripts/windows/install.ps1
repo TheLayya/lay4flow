@@ -209,6 +209,52 @@ function Assert-ArchiveSafe([string]$Archive) {
   }
 }
 
+function Get-BundleVersion([string]$Archive) {
+  $raw = @(& tar -xOf $Archive VERSION 2>&1)
+  if ($LASTEXITCODE -ne 0) { Stop-WithMessage "Runtime archive VERSION could not be read." }
+  $version = ($raw -join "`n").Trim()
+  if ($version -notmatch '^\d+\.\d+\.\d+$') { Stop-WithMessage "Runtime archive VERSION is invalid: $version" }
+  return $version
+}
+
+function Get-InstalledVersion([string]$Target) {
+  $path = Join-Path $Target "VERSION"
+  if (-not (Test-Path -LiteralPath $path)) { Stop-WithMessage "Existing installation is missing VERSION; reinstall into a new directory or restore its runtime manifest." }
+  $version = (Get-Content -LiteralPath $path -Raw).Trim()
+  if ($version -notmatch '^\d+\.\d+\.\d+$') { Stop-WithMessage "Existing installation VERSION is invalid: $version" }
+  return $version
+}
+
+function Invoke-BundledRuntimeUpdate([string]$Archive, [string]$Checksums, [string]$Version) {
+  $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+  $stage = [IO.Path]::GetFullPath((Join-Path $tempRoot ("lay4flow-updater-" + [guid]::NewGuid().ToString("N"))))
+  if (-not $stage.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw "Updater staging directory is outside the temporary root." }
+  New-Item -ItemType Directory -Force -Path $stage | Out-Null
+  try {
+    & tar -xzf $Archive -C $stage "scripts/update.ps1" "scripts/update_runtime.py"
+    if ($LASTEXITCODE -ne 0) { throw "Runtime archive updater files could not be extracted." }
+    $updater = Join-Path $stage "scripts\update.ps1"
+    $helper = Join-Path $stage "scripts\update_runtime.py"
+    if (-not (Test-Path -LiteralPath $updater) -or -not (Test-Path -LiteralPath $helper)) { throw "Runtime archive is missing its update helper." }
+    Write-InstallLog "Updating existing installation from VERSION $((Get-InstalledVersion $InstallDir)) to $Version."
+    $args = @(
+      "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $updater,
+      "-InstallDir", $InstallDir, "-Version", $Version,
+      "-SourceArchive", $Archive, "-ChecksumFile", $Checksums
+    )
+    $savedErrorAction = $ErrorActionPreference
+    try {
+      $ErrorActionPreference = "Continue"
+      & powershell.exe @args 2>&1 | ForEach-Object { Write-InstallLog ([string]$_) }
+      $exitCode = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $savedErrorAction }
+    if ($exitCode -ne 0) { throw "Existing installation update failed with exit code $exitCode. The runtime updater attempted rollback; see $script:InstallLogPath." }
+  } finally {
+    if (-not ([IO.Path]::GetFullPath($stage)).StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw "Updater cleanup path is outside the temporary root." }
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function New-Shortcut([string]$Path, [string]$Target, [string]$Arguments, [string]$WorkingDirectory) {
   $shell = New-Object -ComObject WScript.Shell
   if (Test-Path -LiteralPath $Path) {
@@ -309,6 +355,7 @@ $actual = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.T
 if ($actual -ne $expected.ToLowerInvariant()) { Stop-WithMessage "Runtime archive checksum verification failed." }
 Write-InstallLog "Verified runtime archive '$($archive.Name)' ($actual)."
 Assert-ArchiveSafe $archive.FullName
+$bundleVersion = Get-BundleVersion $archive.FullName
 Wait-Docker
 $compose = Get-ComposeCommand
 Write-InstallLog "Docker Desktop is ready and Compose is available."
@@ -361,7 +408,19 @@ if (-not (Test-Path -LiteralPath $installEnv)) {
 Write-InstallLog "Installation target: '$InstallDir'; Compose project: '$ProjectName'; port: $Port."
 if (Test-Path -LiteralPath (Join-Path $InstallDir "docker-compose.yml")) {
   Write-Host "An existing installation was found at $InstallDir. Its files and data will be preserved."
-  # Refresh the launcher assets so reinstalling a bundle also updates the shortcut icon.
+  $installedVersion = Get-InstalledVersion $InstallDir
+  if ([version]$bundleVersion -lt [version]$installedVersion) {
+    Stop-WithMessage "This bundle ($bundleVersion) is older than the installed version ($installedVersion). The existing installation was preserved."
+  }
+  if ([version]$bundleVersion -gt [version]$installedVersion) {
+    # Start the retained version before invoking the verified archive's updater;
+    # do not copy desktop assets until health/version and rollback checks finish.
+    & (Join-Path $BundleRoot "windows\start.ps1") -InstallDir $InstallDir -Port $Port -ProjectName $ProjectName -NoBrowser
+    Invoke-BundledRuntimeUpdate $archive.FullName $checksumFile $bundleVersion
+    if ((Get-InstalledVersion $InstallDir) -ne $bundleVersion) { throw "Runtime update finished without applying VERSION $bundleVersion." }
+  }
+  # Same-version reinstall refreshes only launcher assets. Upgrades reach this
+  # point only after the Docker update transaction has completed successfully.
   $windowsDir = Copy-LauncherAssets $BundleRoot $InstallDir
   Remove-LegacyUpdateShortcut (Join-Path ([Environment]::GetFolderPath("Desktop")) "$(Get-ApplicationShortcutName) update.lnk")
   if (-not $NoShortcuts) { New-ApplicationShortcuts $windowsDir }

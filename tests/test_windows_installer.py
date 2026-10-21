@@ -14,6 +14,87 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WindowsBundleTests(unittest.TestCase):
+    def test_existing_install_is_version_gated_before_launcher_refresh(self):
+        source = (ROOT / "scripts/windows/install.ps1").read_text(encoding="utf-8")
+        self.assertIn("Get-BundleVersion", source)
+        self.assertIn("Get-InstalledVersion", source)
+        self.assertIn("Invoke-BundledRuntimeUpdate", source)
+        self.assertIn("older than the installed version", source)
+        self.assertIn("-SourceArchive", source)
+        self.assertIn("-ChecksumFile", source)
+        upgrade_section = source.split(
+            'if (Test-Path -LiteralPath (Join-Path $InstallDir "docker-compose.yml")) {', 1
+        )[1]
+        self.assertLess(
+            upgrade_section.index("Invoke-BundledRuntimeUpdate"),
+            upgrade_section.index("Copy-LauncherAssets"),
+        )
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows bundled runtime upgrade integration")
+    def test_bundled_updater_receives_archive_checksum_and_native_progress(self):
+        powershell = shutil.which("powershell.exe")
+        if powershell is None:
+            self.skipTest("Windows PowerShell is required")
+        with tempfile.TemporaryDirectory(prefix="lay4flow-bundle-upgrade-") as directory:
+            fixture = Path(directory)
+            script = fixture / "verify.ps1"
+            script.write_text(
+                r"""param([string]$RepoRoot, [string]$Fixture)
+$ErrorActionPreference = 'Stop'
+$InstallDir = Join-Path $Fixture 'installed'
+$source = Join-Path $Fixture 'source'
+New-Item -ItemType Directory -Path $InstallDir, (Join-Path $source 'scripts') -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $InstallDir 'VERSION'), '1.3.0')
+[IO.File]::WriteAllText((Join-Path $source 'VERSION'), '1.4.0')
+$updater = @'
+param([string]$InstallDir,[string]$Version,[string]$SourceArchive,[string]$ChecksumFile)
+if ($Version -ne '1.4.0' -or -not (Test-Path -LiteralPath $SourceArchive) -or -not (Test-Path -LiteralPath $ChecksumFile)) { exit 8 }
+[Console]::Error.WriteLine('ordinary candidate build progress')
+[IO.File]::WriteAllText((Join-Path $InstallDir 'VERSION'), $Version)
+exit 0
+'@
+[IO.File]::WriteAllText((Join-Path $source 'scripts\update.ps1'), $updater)
+[IO.File]::WriteAllText((Join-Path $source 'scripts\update_runtime.py'), '# fixture')
+$archive = Join-Path $Fixture 'runtime.tar.gz'
+& tar -czf $archive -C $source VERSION scripts/update.ps1 scripts/update_runtime.py
+if ($LASTEXITCODE -ne 0) { throw 'Fixture archive creation failed.' }
+$checksum = Join-Path $Fixture 'SHA256SUMS'
+[IO.File]::WriteAllText($checksum, 'fixture checksum')
+$script:InstallLogPath = Join-Path $Fixture 'install.log'
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'scripts/windows/install.ps1'), [ref]$tokens, [ref]$errors)
+foreach ($name in @('Write-InstallLog','Stop-WithMessage','Get-BundleVersion','Get-InstalledVersion','Invoke-BundledRuntimeUpdate')) {
+  $definition = $ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}, $false)
+  Invoke-Expression $definition.Extent.Text
+}
+if ((Get-BundleVersion $archive) -ne '1.4.0') { throw 'Bundle version was not read from the runtime archive.' }
+if ((Get-InstalledVersion $InstallDir) -ne '1.3.0') { throw 'Existing version was not retained before upgrade.' }
+Invoke-BundledRuntimeUpdate $archive $checksum '1.4.0'
+if ((Get-InstalledVersion $InstallDir) -ne '1.4.0') { throw 'Bundled runtime updater did not run.' }
+if ((Get-Content -LiteralPath $script:InstallLogPath -Raw) -notmatch 'ordinary candidate build progress') { throw 'Native update progress was lost.' }
+""",
+                encoding="utf-8-sig",
+            )
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script),
+                    "-RepoRoot",
+                    str(ROOT),
+                    "-Fixture",
+                    str(fixture),
+                ],
+                capture_output=True,
+                text=True,
+                errors="replace",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_bundle_has_checksum_and_native_entrypoints(self):
         with tempfile.TemporaryDirectory(prefix="lay4flow-windows-package-check-") as directory:
             output = Path(directory) / "lay4flow-windows.zip"

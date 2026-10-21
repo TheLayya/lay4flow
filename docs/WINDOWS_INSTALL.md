@@ -27,7 +27,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -InstallDi
 .\uninstall.cmd -InstallDir "D:\lay4flow-remote"
 ```
 
-再次运行安装器会保留现有安装并启动原版本。桌面升级从左下角版本号进入「更新日志」，点击「立即更新」即可完成桌面和 Docker 服务更新；不再创建独立 update 桌面快捷方式。仅更新 Docker 服务时，可使用解压包内的 `update.cmd -InstallDir "D:\lay4flow-remote"`。更新先下载并校验固定版本运行包、构建候选镜像，再备份数据并切换容器，健康或版本检查失败则回滚。切换期间会短暂中断服务，进行中的生成任务应先完成。
+再次运行安装器会先比较安装包与现有版本：同版本保留运行文件并刷新桌面启动资产，新版本使用包内已校验的运行包升级 Docker 服务，通过健康与版本检查后再更新桌面资产；旧版本安装包会退出并保留现有安装。桌面升级从左下角版本号进入「更新日志」，点击「立即更新」即可完成桌面和 Docker 服务更新；不再创建独立 update 桌面快捷方式。仅更新 Docker 服务时，可使用解压包内的 `update.cmd -InstallDir "D:\lay4flow-remote"`。更新先校验固定版本运行包、构建候选镜像，再备份数据并切换容器，健康或版本检查失败则回滚。切换期间会短暂中断服务，进行中的生成任务应先完成。
 
 ## 打包
 
