@@ -1,6 +1,6 @@
 # Windows 一键安装
 
-下载 GitHub Releases 中的 `lay4flow-remote-版本-windows-x64.zip`，完整解压后双击 `install.cmd`。安装器会校验内置运行包、构建 Docker 镜像、启动服务，等待健康检查通过后打开管理页，并创建桌面启动与更新快捷方式。默认管理员账号和密码均为 `admin`，登录后在后台修改。
+下载 `lay4flow-remote-版本-windows-x64-setup.exe`，双击安装；也可解压 `lay4flow-remote-版本-windows-x64.zip` 后双击 `install.cmd`。EXE 安装程序和桌面启动、更新快捷方式使用与 TkCRM 相同的头像图标。安装器会校验内置运行包、构建 Docker 镜像、启动服务，等待健康检查通过后打开管理页，并创建桌面启动与更新快捷方式。默认管理员账号和密码均为 `admin`，登录后在后台修改。
 
 首次使用先安装 [Docker Desktop for Windows](https://docs.docker.com/desktop/setup/install/windows-install/)，启用 WSL 2 和 Linux containers，完成 Docker Desktop 的初始设置。安装器会尝试启动已安装的 Docker Desktop；安装包依赖 Docker，不要求主机安装 Python、Node 或 Git。首次构建需要联网下载基础镜像和依赖，后续启动直接复用已有镜像。
 
@@ -29,6 +29,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -InstallDi
 
 ```powershell
 python scripts/package_windows.py dist/lay4flow-remote-1.2.0-windows-x64.zip
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_setup.ps1 -BundleZip dist/lay4flow-remote-1.2.0-windows-x64.zip -OutputDir dist/setup
 ```
 
-ZIP 使用公开运行时白名单，包含 MIT 和 NOTICE，不包含本机账号、密码、数据库、浏览器 Profile、日志或生成内容。`runtime/SHA256SUMS` 校验内置运行包；整个 ZIP 的 SHA-256 由打包命令输出，并随 Release 发布。当前安装包为原生 PowerShell / CMD 引导包，依赖 Docker Desktop，没有 EXE 代码签名。
+ZIP 使用公开运行时白名单，包含 MIT 和 NOTICE，不包含本机账号、密码、数据库、浏览器 Profile、日志或生成内容。`runtime/SHA256SUMS` 校验内置运行包；整个 ZIP 的 SHA-256 由打包命令输出，并随 Release 发布。EXE 使用 Inno Setup 6 包装同一份运行包，依赖 Docker Desktop，当前未做 Authenticode 签名。

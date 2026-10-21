@@ -10,6 +10,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
 
 function Stop-WithMessage([string]$Message) {
   throw $Message
@@ -96,6 +98,8 @@ function New-Shortcut([string]$Path, [string]$Target, [string]$Arguments, [strin
   $shortcut.TargetPath = $Target
   $shortcut.Arguments = $Arguments
   $shortcut.WorkingDirectory = $WorkingDirectory
+  $icon = Join-Path $WorkingDirectory ".lay4flow-windows\tkcrm.ico"
+  if (Test-Path -LiteralPath $icon) { $shortcut.IconLocation = "$icon,0" }
   $shortcut.Description = "lay4flow-remote"
   $shortcut.Save()
 }
@@ -124,6 +128,12 @@ Wait-Docker
 $compose = Get-ComposeCommand
 
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
+$protectedRoots = @($env:WINDIR, [IO.Path]::GetPathRoot($InstallDir))
+foreach ($protectedRoot in $protectedRoots) {
+  if ($protectedRoot -and $InstallDir.TrimEnd('\') -eq ([IO.Path]::GetFullPath($protectedRoot)).TrimEnd('\')) {
+    Stop-WithMessage "Choose an application folder as InstallDir; system and drive roots are not installation targets."
+  }
+}
 $installEnv = Join-Path $InstallDir ".env"
 if ((Test-Path -LiteralPath $installEnv) -and -not $PSBoundParameters.ContainsKey("ProjectName")) {
   $projectMatch = Select-String -LiteralPath $installEnv -Pattern '^COMPOSE_PROJECT_NAME=([a-z0-9][a-z0-9_-]{0,62})$' | Select-Object -First 1
@@ -133,8 +143,8 @@ $ownedContainers = @(& docker ps -aq --filter "label=com.docker.compose.project=
 if ($LASTEXITCODE -ne 0) { Stop-WithMessage "Docker container ownership inspection failed." }
 foreach ($id in $ownedContainers) {
   if (-not $id) { continue }
-  $inspection = @(& docker inspect $id | ConvertFrom-Json)
-  $owner = [string]$inspection[0].Config.Labels.'com.docker.compose.project.working_dir'
+  $labels = (& docker inspect --format '{{json .Config.Labels}}' $id | ConvertFrom-Json)
+  $owner = [string]$labels.'com.docker.compose.project.working_dir'
   if ($LASTEXITCODE -ne 0 -or -not $owner) { Stop-WithMessage "The Compose project $ProjectName already exists; choose another ProjectName." }
   if ([IO.Path]::GetFullPath($owner).TrimEnd('\') -ne $InstallDir.TrimEnd('\')) {
     Stop-WithMessage "Compose project '$ProjectName' belongs to '$owner'. Choose a different ProjectName or use that existing installation."
@@ -142,6 +152,18 @@ foreach ($id in $ownedContainers) {
 }
 if (Test-Path -LiteralPath (Join-Path $InstallDir "docker-compose.yml")) {
   Write-Host "An existing installation was found at $InstallDir. Its files and data will be preserved."
+  # Refresh the launcher assets so reinstalling a bundle also updates the shortcut icon.
+  $bundleWindows = Join-Path $BundleRoot "windows"
+  $windowsDir = Join-Path $InstallDir ".lay4flow-windows"
+  New-Item -ItemType Directory -Force -Path $windowsDir | Out-Null
+  Get-ChildItem -LiteralPath $bundleWindows -File | Copy-Item -Destination $windowsDir -Force
+  if (-not $NoShortcuts) {
+    $desktop = [Environment]::GetFolderPath("Desktop")
+    $ps = (Get-Command powershell.exe).Source
+    $shortcutName = if ($ProjectName -eq "lay4flow-remote") { "lay4flow-remote" } else { "lay4flow-remote ($ProjectName)" }
+    New-Shortcut (Join-Path $desktop "$shortcutName.lnk") $ps "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$windowsDir\start.ps1`" -InstallDir `"$InstallDir`" -Port $Port -ProjectName $ProjectName" $InstallDir
+    New-Shortcut (Join-Path $desktop "$shortcutName update.lnk") $ps "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$windowsDir\update.ps1`" -InstallDir `"$InstallDir`"" $InstallDir
+  }
   & (Join-Path $BundleRoot "windows\start.ps1") -InstallDir $InstallDir -Port $Port -ProjectName $ProjectName -NoBrowser:$NoBrowser
   exit 0
 }

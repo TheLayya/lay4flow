@@ -5,6 +5,8 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 $compose = Join-Path $InstallDir "docker-compose.yml"
 if (-not (Test-Path -LiteralPath $compose)) { throw "lay4flow-remote is not installed at $InstallDir." }
@@ -17,8 +19,8 @@ $ownedContainers = @(& docker ps -aq --filter "label=com.docker.compose.project=
 if ($LASTEXITCODE -ne 0) { throw "Docker container ownership inspection failed." }
 foreach ($id in $ownedContainers) {
   if (-not $id) { continue }
-  $inspection = @(& docker inspect $id | ConvertFrom-Json)
-  $owner = [string]$inspection[0].Config.Labels.'com.docker.compose.project.working_dir'
+  $labels = (& docker inspect --format '{{json .Config.Labels}}' $id | ConvertFrom-Json)
+  $owner = [string]$labels.'com.docker.compose.project.working_dir'
   if ($LASTEXITCODE -ne 0 -or -not $owner -or [IO.Path]::GetFullPath($owner).TrimEnd('\') -ne $InstallDir.TrimEnd('\')) {
     throw "Compose project '$ProjectName' belongs to another installation."
   }

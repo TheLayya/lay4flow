@@ -26,6 +26,7 @@ python scripts/build_release.py dist/1.2.0
 
 - `lay4flow-remote-版本-runtime.tar.gz`：Docker 更新用公开运行文件。
 - `lay4flow-remote-版本-windows-x64.zip`：双击 `install.cmd` 的 Windows / Docker Desktop 安装包。
+- `lay4flow-remote-版本-windows-x64-setup.exe`：使用同一运行包的 Inno Setup 安装 EXE，安装文件和桌面快捷方式沿用 TkCRM 头像图标。
 - `SHA256SUMS`：两份最终资产的 SHA-256。
 - `release-notes.md`：从本版更新记录提取的 Release 正文。
 - `build-manifest.json`：本地来源提交、文件清单、大小和摘要证据；脏工作区候选不作为正式发布来源。

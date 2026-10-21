@@ -4,6 +4,7 @@
 
 ### 新增
 
+- Windows 安装 EXE、安装包图标与桌面启动/更新快捷方式统一使用 TkCRM 的同款头像图标。
 - 提供 Windows 一键安装包：解压后双击 `install.cmd`，自动检查 Docker Desktop、初始化示例配置、启动服务并创建桌面启动/更新快捷方式；已有 `data/`、`tmp/`、`.env` 和 `config/setting.toml` 会保留。
 - 提供 Docker 在线更新脚本，下载运行包后先校验 SHA-256，再隔离构建、健康检查和版本确认；失败自动恢复上一镜像，支持显式回滚。
 - 设置页新增版本与更新记录卡片，可查看本地变更、打开 Windows/Docker 指引并手动查询 GitHub 发布页。查询失败不影响创作任务。

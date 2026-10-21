@@ -31,7 +31,7 @@ def package_windows(root: Path, output: Path, runtime_archive: Path | None = Non
         runtime_name = runtime_path.name
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for path in sorted((root / "scripts/windows").glob("*")):
-                if path.is_file() and path.suffix in {".cmd", ".ps1"}:
+                if path.is_file() and path.suffix in {".cmd", ".ps1", ".ico"}:
                     archive.write(path, f"{bundle_name}/windows/{path.name}")
             archive.write(root / "scripts/windows/install.cmd", f"{bundle_name}/install.cmd")
             archive.write(root / "scripts/windows/install.ps1", f"{bundle_name}/install.ps1")
