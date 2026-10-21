@@ -4,7 +4,9 @@
 
 首次使用先安装 [Docker Desktop for Windows](https://docs.docker.com/desktop/setup/install/windows-install/)，启用 WSL 2 和 Linux containers，完成 Docker Desktop 的初始设置。安装器会尝试启动已安装的 Docker Desktop；安装包依赖 Docker，不要求主机安装 Python、Node 或 Git。首次构建需要联网下载基础镜像和依赖，后续启动直接复用已有镜像。
 
-默认安装目录为 `%LOCALAPPDATA%\lay4flow-remote`，本机访问地址为 `http://127.0.0.1:38000`。服务仅监听本机，安装器也会检查实际运行版本。端口占用时可在 PowerShell 指定目录和端口：
+默认安装目录为 `%LOCALAPPDATA%\lay4flow-remote`，本机地址默认 `http://127.0.0.1:38000`。EXE 安装时若已有同名 Docker 项目，会为新目录选择独立项目；默认端口被占用时选择下一个可用端口，结果保存在安装目录 `.env` 和日志中。服务仅监听本机。也可在 PowerShell 指定目录和端口：
+
+安装失败时，安装器会显示具体原因并打开完整 PowerShell/Docker 日志：`%TEMP%\lay4flow-remote-install.log`。已创建安装目录时也保留 `.lay4flow-install.log`。手工指定的项目名或端口发生冲突时会退出并提示，原实例与数据保持原位。
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir "D:\lay4flow-remote" -Port 38001
@@ -28,8 +30,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -InstallDi
 维护者先构建前端并通过项目检查，再运行：
 
 ```powershell
-python scripts/package_windows.py dist/lay4flow-remote-1.2.0-windows-x64.zip
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_setup.ps1 -BundleZip dist/lay4flow-remote-1.2.0-windows-x64.zip -OutputDir dist/setup
+python scripts/package_windows.py dist/lay4flow-remote-1.2.1-windows-x64.zip
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_setup.ps1 -BundleZip dist/lay4flow-remote-1.2.1-windows-x64.zip -OutputDir dist/setup
 ```
 
 ZIP 使用公开运行时白名单，包含 MIT 和 NOTICE，不包含本机账号、密码、数据库、浏览器 Profile、日志或生成内容。`runtime/SHA256SUMS` 校验内置运行包；整个 ZIP 的 SHA-256 由打包命令输出，并随 Release 发布。EXE 使用 Inno Setup 6 包装同一份运行包，依赖 Docker Desktop，当前未做 Authenticode 签名。

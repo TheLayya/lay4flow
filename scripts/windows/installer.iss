@@ -37,6 +37,27 @@ Source: "{#BundleDir}\*"; DestDir: "{tmp}\lay4flow-remote-bundle"; Flags: recurs
 [Code]
 var
   InstallFailure: Integer;
+  InstallLogPath: String;
+
+procedure ReportInstallFailure(const Message: String);
+var
+  ErrorCode: Integer;
+  ErrorLines: TArrayOfString;
+  Details: String;
+begin
+  Details := Message;
+  if LoadStringsFromFile(InstallLogPath + '.error.txt', ErrorLines) then
+    if GetArrayLength(ErrorLines) > 0 then
+      Details := ErrorLines[0];
+  Log(Details);
+  WizardForm.FinishedLabel.Caption := 'Installation did not complete.' + #13#10#13#10 + Details + #13#10#13#10 + 'Install log: ' + InstallLogPath;
+  WizardForm.FinishedHeadingLabel.Caption := 'Installation needs attention';
+  if not WizardSilent then begin
+    if FileExists(InstallLogPath) then
+      ShellExec('', ExpandConstant('{sys}\notepad.exe'), '"' + InstallLogPath + '"', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
+    MsgBox(Details + #13#10#13#10 + 'Install log: ' + InstallLogPath, mbError, MB_OK);
+  end;
+end;
 
 function GetCustomSetupExitCode: Integer;
 begin
@@ -53,18 +74,23 @@ begin
     ExpandConstant('{tmp}\lay4flow-remote-bundle\install.ps1') +
     '" -BundleRoot "' + ExpandConstant('{tmp}\lay4flow-remote-bundle') +
     '" -InstallDir "' + ExpandConstant('{app}') + '"';
-  Parameters := Parameters + ' -Port ' + ExpandConstant('{param:LAYPORT|38000}') +
-    ' -ProjectName "' + ExpandConstant('{param:LAYPROJECT|lay4flow-remote}') + '"';
+  if ExpandConstant('{param:LAYPORT|}') <> '' then
+    Parameters := Parameters + ' -Port ' + ExpandConstant('{param:LAYPORT|}');
+  if ExpandConstant('{param:LAYPROJECT|}') <> '' then
+    Parameters := Parameters + ' -ProjectName "' + ExpandConstant('{param:LAYPROJECT|}') + '"';
+  InstallLogPath := AddBackslash(GetEnv('TEMP')) + 'lay4flow-remote-install.log';
+  Parameters := Parameters + ' -LogPath "' + InstallLogPath + '" -ResolveConflicts';
   if WizardSilent then Parameters := Parameters + ' -NoBrowser -NoShortcuts';
   Log('Starting Docker install in ' + ExpandConstant('{app}'));
   if not ExecAndLogOutput(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
       Parameters, '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode, nil) then
   begin
     InstallFailure := 1;
-    RaiseException('PowerShell installation could not be started.');
+    ReportInstallFailure('PowerShell installation could not be started.');
+    Exit;
   end;
   if ResultCode <> 0 then begin
     InstallFailure := ResultCode;
-    RaiseException('Installation failed. Review the PowerShell output and retry. Code: ' + IntToStr(ResultCode));
+    ReportInstallFailure('PowerShell installer failed with code ' + IntToStr(ResultCode));
   end;
 end;

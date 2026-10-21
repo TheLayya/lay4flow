@@ -82,6 +82,130 @@ if ($errors.Count) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1
             text=True,
         )
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows PowerShell diagnostic integration")
+    def test_failure_log_contains_current_error_and_does_not_create_installation(self):
+        powershell = shutil.which("powershell.exe")
+        if powershell is None:
+            self.skipTest("Windows PowerShell is required")
+        with tempfile.TemporaryDirectory(prefix="lay4flow-install-error-") as directory:
+            fixture = Path(directory)
+            log = fixture / "install.log"
+            target = fixture / "untouched-install"
+            command = [
+                powershell,
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ROOT / "scripts/windows/install.ps1"),
+                "-InstallDir",
+                str(target),
+                "-LogPath",
+                str(log),
+                "-NoBrowser",
+                "-NoShortcuts",
+            ]
+            first = subprocess.run(
+                command + ["-Port", "0"], capture_output=True, text=True, errors="replace"
+            )
+            self.assertNotEqual(first.returncode, 0)
+            error_file = Path(str(log) + ".error.txt")
+            self.assertTrue(error_file.read_bytes().startswith(b"\xef\xbb\xbf"))
+            self.assertEqual(
+                error_file.read_text(encoding="utf-8-sig").splitlines()[0],
+                "Port must be between 1 and 65535.",
+            )
+            second = subprocess.run(
+                command + ["-ProjectName", "INVALID"],
+                capture_output=True,
+                text=True,
+                errors="replace",
+            )
+            self.assertNotEqual(second.returncode, 0)
+            self.assertTrue(
+                error_file.read_text(encoding="utf-8-sig").startswith("ProjectName must use ")
+            )
+            self.assertNotIn("Port must be between", log.read_text(encoding="utf-8-sig"))
+            self.assertFalse(target.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows native stderr and ownership integration")
+    def test_native_progress_uses_exit_status_and_project_owner_is_preserved(self):
+        powershell = shutil.which("powershell.exe")
+        if powershell is None:
+            self.skipTest("Windows PowerShell is required")
+        with tempfile.TemporaryDirectory(prefix="lay4flow-install-native-") as directory:
+            fixture = Path(directory)
+            script = fixture / "check.ps1"
+            script.write_text(
+                r"""param([string]$RepoRoot, [string]$Fixture)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$script:InstallLogPath = Join-Path $Fixture 'install.log'
+$script:LastCommand = ''
+$InstallDir = Join-Path $Fixture 'new-install'
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'scripts/windows/install.ps1'), [ref]$tokens, [ref]$errors)
+foreach ($name in @('Write-InstallLog', 'Invoke-Compose', 'Stop-WithMessage', 'Get-ProjectOwner', 'Test-PortAvailable')) {
+  $definition = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $false)
+  Invoke-Expression $definition.Extent.Text
+}
+$native = (Get-Command powershell.exe).Source
+Invoke-Compose @($native) @('-NoLogo', '-NoProfile', '-Command', "[Console]::Error.WriteLine('ordinary build progress'); exit 0")
+$failureSeen = $false
+try {
+  Invoke-Compose @($native) @('-NoLogo', '-NoProfile', '-Command', "[Console]::Error.WriteLine('synthetic build failure'); exit 7")
+} catch {
+  if ($_.Exception.Message -notmatch 'exit code 7') { throw }
+  $failureSeen = $true
+}
+if (-not $failureSeen) { throw 'A real native command failure was ignored.' }
+$log = Get-Content -LiteralPath $script:InstallLogPath -Raw -Encoding utf8
+if ($log -notmatch 'ordinary build progress' -or $log -notmatch 'Command exit code: 0' -or $log -notmatch 'Command exit code: 7') { throw 'Native progress and exit status were not retained.' }
+$script:MockOwner = Join-Path $Fixture 'existing-install'
+function docker {
+  param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)
+  $global:LASTEXITCODE = 0
+  if ($Arguments[0] -eq 'ps') { return 'fixture-container' }
+  if ($Arguments[0] -eq 'inspect') {
+    return (@{'com.docker.compose.project.working_dir' = $script:MockOwner} | ConvertTo-Json -Compress)
+  }
+  throw 'Unexpected mock Docker command.'
+}
+if ((Get-ProjectOwner 'lay4flow-remote') -ne $script:MockOwner) { throw 'The foreign Compose installation was not identified.' }
+$script:MockOwner = $InstallDir
+if (Get-ProjectOwner 'lay4flow-remote') { throw 'The same installation was incorrectly treated as foreign.' }
+$listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0)
+try {
+  $listener.Start()
+  $occupied = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+  if (Test-PortAvailable $occupied) { throw 'An occupied port was reported as available.' }
+} finally { $listener.Stop() }
+Write-Output 'Native Docker progress, exit status and ownership checks passed.'
+""",
+                encoding="utf-8-sig",
+            )
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script),
+                    "-RepoRoot",
+                    str(ROOT),
+                    "-Fixture",
+                    str(fixture),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                errors="replace",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(sys.platform == "win32", "Windows Shell shortcut integration")
     def test_shortcut_icon_is_saved_and_refreshed_without_changing_foreign_shortcuts(self):
         powershell = shutil.which("powershell.exe")

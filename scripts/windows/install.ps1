@@ -5,13 +5,61 @@ param(
   [int]$Port = 38000,
   [switch]$NoBrowser,
   [switch]$NoShortcuts,
-  [string]$ProjectName = "lay4flow-remote"
+  [string]$ProjectName = "lay4flow-remote",
+  [switch]$ResolveConflicts,
+  [string]$LogPath = (Join-Path ([IO.Path]::GetTempPath()) "lay4flow-remote-install.log")
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 $OutputEncoding = [Console]::OutputEncoding
+$script:InstallLogPath = [IO.Path]::GetFullPath($LogPath)
+$script:LastCommand = ""
+$script:InstallPathValidated = $false
+
+function Write-InstallLog([string]$Message) {
+  $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"), $Message
+  try {
+    $parent = Split-Path -Parent $script:InstallLogPath
+    if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+    Add-Content -LiteralPath $script:InstallLogPath -Value $line -Encoding utf8
+  } catch {
+    # Logging must never hide the original installation error.
+  }
+  Write-Host $Message
+}
+
+function Copy-InstallLogToTarget {
+  try {
+    if (-not $script:InstallPathValidated -or -not $InstallDir -or -not (Test-Path -LiteralPath $InstallDir -PathType Container)) { return }
+    $target = Join-Path ([IO.Path]::GetFullPath($InstallDir)) ".lay4flow-install.log"
+    $parent = Split-Path -Parent $target
+    if (Test-Path -LiteralPath $script:InstallLogPath) {
+      Copy-Item -LiteralPath $script:InstallLogPath -Destination $target -Force
+    }
+  } catch {
+    # The temp log remains the authoritative diagnostic when the target is unavailable.
+  }
+}
+
+function Write-InstallError([System.Management.Automation.ErrorRecord]$ErrorRecord) {
+  $message = @(
+    $ErrorRecord.Exception.Message,
+    "Command: $script:LastCommand",
+    "Location: $($ErrorRecord.InvocationInfo.PositionMessage)",
+    "Details:",
+    ($ErrorRecord | Out-String)
+  ) -join [Environment]::NewLine
+  try {
+    Add-Content -LiteralPath $script:InstallLogPath -Value $message -Encoding utf8
+    Set-Content -LiteralPath ($script:InstallLogPath + ".error.txt") -Value $message -Encoding utf8
+  } catch {
+    Write-Host "Could not write the installation diagnostic log: $($_.Exception.Message)"
+  }
+  Copy-InstallLogToTarget
+  Write-Host ("ERROR: $($ErrorRecord.Exception.Message) Diagnostic log: $script:InstallLogPath")
+}
 
 function Stop-WithMessage([string]$Message) {
   throw $Message
@@ -34,15 +82,91 @@ function Invoke-Compose([string[]]$Compose, [string[]]$Arguments) {
   $args = @()
   if ($Compose.Count -gt 1) { $args += $Compose[1..($Compose.Count - 1)] }
   $args += $Arguments
-  & $command @args
-  if ($LASTEXITCODE -ne 0) { throw "Docker Compose failed with exit code $LASTEXITCODE." }
+  $display = $command + " " + ($args -join " ")
+  $script:LastCommand = $display
+  Write-InstallLog "Running: $display"
+  # Docker writes normal build progress to stderr. Windows PowerShell must use
+  # the native process exit code, rather than treating progress as a failure.
+  $savedErrorAction = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    & $command @args 2>&1 | ForEach-Object { Write-InstallLog ([string]$_) }
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $savedErrorAction
+  }
+  Write-InstallLog "Command exit code: $exitCode"
+  if ($exitCode -ne 0) { throw "Docker Compose failed with exit code $exitCode. See $script:InstallLogPath." }
 }
 
 function Test-DockerReady {
-  & docker info *> $null
-  if ($LASTEXITCODE -ne 0) { return $false }
-  $osType = (& docker info --format '{{.OSType}}' 2>$null).Trim()
-  return $LASTEXITCODE -eq 0 -and $osType -eq "linux"
+  $savedErrorAction = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    & docker info *> $null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    $osType = [string](& docker info --format '{{.OSType}}' 2>$null)
+    return $LASTEXITCODE -eq 0 -and $osType.Trim() -eq "linux"
+  } finally {
+    $ErrorActionPreference = $savedErrorAction
+  }
+}
+
+function Get-ProjectOwner([string]$Name) {
+  $script:LastCommand = "docker ps -aq --filter label=com.docker.compose.project=$Name"
+  $savedErrorAction = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $ids = @(& docker ps -aq --filter "label=com.docker.compose.project=$Name" 2>&1)
+    $listExit = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $savedErrorAction
+  }
+  if ($listExit -ne 0) {
+    Write-InstallLog (($ids | Out-String).Trim())
+    Stop-WithMessage "Docker container ownership inspection failed (exit code $listExit). See $script:InstallLogPath."
+  }
+  foreach ($id in $ids) {
+    if (-not $id) { continue }
+    $script:LastCommand = "docker inspect --format {{json .Config.Labels}} $id"
+    try {
+      $ErrorActionPreference = "Continue"
+      $rawLabels = @(& docker inspect --format '{{json .Config.Labels}}' $id 2>&1)
+      $inspectExit = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $savedErrorAction
+    }
+    if ($inspectExit -ne 0) {
+      Write-InstallLog (($rawLabels | Out-String).Trim())
+      Stop-WithMessage "Docker ownership inspection failed for container '$id' (exit code $inspectExit). See $script:InstallLogPath."
+    }
+    try {
+      $labels = (($rawLabels -join "`n") | ConvertFrom-Json)
+      $ownerProperty = $labels.PSObject.Properties['com.docker.compose.project.working_dir']
+      $owner = if ($ownerProperty) { [string]$ownerProperty.Value } else { "" }
+    } catch {
+      Write-InstallLog (($rawLabels | Out-String).Trim())
+      Stop-WithMessage "Docker returned malformed ownership metadata for container '$id'. See $script:InstallLogPath."
+    }
+    if (-not $owner) {
+      Stop-WithMessage "Compose project '$Name' already exists but has no working directory label. Choose -ProjectName lay4flow-remote-new. See $script:InstallLogPath."
+    }
+    if ([IO.Path]::GetFullPath($owner).TrimEnd('\') -ine $InstallDir.TrimEnd('\')) { return $owner }
+  }
+  return ""
+}
+
+function Test-PortAvailable([int]$Value) {
+  $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $Value)
+  try {
+    $listener.Server.ExclusiveAddressUse = $true
+    $listener.Start()
+    return $true
+  } catch {
+    return $false
+  } finally {
+    $listener.Stop()
+  }
 }
 
 function Wait-Docker([int]$Seconds = 120) {
@@ -104,10 +228,20 @@ function New-Shortcut([string]$Path, [string]$Target, [string]$Arguments, [strin
   $shortcut.Save()
 }
 
+try {
+$logParent = Split-Path -Parent $script:InstallLogPath
+if ($logParent) { New-Item -ItemType Directory -Force -Path $logParent | Out-Null }
+Set-Content -LiteralPath $script:InstallLogPath -Value "lay4flow-remote installer diagnostic" -Encoding utf8
+if (Test-Path -LiteralPath ($script:InstallLogPath + ".error.txt")) {
+  Remove-Item -LiteralPath ($script:InstallLogPath + ".error.txt") -Force
+}
+Write-InstallLog "Starting lay4flow-remote installation. BundleRoot='$BundleRoot'; InstallDir='$InstallDir'; ProjectName='$ProjectName'; Port=$Port."
 if ($Port -lt 1 -or $Port -gt 65535) { Stop-WithMessage "Port must be between 1 and 65535." }
 if (-not [Environment]::Is64BitOperatingSystem) { Stop-WithMessage "Windows x64 is required for this bundle." }
-if ($ProjectName -notmatch '^[a-z0-9][a-z0-9_-]{0,62}$') { Stop-WithMessage "ProjectName must use lowercase letters, numbers, hyphens or underscores." }
+if ($ProjectName -cnotmatch '^[a-z0-9][a-z0-9_-]{0,62}$') { Stop-WithMessage "ProjectName must use lowercase letters, numbers, hyphens or underscores." }
+if (-not $BundleRoot) { $BundleRoot = $PSScriptRoot }
 $BundleRoot = (Resolve-Path -LiteralPath $BundleRoot).Path
+Write-InstallLog "Resolved BundleRoot='$BundleRoot'."
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
   Write-Host "Install Docker Desktop: https://docs.docker.com/desktop/setup/install/windows-install/"
   if (-not $NoBrowser) { Start-Process "https://docs.docker.com/desktop/setup/install/windows-install/" }
@@ -123,9 +257,11 @@ if (-not $checksumLine) { Stop-WithMessage "The runtime checksum entry is missin
 $expected = ($checksumLine -split '\s+')[0]
 $actual = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actual -ne $expected.ToLowerInvariant()) { Stop-WithMessage "Runtime archive checksum verification failed." }
+Write-InstallLog "Verified runtime archive '$($archive.Name)' ($actual)."
 Assert-ArchiveSafe $archive.FullName
 Wait-Docker
 $compose = Get-ComposeCommand
+Write-InstallLog "Docker Desktop is ready and Compose is available."
 
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 $protectedRoots = @($env:WINDIR, [IO.Path]::GetPathRoot($InstallDir))
@@ -134,22 +270,45 @@ foreach ($protectedRoot in $protectedRoots) {
     Stop-WithMessage "Choose an application folder as InstallDir; system and drive roots are not installation targets."
   }
 }
+$script:InstallPathValidated = $true
 $installEnv = Join-Path $InstallDir ".env"
+if (Test-Path -LiteralPath $installEnv) {
+  $portMatch = Select-String -LiteralPath $installEnv -Pattern '^LAY4FLOW_REMOTE_PORT=(\d+)' | Select-Object -First 1
+  if ($portMatch) { $Port = [int]$portMatch.Matches[0].Groups[1].Value }
+}
 if ((Test-Path -LiteralPath $installEnv) -and -not $PSBoundParameters.ContainsKey("ProjectName")) {
   $projectMatch = Select-String -LiteralPath $installEnv -Pattern '^COMPOSE_PROJECT_NAME=([a-z0-9][a-z0-9_-]{0,62})$' | Select-Object -First 1
   if ($projectMatch) { $ProjectName = $projectMatch.Matches[0].Groups[1].Value }
 }
-$ownedContainers = @(& docker ps -aq --filter "label=com.docker.compose.project=$ProjectName")
-if ($LASTEXITCODE -ne 0) { Stop-WithMessage "Docker container ownership inspection failed." }
-foreach ($id in $ownedContainers) {
-  if (-not $id) { continue }
-  $labels = (& docker inspect --format '{{json .Config.Labels}}' $id | ConvertFrom-Json)
-  $owner = [string]$labels.'com.docker.compose.project.working_dir'
-  if ($LASTEXITCODE -ne 0 -or -not $owner) { Stop-WithMessage "The Compose project $ProjectName already exists; choose another ProjectName." }
-  if ([IO.Path]::GetFullPath($owner).TrimEnd('\') -ne $InstallDir.TrimEnd('\')) {
-    Stop-WithMessage "Compose project '$ProjectName' belongs to '$owner'. Choose a different ProjectName or use that existing installation."
+$projectOwner = Get-ProjectOwner $ProjectName
+if ($projectOwner) {
+  if ($ResolveConflicts -and -not $PSBoundParameters.ContainsKey("ProjectName") -and -not (Test-Path -LiteralPath $installEnv)) {
+    $hashAlgorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+      $pathHash = ([BitConverter]::ToString($hashAlgorithm.ComputeHash([Text.Encoding]::UTF8.GetBytes($InstallDir.ToLowerInvariant())))).Replace('-', '').ToLowerInvariant().Substring(0, 8)
+    } finally {
+      $hashAlgorithm.Dispose()
+    }
+    Write-InstallLog "Compose project '$ProjectName' is already used by '$projectOwner'; preserving it and selecting an independent project."
+    $ProjectName = "lay4flow-remote-$pathHash"
+    $projectOwner = Get-ProjectOwner $ProjectName
+  }
+  if ($projectOwner) {
+    Stop-WithMessage "Compose project '$ProjectName' belongs to '$projectOwner'. This installer targets '$InstallDir'. Choose -ProjectName lay4flow-remote-new or install into '$projectOwner'. See $script:InstallLogPath."
   }
 }
+if (-not (Test-Path -LiteralPath $installEnv)) {
+  if (-not (Test-PortAvailable $Port)) {
+    if (-not $ResolveConflicts -or $PSBoundParameters.ContainsKey("Port")) {
+      Stop-WithMessage "Port $Port is already in use. Choose an unused -Port, for example -Port 38002. See $script:InstallLogPath."
+    }
+    $originalPort = $Port
+    while ($Port -le 65535 -and -not (Test-PortAvailable $Port)) { $Port++ }
+    if ($Port -gt 65535) { Stop-WithMessage "No available local port was found from $originalPort through 65535." }
+    Write-InstallLog "Port $originalPort is already in use; selecting available port $Port."
+  }
+}
+Write-InstallLog "Installation target: '$InstallDir'; Compose project: '$ProjectName'; port: $Port."
 if (Test-Path -LiteralPath (Join-Path $InstallDir "docker-compose.yml")) {
   Write-Host "An existing installation was found at $InstallDir. Its files and data will be preserved."
   # Refresh the launcher assets so reinstalling a bundle also updates the shortcut icon.
@@ -165,7 +324,9 @@ if (Test-Path -LiteralPath (Join-Path $InstallDir "docker-compose.yml")) {
     New-Shortcut (Join-Path $desktop "$shortcutName update.lnk") $ps "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$windowsDir\update.ps1`" -InstallDir `"$InstallDir`"" $InstallDir
   }
   & (Join-Path $BundleRoot "windows\start.ps1") -InstallDir $InstallDir -Port $Port -ProjectName $ProjectName -NoBrowser:$NoBrowser
-  exit 0
+  Write-InstallLog "Existing installation was started successfully."
+  Copy-InstallLogToTarget
+  return
 }
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $stage = Join-Path ([IO.Path]::GetTempPath()) ("lay4flow-runtime-" + [guid]::NewGuid().ToString("N"))
@@ -215,9 +376,15 @@ try {
     New-Shortcut (Join-Path $desktop "$shortcutName update.lnk") $ps "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$windowsDir\update.ps1`" -InstallDir `"$InstallDir`"" $InstallDir
   }
   Write-Host "lay4flow-remote is installed at $InstallDir"
+  Write-InstallLog "lay4flow-remote is installed at $InstallDir."
+  Copy-InstallLogToTarget
   if (-not $NoBrowser) {
     & (Join-Path $windowsDir "start.ps1") -InstallDir $InstallDir -Port $Port -ProjectName $ProjectName -AlreadyStarted
   }
 } finally {
   Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+}
+} catch {
+  Write-InstallError $_
+  throw
 }

@@ -15,10 +15,18 @@ $compose = Join-Path $InstallDir "docker-compose.yml"
 if (-not (Test-Path -LiteralPath $compose)) { throw "lay4flow-remote is not installed at $InstallDir." }
 if ($ProjectName -notmatch '^[a-z0-9][a-z0-9_-]{0,62}$') { throw "ProjectName is invalid." }
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw "Docker Desktop is required. Install it and retry." }
-& docker info *> $null
-if ($LASTEXITCODE -ne 0) { throw "Docker Desktop is not running. Start it and retry." }
-$osType = (& docker info --format '{{.OSType}}' 2>$null).Trim()
-if ($LASTEXITCODE -ne 0 -or $osType -ne "linux") { throw "Docker Desktop must use Linux containers (WSL 2 engine)." }
+$savedErrorAction = $ErrorActionPreference
+try {
+  $ErrorActionPreference = "Continue"
+  & docker info *> $null
+  $infoExit = $LASTEXITCODE
+  $osType = [string](& docker info --format '{{.OSType}}' 2>$null)
+  $osTypeExit = $LASTEXITCODE
+} finally {
+  $ErrorActionPreference = $savedErrorAction
+}
+if ($infoExit -ne 0) { throw "Docker Desktop is not running. Start it and retry." }
+if ($osTypeExit -ne 0 -or $osType.Trim() -ne "linux") { throw "Docker Desktop must use Linux containers (WSL 2 engine)." }
 $portValue = $Port
 $envPath = Join-Path $InstallDir ".env"
 if (Test-Path -LiteralPath $envPath) {
@@ -40,8 +48,14 @@ foreach ($id in $ownedContainers) {
   }
 }
 if (-not $AlreadyStarted) {
-  & docker compose --project-directory $InstallDir --env-file $envPath -p $ProjectName -f $compose up -d
-  if ($LASTEXITCODE -ne 0) { throw "Docker Compose could not start lay4flow-remote." }
+  try {
+    $ErrorActionPreference = "Continue"
+    & docker compose --project-directory $InstallDir --env-file $envPath -p $ProjectName -f $compose up -d
+    $composeExit = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $savedErrorAction
+  }
+  if ($composeExit -ne 0) { throw "Docker Compose could not start lay4flow-remote (exit code $composeExit)." }
 }
 $expectedVersion = (Get-Content -LiteralPath (Join-Path $InstallDir "VERSION") -Raw).Trim()
 $deadline = (Get-Date).AddSeconds(120)
