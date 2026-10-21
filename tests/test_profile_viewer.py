@@ -371,6 +371,32 @@ class ProfileViewerTests(unittest.IsolatedAsyncioTestCase):
         desktop.detach.assert_awaited_once()
         self.backend.page.goto.assert_awaited_once()
 
+    async def test_native_window_reports_presentation_and_focuses_without_reopening(self):
+        with patch.dict(os.environ, {"LAY4FLOW_PROFILE_PRESENTATION": "native"}):
+            self.viewer = ProfileBrowserViewer(self.token_manager)
+        self.addAsyncCleanup(self.viewer.close_all)
+        self.backend.page.bring_to_front = AsyncMock()
+        desktop = SimpleNamespace(
+            send=AsyncMock(side_effect=[{"windowId": 42}, {}, {"windowId": 42}, {}]),
+            detach=AsyncMock(),
+        )
+        self.backend.context.new_cdp_session = AsyncMock(return_value=desktop)
+        opened = await self.viewer.open(1, "admin")
+        self.assertEqual(opened["presentation"], "native")
+        await self.viewer.focus(1, "admin", opened["viewer_id"])
+        self.assertEqual(self.backend.page.bring_to_front.await_count, 2)
+        self.backend.open.assert_awaited_once()
+        self.backend.close.assert_not_awaited()
+        with self.assertRaises(ViewerError) as wrong_owner:
+            await self.viewer.focus(1, "other", opened["viewer_id"])
+        self.assertEqual(wrong_owner.exception.status, 403)
+        with self.assertRaises(ViewerError) as stale:
+            await self.viewer.focus(1, "admin", "stale")
+        self.assertEqual(stale.exception.status, 409)
+        with self.assertRaises(ViewerError):
+            async with self.viewer.stream_session(1, "admin", opened["viewer_id"]):
+                self.fail("native window was exposed through VNC")
+
     async def test_switch_waits_for_old_account_refresh_and_never_opens_before_close(self):
         second = SimpleNamespace(id=2, email="second@example.com", browser_profile_source="cloak")
         spec = await self.manager.spec(second.email)

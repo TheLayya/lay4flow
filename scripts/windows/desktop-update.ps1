@@ -74,7 +74,7 @@ function Get-VerifiedDesktopCandidate([string]$TargetVersion) {
   if ($entries.Count -ne 1) { throw "The desktop setup checksum entry is missing or ambiguous" }
   $expectedHash = ($entries[0] -split '\s+')[0].ToLowerInvariant()
   Invoke-WebRequest -Uri "$base/$assetName" -OutFile $setupPath -UseBasicParsing -TimeoutSec 600
-  if ((Get-Item -LiteralPath $setupPath).Length -gt 300MB) { throw "The desktop setup exceeds the permitted package size" }
+    if ((Get-Item -LiteralPath $setupPath).Length -gt 1GB) { throw "The desktop setup exceeds the permitted package size" }
   if ((Get-FileHash -LiteralPath $setupPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedHash) { throw "Desktop setup checksum verification failed" }
   Write-UpdateLog "Desktop setup verified."
   return @{ version = $TargetVersion; setup = $setupPath; sha256 = $expectedHash }
@@ -89,11 +89,13 @@ try {
       $Version = ([string]$release.tag_name).TrimStart('v')
     }
     $candidate = Get-VerifiedDesktopCandidate $Version
-    Write-UpdateLog "Updating the service; the current window stays open during preparation."
+    Write-UpdateLog "Preparing the verified desktop and backend update."
     $runtimeUpdater = Join-Path $InstallDir ".lay4flow-windows\update.ps1"
-    if (-not (Test-Path -LiteralPath $runtimeUpdater)) { throw "The Docker updater is missing from this installation" }
-    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $runtimeUpdater -InstallDir $InstallDir -Version $Version
-    if ($LASTEXITCODE -ne 0) { throw "Service update failed; the desktop runtime was preserved" }
+    if (-not (Test-Path -LiteralPath (Join-Path $InstallDir '.lay4flow-windows\backend\windows-x64\python.exe'))) {
+      if (-not (Test-Path -LiteralPath $runtimeUpdater)) { throw "The service updater is missing from this installation" }
+      & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $runtimeUpdater -InstallDir $InstallDir -Version $Version
+      if ($LASTEXITCODE -ne 0) { throw "Service update failed; the desktop runtime was preserved" }
+    }
     [IO.File]::WriteAllText($candidateFile, ($candidate | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
     Write-UpdateLog "The desktop update is ready to apply."
     exit 0

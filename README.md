@@ -97,7 +97,7 @@
 
 ### Windows 一键安装
 
-Windows 双击 `lay4flow-remote-版本-windows-x64-setup.exe` 安装，或解压 ZIP 后双击 **`install.cmd`**。桌面快捷方式启动 **Lay4Flow 独立应用窗口**，在窗口内使用创作工作台；左下角版本号打开 TkCRM 风格的更新日志抽屉，可直接检查并立即更新桌面和 Docker 服务，不再创建独立 update 快捷方式；安装器与桌面程序沿用 TkCRM 同款图标。正式发布资产位于 [GitHub Releases](https://github.com/TheLayya/lay4flow/releases)。需要 [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/) 和 WebView2 Runtime；安装器自动准备配置、构建并启动服务。
+Windows 双击 `lay4flow-remote-版本-windows-x64-setup.exe` 安装，或解压 ZIP 后双击 **`install.cmd`**。**安装包自带后台、Python 运行时、依赖和 Cloak 浏览器，用户无需安装 Docker、Python、Node、Git 或 .NET。** 桌面快捷方式直接打开创作工作台，左下角版本号提供更新日志和在线升级；安装器与桌面程序沿用 TkCRM 同款图标。WebView2 缺失时由安装器引导安装微软官方组件，正式发布资产位于 [GitHub Releases](https://github.com/TheLayya/lay4flow/releases)。
 
 默认安装到 `%LOCALAPPDATA%\lay4flow-remote`，账号和密码均为 **`admin`**。Windows 安装器会自动探测系统代理、PAC 和 Clash / Mihomo / sing-box 的真实监听端口，不写死 `7890`；可通过 `.env` 的 `LAY4FLOW_HOST_PROXY_MODE=auto|direct|manual` 控制，手动模式填写 `LAY4FLOW_HOST_PROXY`。详细的启动、更新、停止与保留数据卸载方式见 [Windows 安装指引](docs/WINDOWS_INSTALL.md)。
 
@@ -176,7 +176,7 @@ Compose 默认仅监听本机。公网部署在前方配置 HTTPS 反向代理�
 使用 Clash TUN 时，如果 SOCKS5 检测超时，先检查 DNS：`socks5://` 在本地解析域名，可能将 `198.18.0.0/15` 范围内的 FakeIP 发送给远端代理；`socks5h://` 由远端代理解析域名，可直接在代理池编辑协议后重试。
 
 Cloak 的页面和共享 Cookie 的后台会话请求使用同一个账号出口；SOCKS 与带认证的 HTTP 代理通过账号独立的本机回环桥转发，代理域名由远端解析。
-Windows 桌面端启动时自动读取系统代理/PAC，并探测代理程序实际监听端口；支持任意端口，不要求开启 TUN。选中的宿主代理作为前置通路，账号最终出口继续使用绑定的 SOCKS5。可在「工坊状态 → 宿主网络」查看地址和容器端口连通性；直连或手动设置见 [Windows 网络配置](docs/WINDOWS_INSTALL.md)。直接使用 Docker Compose 的用户可在 `.env` 指定 `LAY4FLOW_HOST_PROXY=http://host.docker.internal:实际端口` 后重建容器。
+Windows 桌面端启动时自动读取系统代理/PAC，并探测代理程序实际监听端口；支持任意端口，不要求开启 TUN。选中的本机代理作为前置通路，账号最终出口继续使用绑定的 SOCKS5。可在「工坊状态 → 宿主网络」查看地址和端口连通性；直连或手动设置见 [Windows 网络配置](docs/WINDOWS_INSTALL.md)。Windows 原生版使用 `127.0.0.1:实际端口`；Docker 服务器可在 `.env` 指定 `LAY4FLOW_HOST_PROXY=http://host.docker.internal:实际端口` 后重建容器。
 
 ## 账号与自动续期
 

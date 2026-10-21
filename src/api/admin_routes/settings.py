@@ -268,6 +268,15 @@ def create_settings_router(
         manager = getattr(getattr(app, "state", None), "token_manager", None)
         imports = getattr(manager, "_profile_import_jobs", None)
         payload["update_pending_imports"] = imports._pending() if imports else 0
+        # Browser profile presentation is local on Windows desktop installs;
+        # containers keep the existing noVNC relay. This public hint lets the
+        # static profile page choose a transport before opening a WebSocket.
+        payload["viewer_presentation"] = (
+            "native"
+            if os.getenv("LAY4FLOW_PROFILE_PRESENTATION", "relay").strip().lower()
+            in {"native", "windows", "local"}
+            else "relay"
+        )
         return payload
 
     @router.get("/api/stats")

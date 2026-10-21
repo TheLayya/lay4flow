@@ -30,7 +30,7 @@ function harness(){
     });
     // The exported viewer actions execute unchanged; RFB connection is covered by the import contract below.
     vm.runInContext(viewerCode.replace(/\nconnect\(\);\s*$/,''),context);
-    const ui=vm.runInContext('({closeBrowser,pollStatus,refreshOpenCredentials,sendPasteText,pasteFromClipboard,disconnect,setBusy})',context);
+    const ui=vm.runInContext('({connect,closeBrowser,pollStatus,refreshOpenCredentials,focusNativeBrowser,sendPasteText,pasteFromClipboard,disconnect,setBusy})',context);
     return {ui,popup,location,calls,toasts,elements,events,context,intervals,captures,
         respond:value=>response=value,blockPopup:()=>popupBlocked=true,
         clipboard:value=>clipboard=typeof value==='function'?value:async()=>value,clipboardReads:()=>clipboardReads};
@@ -49,6 +49,19 @@ function inputEvent(target,extra={}){
 async function flushPromises(){await Promise.resolve();await Promise.resolve();}
 
 async function main(){
+    const native=harness();
+    native.respond({status:200,ok:true,json:async()=>({success:true,status:'ready',presentation:'native'})});
+    await native.ui.connect();
+    assert.equal(native.calls.length,1,'Native presentation reads state without importing noVNC or opening WebSocket');
+    assert.equal(native.calls[0].url,'/api/tokens/4/browser');
+    assert.match(native.elements.get('screen').innerHTML,/本地 Cloak 窗口/);
+    assert.equal(native.elements.get('pasteText').hidden,true);
+    assert.equal(native.elements.get('focusNativeBrowser').hidden,false);
+    await native.ui.focusNativeBrowser();
+    assert.equal(native.calls.at(-1).url,'/api/tokens/4/browser/focus');
+    assert.equal(native.calls.at(-1).options.method,'POST');
+    assert.match(native.elements.get('status').textContent,/已显示本地 Cloak 窗口/);
+
     const viewer=harness();let releaseClose;
     viewer.respond((url,options)=>options.method==='DELETE'?new Promise(resolve=>releaseClose=resolve):
         {status:200,ok:true,json:async()=>({success:true,message:'刷新成功'})});

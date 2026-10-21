@@ -11,7 +11,12 @@ from package_release import ROOT, package_release
 from package_windows import package_windows
 
 
-def build_release(root: Path, output: Path, desktop_runtime: Path | None = None) -> dict:
+def build_release(
+    root: Path,
+    output: Path,
+    desktop_runtime: Path | None = None,
+    backend_runtime: Path | None = None,
+) -> dict:
     version = (root / "VERSION").read_text(encoding="utf-8").strip()
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError("VERSION must be a stable semantic version")
@@ -30,7 +35,17 @@ def build_release(root: Path, output: Path, desktop_runtime: Path | None = None)
         candidate = root / "desktop" / "runtime" / "windows-x64"
         if (candidate / "Lay4Flow.Desktop.exe").is_file():
             resolved_desktop = candidate
-    package_windows(root, windows, runtime_archive=runtime, desktop_runtime=resolved_desktop)
+    if backend_runtime is None:
+        candidate = root / "desktop" / "runtime" / "backend" / "windows-x64"
+        if (candidate / "python.exe").is_file():
+            backend_runtime = candidate
+    package_windows(
+        root,
+        windows,
+        runtime_archive=runtime,
+        desktop_runtime=resolved_desktop,
+        backend_runtime=backend_runtime,
+    )
     assets = []
     for path in (runtime, windows):
         with path.open("rb") as stream:
@@ -66,10 +81,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     parser.add_argument("--desktop-runtime", type=Path)
+    parser.add_argument("--backend-runtime", type=Path)
     args = parser.parse_args()
     print(
         json.dumps(
-            build_release(ROOT, args.output.resolve(), args.desktop_runtime),
+            build_release(ROOT, args.output.resolve(), args.desktop_runtime, args.backend_runtime),
             ensure_ascii=False,
             indent=2,
         )

@@ -15,6 +15,7 @@ def package_windows(
     output: Path,
     runtime_archive: Path | None = None,
     desktop_runtime: Path | None = None,
+    backend_runtime: Path | None = None,
 ) -> dict:
     root, output = Path(root).resolve(), Path(output).resolve()
     version = (root / "VERSION").read_text(encoding="utf-8").strip()
@@ -36,7 +37,7 @@ def package_windows(
         runtime_name = runtime_path.name
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for path in sorted((root / "scripts/windows").glob("*")):
-                if path.is_file() and path.suffix in {".cmd", ".ps1", ".ico"}:
+                if path.is_file() and path.suffix in {".cmd", ".ps1", ".ico", ".py"}:
                     archive.write(path, f"{bundle_name}/windows/{path.name}")
             archive.write(root / "scripts/windows/install.cmd", f"{bundle_name}/install.cmd")
             archive.write(root / "scripts/windows/install.ps1", f"{bundle_name}/install.ps1")
@@ -73,6 +74,52 @@ def package_windows(
                         archive.write(
                             path, f"{bundle_name}/desktop/windows-x64/{relative.as_posix()}"
                         )
+            if backend_runtime is not None:
+                backend_runtime = Path(backend_runtime).resolve()
+                inventory = backend_runtime / "runtime-manifest.json"
+                if not (backend_runtime / "python.exe").is_file() or not inventory.is_file():
+                    raise FileNotFoundError("Build the bundled Windows backend runtime first")
+                manifest = json.loads(inventory.read_text(encoding="utf-8"))
+                if not manifest.get("cloak_binary"):
+                    raise ValueError("Backend runtime is missing the Cloak browser binary")
+                cloak_binary = manifest.get("cloak_binary")
+                if (
+                    not isinstance(cloak_binary, str)
+                    or not cloak_binary
+                    or Path(cloak_binary).is_absolute()
+                    or ".." in Path(cloak_binary).parts
+                    or not (backend_runtime / cloak_binary).is_file()
+                ):
+                    raise FileNotFoundError(
+                        "The bundled Windows backend must include a verified Cloak chrome.exe"
+                    )
+                for name in manifest["files"]:
+                    relative = Path(name)
+                    if relative.is_absolute() or ".." in relative.parts:
+                        raise ValueError("Unexpected backend runtime path")
+                    path = backend_runtime / relative
+                    if not path.is_file():
+                        continue
+                    if relative.as_posix() == "runtime-manifest.json":
+                        continue
+                    if (
+                        path.is_symlink()
+                        or any(
+                            part.lower() in {"profiles", "cookies", "data", "tmp", "output", ".git"}
+                            for part in relative.parts
+                        )
+                        or path.name.lower() in {".env", "cookies.json", "storage-state.json"}
+                        or path.suffix.lower() in {".db", ".sqlite", ".sqlite3", ".key", ".log"}
+                        or path.suffix.lower() == ".pem"
+                        and relative.as_posix()
+                        not in {
+                            "Lib/site-packages/certifi/cacert.pem",
+                            "Lib/site-packages/curl_cffi/cacert.pem",
+                        }
+                    ):
+                        raise ValueError(f"Backend runtime contains private state: {relative}")
+                    archive.write(path, f"{bundle_name}/backend/windows-x64/{relative.as_posix()}")
+                archive.write(inventory, f"{bundle_name}/backend/windows-x64/runtime-manifest.json")
             archive.write(root / "docs/WINDOWS_INSTALL.md", f"{bundle_name}/README.md")
             archive.write(root / "LICENSE", f"{bundle_name}/LICENSE")
             archive.write(root / "NOTICE", f"{bundle_name}/NOTICE")
@@ -84,11 +131,15 @@ def package_windows(
     return {
         "project": "lay4flow-remote",
         "version": version,
-        "kind": "windows-desktop-docker-installer"
+        "kind": "windows-native-installer"
+        if backend_runtime
+        else "windows-desktop-docker-installer"
         if desktop_runtime
         else "windows-docker-installer",
         "desktop": bool(desktop_runtime),
-        "requires": ["Windows 10/11 x64", "Docker Desktop with Linux containers"],
+        "requires": ["Windows 10/11 x64"]
+        if backend_runtime
+        else ["Windows 10/11 x64", "Docker Desktop with Linux containers"],
         "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
         "runtime_sha256": runtime["sha256"],
         "runtime_files": runtime["files"],
@@ -99,10 +150,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     parser.add_argument("--desktop-runtime", type=Path)
+    parser.add_argument("--backend-runtime", type=Path)
     args = parser.parse_args()
     print(
         json.dumps(
-            package_windows(ROOT, args.output, desktop_runtime=args.desktop_runtime),
+            package_windows(
+                ROOT,
+                args.output,
+                desktop_runtime=args.desktop_runtime,
+                backend_runtime=args.backend_runtime,
+            ),
             ensure_ascii=False,
             indent=2,
         )

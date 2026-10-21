@@ -338,6 +338,29 @@ const loginFinishing = ref(false)
 const loginCanceling = ref(false)
 const loginSession = ref(null)
 const loginStatus = ref('')
+const nativeDesktop = computed(() => window.lay4flowDesktop?.runtime === 'native')
+const nativePresentation = ref(window.lay4flowDesktop?.runtime === 'native')
+const presentationReady = ref(nativePresentation.value)
+async function detectNativePresentation() {
+    if (nativeDesktop.value) {
+        nativePresentation.value = true
+        presentationReady.value = true
+        return
+    }
+    try {
+        const health = await api.get('/health')
+        nativePresentation.value = health.viewer_presentation === 'native'
+    } catch {
+        nativePresentation.value = false
+    } finally {
+        presentationReady.value = true
+    }
+}
+// The native Windows shell owns the headed Cloak window. Keep its controls in
+// this page so users never have to open a second noVNC tab just to focus or
+// refresh an account.
+const nativeBrowser = ref(null)
+const nativeBrowserBusy = computed(() => busy.has('native-browser'))
 const loginForm = reactive({ email: '', proxy_pool_id: null })
 let pollTimer
 let loadingPromise
@@ -956,15 +979,32 @@ async function onboardAll() {
     if (errors.length) ElMessageBox.alert(errors.join('\n'), 'Vids 接入结果', { confirmButtonText: '知道了' })
 }
 async function openBrowser(row) {
-    const viewer = window.open('about:blank', '_blank')
-    if (!viewer) return ElMessage.warning('请允许浏览器打开此网站的新窗口')
-    viewer.opener = null
-    viewer.document.title = '正在连接账号浏览器'
-    viewer.document.body.textContent = '正在连接账号浏览器…'
+    const native = nativePresentation.value
+    const viewer = native ? null : window.open('about:blank', '_blank')
+    if (!native && !viewer) return ElMessage.warning('请允许浏览器打开此网站的新窗口')
+    if (viewer) {
+        viewer.opener = null
+        viewer.document.title = '正在连接账号浏览器'
+        viewer.document.body.textContent = '正在连接账号浏览器…'
+    }
     busy.add(`${row.id}:browser`)
     let receipt
     try {
         receipt = ensure(await api.post(`/api/tokens/${row.id}/browser`, {}))
+        if (native && receipt.presentation !== 'native') throw new Error('本地账号浏览器服务未返回原生窗口状态')
+        if (receipt.presentation === 'native') {
+            if (!receipt.viewer_id) throw new Error('本地账号浏览器凭据校验失败')
+            viewer?.close()
+            nativeBrowser.value = {
+                tokenId: row.id,
+                viewerId: receipt.viewer_id || '',
+                email: row.email || `账号 #${row.id}`,
+                status: 'ready',
+            }
+            ElMessage.success('本地 Cloak 窗口已打开，可直接在桌面窗口操作')
+            return
+        }
+        const remoteViewer = viewer || openLoginWindow()
         const url = new URL(receipt.viewer_url, location.origin)
         if (
             url.origin !== location.origin ||
@@ -974,11 +1014,11 @@ async function openBrowser(row) {
         )
             throw new Error('账号浏览器地址校验失败')
         if (receipt.viewer_id) url.searchParams.set('viewer_id', receipt.viewer_id)
-        if (viewer.closed)
+        if (remoteViewer.closed)
             await api.delete(`/api/tokens/${row.id}/browser?viewer_id=${encodeURIComponent(receipt.viewer_id || '')}`)
-        else viewer.location.href = url.href
+        else remoteViewer.location.href = url.href
     } catch (error) {
-        viewer.close()
+        viewer?.close()
         if (receipt)
             await api
                 .delete(`/api/tokens/${row.id}/browser?viewer_id=${encodeURIComponent(receipt.viewer_id || '')}`)
@@ -986,6 +1026,59 @@ async function openBrowser(row) {
         notifyError(error)
     } finally {
         busy.delete(`${row.id}:browser`)
+    }
+}
+function nativeViewerQuery(viewer = nativeBrowser.value) {
+    if (!viewer?.tokenId) return ''
+    return viewer.viewerId ? `?viewer_id=${encodeURIComponent(viewer.viewerId)}` : ''
+}
+async function focusNativeBrowser() {
+    const viewer = nativeBrowser.value
+    if (!viewer || nativeBrowserBusy.value) return
+    busy.add('native-browser')
+    try {
+        const result = ensure(
+            await api.post(`/api/tokens/${viewer.tokenId}/browser/focus${nativeViewerQuery(viewer)}`, {}),
+        )
+        nativeBrowser.value = { ...viewer, status: result.status || 'ready' }
+        ElMessage.success('已显示本地 Cloak 窗口')
+    } catch (error) {
+        notifyError(error)
+    } finally {
+        busy.delete('native-browser')
+    }
+}
+async function refreshNativeBrowser() {
+    const viewer = nativeBrowser.value
+    if (!viewer || nativeBrowserBusy.value) return
+    busy.add('native-browser')
+    try {
+        const result = ensure(
+            await api.post(`/api/tokens/${viewer.tokenId}/browser/refresh${nativeViewerQuery(viewer)}`, {}),
+        )
+        nativeBrowser.value = { ...viewer, status: result.status || 'ready' }
+        ElMessage.success(result.message || '凭据已刷新，本地窗口保持打开')
+    } catch (error) {
+        notifyError(error)
+    } finally {
+        busy.delete('native-browser')
+    }
+}
+async function closeNativeBrowser(refresh = false) {
+    const viewer = nativeBrowser.value
+    if (!viewer || nativeBrowserBusy.value) return
+    busy.add('native-browser')
+    try {
+        ensure(await api.delete(`/api/tokens/${viewer.tokenId}/browser${nativeViewerQuery(viewer)}`))
+        nativeBrowser.value = null
+        if (refresh) {
+            const result = ensure(await api.post(`/api/tokens/${viewer.tokenId}/refresh-at`, {}))
+            ElMessage.success(result.message || '窗口已关闭，凭据刷新已提交')
+        } else ElMessage.success('本地 Cloak 窗口已关闭')
+    } catch (error) {
+        notifyError(error)
+    } finally {
+        busy.delete('native-browser')
     }
 }
 const loginStorage = 'lay4flow.profileLogin'
@@ -1018,10 +1111,11 @@ async function startLogin() {
     if (loginStarting.value || loginSession.value) return
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(loginForm.email.trim()))
         return ElMessage.warning('请填写要登录的 Google 账号邮箱')
+    const native = nativePresentation.value
     let viewer
     let receipt
     try {
-        viewer = openLoginWindow()
+        if (!native) viewer = openLoginWindow()
         loginStarting.value = true
         receipt = ensure(
             await api.post('/api/profile-login', {
@@ -1029,19 +1123,30 @@ async function startLogin() {
                 ...(loginForm.proxy_pool_id ? { proxy_pool_id: loginForm.proxy_pool_id } : {}),
             }),
         )
-        const url = loginViewerUrl(receipt)
+        const presentation = receipt.presentation || (native ? 'native' : 'web')
+        if (native && presentation !== 'native') throw new Error('本地账号浏览器服务未返回原生窗口状态')
+        if (presentation === 'native' && (!receipt.viewer_id || !receipt.session_id || !receipt.token_id))
+            throw new Error('本地账号浏览器凭据校验失败')
+        const url = presentation === 'native' ? null : loginViewerUrl(receipt)
         loginSession.value = {
             session_id: receipt.session_id,
             token_id: receipt.token_id,
             viewer_id: receipt.viewer_id,
             viewer_url: receipt.viewer_url,
+            presentation,
             expires_at: receipt.expires_at,
             email: loginForm.email.trim(),
         }
         sessionStorage.setItem(loginStorage, JSON.stringify(loginSession.value))
-        loginStatus.value = '请在 Cloak 窗口完成 Google 登录，再点击“完成登录并添加”。'
-        if (viewer.closed) loginStatus.value = '登录浏览器已就绪，点击“继续登录”重新打开窗口。'
-        else viewer.location.href = url
+        loginStatus.value = presentation === 'native'
+            ? '本地 Cloak 窗口已打开，请在桌面窗口完成 Google 登录，再点击“完成登录并添加”。'
+            : '请在 Cloak 窗口完成 Google 登录，再点击“完成登录并添加”。'
+        if (presentation === 'native') viewer?.close()
+        else {
+            if (!viewer) viewer = openLoginWindow()
+            if (viewer.closed) loginStatus.value = '登录浏览器已就绪，点击“继续登录”重新打开窗口。'
+            else viewer.location.href = url
+        }
     } catch (error) {
         viewer?.close()
         if (receipt?.session_id && !loginSession.value)
@@ -1056,6 +1161,15 @@ async function startLogin() {
     }
 }
 function resumeLogin() {
+    if (loginSession.value?.presentation === 'native' || nativePresentation.value) {
+        const session = loginSession.value
+        if (!session?.token_id) return
+        api.post(`/api/tokens/${session.token_id}/browser/focus${session.viewer_id ? `?viewer_id=${encodeURIComponent(session.viewer_id)}` : ''}`, {})
+            .then(() => (loginStatus.value = '已显示本地 Cloak 登录窗口，请继续完成 Google 登录。'))
+            .catch(notifyError)
+        loginOpen.value = true
+        return
+    }
     let viewer
     try {
         const url = loginViewerUrl(loginSession.value)
@@ -1109,6 +1223,7 @@ async function cancelLogin() {
     }
 }
 onMounted(() => {
+    detectNativePresentation()
     load()
     refreshImportJobs()
     document.addEventListener('visibilitychange', refreshVisible)
@@ -1122,10 +1237,12 @@ onMounted(() => {
                 new Date(typeof stored.expires_at === 'number' ? stored.expires_at * 1000 : stored.expires_at) >
                     new Date())
         ) {
-            loginViewerUrl(stored)
+            if (stored.presentation !== 'native' && !nativePresentation.value) loginViewerUrl(stored)
             loginSession.value = stored
             loginForm.email = stored.email || ''
-            loginStatus.value = '有一份尚未完成的 Cloak 登录，可继续登录或取消。'
+            loginStatus.value = stored.presentation === 'native' || nativePresentation.value
+                ? '有一份尚未完成的本地 Cloak 登录，可继续显示窗口。'
+                : '有一份尚未完成的 Cloak 登录，可继续登录或取消。'
         } else clearLogin()
     } catch {
         clearLogin()
@@ -1290,7 +1407,7 @@ onUnmounted(() => {
                     </el-select>
                 </div>
                 <div class="table-tools">
-                    <el-tooltip content="直接在服务器 Cloak 浏览器登录 Google，保存持久化 Profile">
+                    <el-tooltip :content="nativePresentation ? '直接打开本机 Cloak 窗口登录 Google，保存持久化 Profile' : '直接在服务器 Cloak 浏览器登录 Google，保存持久化 Profile'">
                         <el-button :icon="Connection" @click="loginOpen = true">
                             {{ loginSession ? '继续登录' : 'Cloak 登录' }}
                         </el-button>
@@ -1322,6 +1439,24 @@ onUnmounted(() => {
                 <span>{{ exporting ? '正在读取并导出 Profile，请稍候…' : loginStatus }}</span>
                 <el-button v-if="loginSession" text @click="loginOpen = true">查看登录进度</el-button>
             </div>
+            <el-alert
+                v-if="nativeBrowser"
+                class="native-browser-bar"
+                type="success"
+                :closable="false"
+                show-icon
+                :title="`${nativeBrowser.email} 的本地 Cloak 窗口已打开`"
+            >
+                <template #default>
+                    <p>直接在桌面窗口完成操作，凭据与窗口管理就在这里。</p>
+                    <div class="native-browser-actions">
+                        <el-button size="small" :disabled="nativeBrowserBusy" @click="focusNativeBrowser">显示窗口</el-button>
+                        <el-button size="small" type="primary" :disabled="nativeBrowserBusy" @click="refreshNativeBrowser">刷新凭据</el-button>
+                        <el-button size="small" :disabled="nativeBrowserBusy" @click="closeNativeBrowser(true)">保存并关闭后刷新</el-button>
+                        <el-button size="small" type="danger" plain :disabled="nativeBrowserBusy" @click="closeNativeBrowser(false)">关闭窗口</el-button>
+                    </div>
+                </template>
+            </el-alert>
             <div v-if="selected.length" class="selection-bar">
                 <span>
                     已选择
@@ -2219,8 +2354,11 @@ onUnmounted(() => {
             :close-on-click-modal="false"
         >
             <p class="dialog-note">
-                在服务器浏览器完成 Google 登录，验证身份与 Flow 会话后保存 Profile 并加入账号小队。
+                {{ nativePresentation
+                    ? '登录会直接打开本机 Cloak 窗口；完成 Google 登录后回到这里点击“完成登录并添加”。'
+                    : '在服务器浏览器完成 Google 登录，验证身份与 Flow 会话后保存 Profile 并加入账号小队。' }}
             </p>
+            <p v-if="!presentationReady" class="field-note" role="status">正在连接账号浏览器服务…</p>
             <el-form label-position="top" @submit.prevent="startLogin">
                 <el-form-item label="Google 账号邮箱">
                     <el-input
@@ -2282,7 +2420,9 @@ onUnmounted(() => {
                 </el-button>
                 <template v-else>
                     <el-button :disabled="loginStarting" @click="loginOpen = false">关闭</el-button>
-                    <el-button type="primary" :loading="loginStarting" @click="startLogin">打开 Cloak 登录</el-button>
+                    <el-button type="primary" :loading="loginStarting" :disabled="!presentationReady" @click="startLogin">
+                        {{ nativePresentation ? '打开本地 Cloak 登录' : '打开 Cloak 登录' }}
+                    </el-button>
                 </template>
             </template>
         </el-dialog>
@@ -2432,6 +2572,23 @@ onUnmounted(() => {
 .account-surface {
     overflow: hidden;
     padding: 0;
+}
+.native-browser-bar {
+    flex-shrink: 0;
+    margin: 0 26px 12px;
+    width: auto;
+}
+.native-browser-bar p {
+    margin: 0 0 8px;
+    font-size: 13px;
+}
+.native-browser-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.native-browser-actions .el-button {
+    margin: 0;
 }
 .section-heading {
     padding: 24px 26px 16px;

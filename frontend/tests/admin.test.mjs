@@ -1372,6 +1372,91 @@ test('Cloak login rejects foreign viewers and cancellation preserves receipt unt
     assert.equal(s.loginSession.value, null)
 })
 
+test('native Cloak login opens no web popup and resumes the owner-bound local window', async () => {
+    const writes = []
+    const fixture = view('Accounts', {
+        context: {
+            window: { lay4flowDesktop: { runtime: 'native' }, open: () => assert.fail('Native login opened a web popup') },
+        },
+        api: {
+            post: async (path, body) => {
+                writes.push({ path, body: plain(body) })
+                return path === '/api/profile-login'
+                    ? {
+                          success: true,
+                          session_id: 'native-session',
+                          token_id: 71,
+                          viewer_id: 'native viewer',
+                          presentation: 'native',
+                      }
+                    : { success: true, status: 'ready', presentation: 'native' }
+            },
+        },
+    })
+    const s = fixture.state
+    s.loginForm.email = 'native@fixture.local'
+    await s.startLogin()
+    assert.match(s.loginStatus.value, /本地 Cloak/)
+    assert.equal(s.loginSession.value.presentation, 'native')
+    s.resumeLogin()
+    await Promise.resolve()
+    assert.equal(writes[1].path, '/api/tokens/71/browser/focus?viewer_id=native%20viewer')
+    const stored = JSON.parse(fixture.storage.get('lay4flow.profileLogin'))
+    assert.equal(stored.presentation, 'native')
+    assert.equal('cookies' in stored, false)
+})
+
+test('native account browser controls stay inline and serialize focus, refresh and close', async () => {
+    const writes = []
+    const pending = deferred()
+    let closeFails = true
+    const fixture = view('Accounts', {
+        context: {
+            window: { lay4flowDesktop: { runtime: 'native' }, open: () => assert.fail('Native viewer opened a web popup') },
+        },
+        api: {
+            post: async (path, body) => {
+                writes.push({ path, body: plain(body) })
+                if (path.endsWith('/browser'))
+                    return { success: true, viewer_id: 'owned id', status: 'ready', presentation: 'native' }
+                if (path.includes('/focus')) return pending.promise
+                return { success: true, status: 'ready' }
+            },
+            delete: async (path) => {
+                writes.push({ path })
+                if (closeFails) throw new Error('Synthetic close failed')
+                return { success: true, status: 'closed' }
+            },
+        },
+    })
+    const s = fixture.state
+    await s.openBrowser({ id: 71, email: 'native@fixture.local' })
+    assert.equal(s.nativeBrowser.value.tokenId, 71)
+    const focusing = s.focusNativeBrowser()
+    await s.refreshNativeBrowser()
+    await s.closeNativeBrowser(true)
+    assert.equal(writes.length, 2)
+    pending.resolve({ success: true, status: 'ready' })
+    await focusing
+    await s.refreshNativeBrowser()
+    assert.equal(writes[2].path, '/api/tokens/71/browser/refresh?viewer_id=owned%20id')
+    await s.closeNativeBrowser(true)
+    assert.equal(s.nativeBrowser.value.tokenId, 71, 'Failed close retains inline controls for retry')
+    assert.equal(writes.filter(({ path }) => path.endsWith('/refresh-at')).length, 0)
+    closeFails = false
+    await s.closeNativeBrowser(true)
+    assert.equal(s.nativeBrowser.value, null)
+    assert.equal(writes.at(-1).path, '/api/tokens/71/refresh-at')
+})
+
+test('accounts detect a native backend when opened in a normal browser', async () => {
+    const fixture = view('Accounts', {
+        api: { get: async (path) => ({ viewer_presentation: path === '/health' ? 'native' : 'vnc' }) },
+    })
+    await fixture.state.detectNativePresentation()
+    assert.equal(fixture.state.nativePresentation.value, true)
+})
+
 test('Cloak login resumes a future Unix-seconds receipt after reloading without a fresh login request', async () => {
     const fixture = view('Accounts', {
         context: {

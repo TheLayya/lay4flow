@@ -8,6 +8,10 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 $OutputEncoding = [Console]::OutputEncoding
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'native-service.py')) {
+  & (Join-Path $PSScriptRoot 'native-stop.ps1') -InstallDir $InstallDir
+  exit 0
+}
 $compose = Join-Path $InstallDir "docker-compose.yml"
 if (-not (Test-Path -LiteralPath $compose)) { throw "lay4flow-remote is not installed at $InstallDir." }
 $envPath = Join-Path $InstallDir ".env"

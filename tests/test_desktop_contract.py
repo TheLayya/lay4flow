@@ -84,6 +84,25 @@ class DesktopContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 package_windows(ROOT, fixture / "private.zip", runtime_archive, desktop)
 
+    def test_native_package_requires_bundled_cloak_binary(self):
+        with tempfile.TemporaryDirectory(prefix="lay4flow-native-package-") as directory:
+            fixture = Path(directory)
+            runtime_source = fixture / "runtime-source"
+            runtime_source.mkdir()
+            (runtime_source / "VERSION").write_text("fixture\n", encoding="ascii")
+            runtime_archive = fixture / "fixture-runtime.tar.gz"
+            with tarfile.open(runtime_archive, "w:gz") as archive:
+                archive.add(runtime_source / "VERSION", arcname="VERSION")
+            backend = fixture / "backend"
+            backend.mkdir()
+            (backend / "python.exe").write_bytes(b"fixture")
+            (backend / "runtime-manifest.json").write_text(
+                json.dumps({"runtime": "windows-x64-native", "files": ["python.exe"]}),
+                encoding="utf-8",
+            )
+            with self.assertRaises((FileNotFoundError, ValueError)):
+                package_windows(ROOT, fixture / "native.zip", runtime_archive, backend_runtime=backend)
+
 
 if __name__ == "__main__":
     unittest.main()

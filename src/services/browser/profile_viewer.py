@@ -40,8 +40,15 @@ class ProfileBrowserViewer:
         self._entered = False
         self._stop_requested = False
         self._context: Any = None
+        self._page: Any = None
         self._email = ""
         self._proxy_url = ""
+        self._presentation = (
+            "native"
+            if os.getenv("LAY4FLOW_PROFILE_PRESENTATION", "relay").strip().lower()
+            in {"native", "windows", "local"}
+            else "relay"
+        )
         refresher = getattr(token_manager, "profile_refresher", None)
         if hasattr(refresher, "active_context_provider"):
             refresher.active_context_provider = self.borrow_context
@@ -92,8 +99,17 @@ class ProfileBrowserViewer:
                 "status": self._status,
                 "expires_at": self._expires_at,
                 "viewer_id": self._viewer_id,
+                # A local Windows service presents Cloak's headed Chromium
+                # directly. The old VNC stream remains available only for
+                # container deployments that expose it.
+                "presentation": self._presentation,
             }
-        return {"token_id": token_id, "status": "closed", "expires_at": None}
+        return {
+            "token_id": token_id,
+            "status": "closed",
+            "expires_at": None,
+            "presentation": self._presentation,
+        }
 
     async def open(self, token_id: int, owner: str) -> dict[str, Any]:
         if not owner:
@@ -130,7 +146,14 @@ class ProfileBrowserViewer:
         if token.browser_profile_source != "cloak":
             raise ViewerError(400, "此账号没有可查看的 Cloak Profile")
         manager = refresher.manager
-        if getattr(manager.backend, "options", {}).get("headless") is not False:
+        presentation = self._presentation
+        # Native Windows presentation can launch a headed context even when
+        # background maintenance is configured headless. Relay mode keeps the
+        # previous explicit headed requirement for the VNC desktop.
+        if (
+            presentation != "native"
+            and getattr(manager.backend, "options", {}).get("headless") is not False
+        ):
             raise ViewerError(503, "Profile 浏览器窗口需要启用有头浏览器")
         profile_dir = manager.root_dir / manager._normalize_account_key(token.email)
         if not (profile_dir / "metadata.json").is_file() or not (profile_dir / "Default").is_dir():
@@ -205,6 +228,7 @@ class ProfileBrowserViewer:
                     return None
                 try:
                     page = await context.new_page()
+                    self._page = page
                     # Window presentation must not alter the Profile's launch identity.
                     try:
                         desktop = await context.new_cdp_session(page)
@@ -222,6 +246,12 @@ class ProfileBrowserViewer:
                     except Exception:
                         pass
                     await page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
+                    # Keep the account window in front after navigation. This
+                    # is a no-op on runtimes without a native window.
+                    try:
+                        await page.bring_to_front()
+                    except Exception:
+                        pass
                 except Exception:
                     ready.set_result(ViewerError(503, "Profile 浏览器启动失败，请检查服务配置"))
                     return None
@@ -243,6 +273,7 @@ class ProfileBrowserViewer:
                 return ViewerError(503, "Profile 浏览器关闭失败，请检查服务状态")
         finally:
             self._context = None
+            self._page = None
         return None
 
     def _finished(self, task: asyncio.Task, ready: asyncio.Future) -> None:
@@ -263,6 +294,7 @@ class ProfileBrowserViewer:
             self._entered = False
             self._stop_requested = False
             self._context = None
+            self._page = None
             self._email = ""
             self._proxy_url = ""
 
@@ -326,6 +358,36 @@ class ProfileBrowserViewer:
         # Close must also be able to interrupt navigation during startup.
         return await self._close(token_id, owner, viewer_id)
 
+    async def focus(
+        self, token_id: int, owner: str, viewer_id: str | None = None
+    ) -> dict[str, Any]:
+        """Bring the native Cloak window to the foreground without reopening it."""
+        async with self._guard:
+            if viewer_id and viewer_id != self._viewer_id:
+                raise ViewerError(409, "账号浏览器已切换或关闭，请重新打开")
+            self.state(token_id, owner)
+            if not self.owns(token_id, owner) or self._context is None or self._page is None:
+                raise ViewerError(409, "账号浏览器未就绪，请先打开浏览器")
+            page = self._page
+            context = self._context
+        try:
+            await page.bring_to_front()
+            desktop = await context.new_cdp_session(page)
+            try:
+                window = await desktop.send("Browser.getWindowForTarget")
+                await desktop.send(
+                    "Browser.setWindowBounds",
+                    {"windowId": window["windowId"], "bounds": {"windowState": "maximized"}},
+                )
+            finally:
+                await desktop.detach()
+        except Exception:
+            # The browser may have been closed by the user between the two
+            # calls. Keep the viewer lease authoritative and report a retryable
+            # status instead of losing profile ownership.
+            raise ViewerError(409, "本地浏览器窗口已关闭，请重新打开") from None
+        return self.state(token_id, owner)
+
     async def _close(
         self, token_id: int, owner: str, viewer_id: str | None = None
     ) -> dict[str, Any]:
@@ -374,6 +436,8 @@ class ProfileBrowserViewer:
 
     @asynccontextmanager
     async def stream_session(self, token_id: int, owner: str, viewer_id: str | None = None):
+        if self._presentation == "native":
+            raise ViewerError(409, "当前运行在 Windows 原生浏览器模式，无需画面转发")
         if not viewer_id or not self.matches(token_id, owner, viewer_id):
             raise ViewerError(404, "账号浏览器已切换或关闭")
         task = asyncio.current_task()

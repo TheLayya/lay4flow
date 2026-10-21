@@ -11,7 +11,7 @@ onMounted(async () => {
     referrer.name = 'referrer'; referrer.content = 'no-referrer'; document.head.appendChild(referrer)
   }
   try {
-    const viewerModule = '/static/js/profile_browser.js?v=20261014-vue-profile'
+    const viewerModule = '/static/js/profile_browser.js?v=20261022-native-profile'
     await import(/* @vite-ignore */ viewerModule)
   } catch (error) {
     const status = document.getElementById('status')
@@ -28,6 +28,7 @@ onMounted(async () => {
       <button class="profile-brand" aria-label="返回管理页" @click="returnToManagement"><BrandMark small /></button>
       <div class="profile-heading"><h1 id="accountTitle">账号浏览器</h1></div>
       <div class="profile-actions" role="navigation" aria-label="浏览器操作">
+        <button id="focusNativeBrowser" class="el-button" type="button" hidden><el-icon><Monitor /></el-icon><span>显示本地窗口</span></button>
         <button id="pasteText" class="el-button" type="button" disabled aria-controls="pastePanel" aria-expanded="false"><el-icon><CopyDocument /></el-icon><span>粘贴文本</span></button>
         <button id="refreshOpenCredentials" class="el-button el-button--primary" type="button"><el-icon><Refresh /></el-icon><span>刷新凭据，保持窗口</span></button>
         <button id="refreshCredentials" class="el-button is-plain" type="button"><el-icon><Refresh /></el-icon><span>关闭并刷新凭据</span></button>
@@ -43,7 +44,7 @@ onMounted(async () => {
       <div class="paste-actions"><button id="pasteCancel" class="el-button" type="button"><span>取消</span></button><button id="pasteSend" class="el-button el-button--primary" type="button" disabled><span>输入到浏览器</span></button></div>
     </section>
     <main id="screen" class="browser-screen" aria-label="可交互的账号浏览器"><div class="screen-loading"><span class="screen-icon"><el-icon><Monitor /></el-icon></span><h2>正在打开你的账号空间</h2><p>浏览器画面将在这里显示。连接完成后，可直接操作画面。</p><span class="loading-orbit"><i></i><i></i><i></i></span></div></main>
-    <footer class="profile-footer"><el-icon><Monitor /></el-icon><p>点选画面中的输入框后，可用 Ctrl / ⌘ + V 或顶部「粘贴文本」输入。</p><small>「刷新凭据，保持窗口」可刷新登录态并继续调试。</small></footer>
+    <footer id="profileFooter" class="profile-footer"><el-icon><Monitor /></el-icon><p>点选画面中的输入框后，可用 Ctrl / ⌘ + V 或顶部「粘贴文本」输入。</p><small>「刷新凭据，保持窗口」可刷新登录态并继续调试。</small></footer>
   </div>
 </template>
 
@@ -65,6 +66,8 @@ onMounted(async () => {
 #status[data-error="true"]{color:var(--el-color-danger)}
 .session-note{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:13px;white-space:nowrap}
 .browser-screen{position:relative;flex:1;min-height:0;overflow:hidden;background:#302a37}
+.browser-screen[data-presentation="native"]{display:grid;place-items:center;padding:32px;background:var(--surface-soft);color:var(--ink)}
+.browser-screen[data-presentation="native"] :deep(p){max-width:540px;line-height:2;font-size:16px;text-align:center}
 .screen-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:25px;color:#eee2ed}
 .screen-icon{display:grid;place-items:center;width:73px;height:73px;border-radius:24px;background:#45394a;color:#cb9bb6;font-size:30px;margin-bottom:22px;}
 .screen-loading h2{font-size:20px;font-weight:550;margin:0 0 12px}

@@ -111,7 +111,7 @@ begin
   InstallLogPath := AddBackslash(GetEnv('TEMP')) + 'lay4flow-remote-install.log';
   Parameters := Parameters + ' -LogPath "' + InstallLogPath + '" -ResolveConflicts';
   if WizardSilent then Parameters := Parameters + ' -NoBrowser -NoShortcuts';
-  Log('Starting Docker install in ' + ExpandConstant('{app}'));
+  Log('Starting lay4flow-remote install in ' + ExpandConstant('{app}'));
   if not ExecAndLogOutput(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
       Parameters, '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode, nil) then
   begin

@@ -12,7 +12,17 @@ const pastePanel=document.getElementById('pastePanel');
 const pasteInput=document.getElementById('pasteInput');
 const pasteSendButton=document.getElementById('pasteSend');
 const pasteCancelButton=document.getElementById('pasteCancel');
+const focusNativeButton=document.getElementById('focusNativeBrowser');
 let rfb=null,pollTimer=null,busy=false,closed=false,connected=false,failed=false,credentialResult=false,clipboardReading=false,pasteShortcut=false;
+let nativePresentation=window.lay4flowDesktop?.runtime==='native';
+
+function showNativeWindow(){
+    screen.dataset.presentation='native';
+    screen.innerHTML='<p>本地 Cloak 窗口已在桌面打开。请直接在桌面窗口登录或操作；本页可刷新凭据、保存并关闭。</p>';
+    pasteButton.hidden=true;focusNativeButton.hidden=false;
+    const footer=document.getElementById('profileFooter');
+    if(footer)footer.textContent='直接在桌面 Cloak 窗口输入与粘贴；点击“刷新凭据，保持窗口”可保存当前登录态。';
+}
 
 function canPaste(){return Boolean(rfb&&connected&&!busy&&!closed&&!failed);}
 
@@ -68,6 +78,7 @@ function setStatus(message,error=false){
 function setBusy(value){
     busy=value;
     closeButton.disabled=value;refreshButton.disabled=value;
+    focusNativeButton.disabled=value||closed||failed;
     refreshOpenButton.disabled=value||closed||failed;
     if(value)hidePastePanel(false);
     updatePasteControls();
@@ -121,10 +132,28 @@ async function refreshOpenCredentials(){
     finally{credentialResult=true;setBusy(false);}
 }
 
+async function focusNativeBrowser(){
+    if(!nativePresentation||busy||closed||failed)return;
+    setBusy(true);
+    try{
+        await request(`/api/tokens/${tokenId}/browser/focus`,'POST');
+        setStatus('已显示本地 Cloak 窗口，请直接在桌面窗口操作');
+    }catch(error){setStatus(error.message,true);}
+    finally{setBusy(false);}
+}
+
 async function pollStatus(){
     if(busy||closed||failed)return;
     try{
         const state=await request(`/api/tokens/${tokenId}/browser`);
+        if(state.presentation==='native'||nativePresentation){
+            nativePresentation=true;connected=false;hidePastePanel(false);
+            if(state.status==='error'){failed=true;refreshOpenButton.disabled=true;disconnect();setStatus('本地 Cloak 窗口关闭失败，请重启软件后重试',true);}
+            else if(state.status==='closed'){closed=true;refreshOpenButton.disabled=true;disconnect();setStatus('本地 Cloak 窗口已关闭，请返回管理页重新打开');}
+            else if(state.status==='closing'&&!credentialResult)setStatus('本地 Cloak 窗口正在关闭…');
+            else if(!credentialResult)setStatus('本地 Cloak 窗口已打开，请直接在桌面窗口操作');
+            return;
+        }
         if(state.status==='error'){
             failed=true;refreshOpenButton.disabled=true;disconnect();setStatus('浏览器关闭失败，请重启调试容器后重试',true);
         }else if(state.status==='closed'){
@@ -143,6 +172,13 @@ async function connect(){
     if(!tokenId){setStatus('账号浏览器地址无效',true);closeButton.disabled=true;refreshButton.disabled=true;refreshOpenButton.disabled=true;return;}
     document.getElementById('accountTitle').textContent=`账号 ${tokenId} 的浏览器`;
     try{
+        await pollStatus();
+        if(nativePresentation){
+            showNativeWindow();
+            if(!closed&&!failed)pollTimer=setInterval(pollStatus,5000);
+            return;
+        }
+        if(closed||failed)return;
         const {default:RFB}=await import('/api/profile-browser-assets/core/rfb.js');
         const address=new URL(`/api/profile-browser/${tokenId}/ws`,location.origin);
         address.search=viewerQuery;
@@ -166,6 +202,7 @@ refreshOpenButton.addEventListener('click',refreshOpenCredentials);
 pasteButton.addEventListener('click',showPastePanel);
 pasteSendButton.addEventListener('click',()=>sendPasteText(pasteInput.value));
 pasteCancelButton.addEventListener('click',()=>hidePastePanel());
+focusNativeButton.addEventListener('click',focusNativeBrowser);
 pasteInput.addEventListener('input',updatePasteControls);
 pasteInput.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();hidePastePanel();}});
 document.addEventListener('paste',event=>{

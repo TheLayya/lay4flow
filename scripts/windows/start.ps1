@@ -11,6 +11,21 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 $OutputEncoding = [Console]::OutputEncoding
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
+if (Test-Path -LiteralPath (Join-Path $InstallDir '.lay4flow-windows\backend\windows-x64\python.exe')) {
+  if (-not $AlreadyStarted) {
+    & (Join-Path $PSScriptRoot 'network.ps1') -InstallDir $InstallDir -Native | Out-Null
+  }
+  $nativeEnv = Join-Path $InstallDir '.env'
+  if (Test-Path -LiteralPath $nativeEnv) {
+    $nativePort = Select-String -LiteralPath $nativeEnv -Pattern '^LAY4FLOW_REMOTE_PORT=(\d+)' | Select-Object -First 1
+    if ($nativePort) { $Port = [int]$nativePort.Matches[0].Groups[1].Value }
+  }
+  & (Join-Path $PSScriptRoot 'native-start.ps1') -InstallDir $InstallDir -Port $Port -NoBrowser
+  if (-not $NoBrowser) {
+    Start-Process -FilePath (Join-Path $InstallDir '.lay4flow-windows\desktop\Lay4Flow.Desktop.exe') -ArgumentList @('--install-dir', ('"' + $InstallDir + '"')) -WorkingDirectory $InstallDir
+  }
+  exit 0
+}
 $compose = Join-Path $InstallDir "docker-compose.yml"
 if (-not (Test-Path -LiteralPath $compose)) { throw "lay4flow-remote is not installed at $InstallDir." }
 if ($ProjectName -notmatch '^[a-z0-9][a-z0-9_-]{0,62}$') { throw "ProjectName is invalid." }

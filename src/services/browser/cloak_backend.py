@@ -26,16 +26,26 @@ class CloakBrowserBackend:
         )
 
     async def open_interactive(self, profile_dir: Path, *, proxy_url: str | None = None) -> Any:
-        return await self._open(profile_dir, proxy_url=proxy_url)
+        # The management viewer is a real local window on Windows. Background
+        # maintenance may stay headless; this scoped override does not change
+        # the profile identity digest (headless is presentation-only).
+        return await self._open(profile_dir, proxy_url=proxy_url, headless=False)
 
     async def _open(
-        self, profile_dir: Path, *, proxy_url: str | None = None, display: str | None = None
+        self,
+        profile_dir: Path,
+        *,
+        proxy_url: str | None = None,
+        display: str | None = None,
+        headless: bool | None = None,
     ) -> Any:
         try:
             import cloakbrowser
         except ImportError as error:
             raise RuntimeError("CloakBrowser is not installed") from error
         options = self._launch_options(profile_dir, proxy_url)
+        if headless is not None:
+            options["headless"] = headless
         self._check_launch_settings(profile_dir, options)
         # Keep headed Profile identity unchanged; background windows use a
         # separate desktop that is never exposed through the viewer's VNC.

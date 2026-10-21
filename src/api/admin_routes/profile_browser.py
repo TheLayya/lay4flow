@@ -103,6 +103,19 @@ def create_profile_browser_router(
             raise error_response(error) from None
         return {"success": True, **state}
 
+    @router.post("/api/tokens/{token_id}/browser/focus")
+    async def focus_profile_browser(
+        token_id: int, request: Request, owner: str = Depends(verify_token)
+    ):
+        """Bring a Windows-native Cloak window forward without opening another one."""
+        require_origin(request)
+        try:
+            viewer_id = request.query_params.get("viewer_id")
+            state = await get_viewer().focus(token_id, owner, viewer_id=viewer_id)
+        except ViewerError as error:
+            raise error_response(error) from None
+        return {"success": True, **state}
+
     @router.get("/api/tokens/{token_id}/browser")
     async def profile_browser_status(
         token_id: int, request: Request, owner: str = Depends(verify_token)
@@ -174,6 +187,13 @@ def create_profile_browser_router(
             or not session_valid(owner)
             or not viewer.owns(token_id, owner)
         ):
+            await websocket.close(code=1008)
+            return
+        try:
+            if viewer.state(token_id, owner).get("presentation") == "native":
+                await websocket.close(code=1008)
+                return
+        except ViewerError:
             await websocket.close(code=1008)
             return
         try:

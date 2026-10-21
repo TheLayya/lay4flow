@@ -20,6 +20,7 @@ try {
   $bundle = Join-Path $stage "lay4flow-remote-$version-windows"
   if (-not (Test-Path -LiteralPath (Join-Path $bundle "install.ps1"))) { throw "Windows bundle entrypoint is missing" }
   if (-not (Test-Path -LiteralPath (Join-Path $bundle "desktop\windows-x64\Lay4Flow.Desktop.exe"))) { throw "Windows bundle does not contain the native desktop host; build_desktop.ps1 and package_windows.py --desktop-runtime are required" }
+  if (-not (Test-Path -LiteralPath (Join-Path $bundle "backend\windows-x64\python.exe"))) { throw "Windows installer requires the bundled Python backend; Docker-only Windows bundles are no longer accepted" }
   $bootstrapper = Join-Path $root "desktop\build\MicrosoftEdgeWebview2Setup.exe"
   if (-not (Test-Path -LiteralPath $bootstrapper)) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $bootstrapper) | Out-Null

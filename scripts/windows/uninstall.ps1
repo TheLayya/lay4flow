@@ -9,13 +9,15 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 $OutputEncoding = [Console]::OutputEncoding
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
+$native = Test-Path -LiteralPath (Join-Path $InstallDir '.lay4flow-windows\backend\windows-x64\python.exe')
+if ($native) { & (Join-Path $PSScriptRoot 'native-stop.ps1') -InstallDir $InstallDir }
 $compose = Join-Path $InstallDir "docker-compose.yml"
 $envPath = Join-Path $InstallDir ".env"
 if ((Test-Path -LiteralPath $envPath) -and -not $PSBoundParameters.ContainsKey("ProjectName")) {
   $projectMatch = Select-String -LiteralPath $envPath -Pattern '^COMPOSE_PROJECT_NAME=([a-z0-9][a-z0-9_-]{0,62})$' | Select-Object -First 1
   if ($projectMatch) { $ProjectName = $projectMatch.Matches[0].Groups[1].Value }
 }
-if (Test-Path -LiteralPath $compose) {
+if (-not $native -and (Test-Path -LiteralPath $compose)) {
   if (Get-Command docker -ErrorAction SilentlyContinue) {
     $ownedContainers = @(& docker ps -aq --filter "label=com.docker.compose.project=$ProjectName")
     if ($LASTEXITCODE -ne 0) { throw "Docker container ownership inspection failed." }

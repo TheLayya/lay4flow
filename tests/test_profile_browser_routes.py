@@ -28,6 +28,14 @@ class ProfileBrowserRouteTests(unittest.TestCase):
             open=AsyncMock(return_value={"token_id": 4, "status": "ready", "expires_at": 123}),
             close=AsyncMock(return_value={"token_id": 4, "status": "closed", "expires_at": None}),
             refresh=AsyncMock(return_value={"success": True, "at_expires": "2099-01-01T00:00:00Z"}),
+            focus=AsyncMock(
+                return_value={
+                    "token_id": 4,
+                    "status": "ready",
+                    "expires_at": 123,
+                    "presentation": "native",
+                }
+            ),
             state=Mock(return_value={"token_id": 4, "status": "ready", "expires_at": 123}),
             owns=Mock(side_effect=lambda token_id, owner: token_id == 4 and owner == "admin-test"),
         )
@@ -80,6 +88,19 @@ class ProfileBrowserRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["success"])
         self.viewer.refresh.assert_awaited_once_with(4, "admin-test")
+        self.viewer.close.assert_not_awaited()
+
+    def test_native_focus_requires_origin_and_keeps_the_viewer_open(self):
+        self.login()
+        response = self.client.post("/api/tokens/4/browser/focus")
+        self.assertEqual(response.status_code, 403)
+        response = self.client.post(
+            "/api/tokens/4/browser/focus?viewer_id=current",
+            headers={"Origin": "http://testserver"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["presentation"], "native")
+        self.viewer.focus.assert_awaited_once_with(4, "admin-test", viewer_id="current")
         self.viewer.close.assert_not_awaited()
 
     def test_direct_login_requires_auth_origin_and_bound_viewer_generation(self):

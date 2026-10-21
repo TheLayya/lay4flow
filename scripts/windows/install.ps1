@@ -338,6 +338,10 @@ if ($ProjectName -cnotmatch '^[a-z0-9][a-z0-9_-]{0,62}$') { Stop-WithMessage "Pr
 if (-not $BundleRoot) { $BundleRoot = $PSScriptRoot }
 $BundleRoot = (Resolve-Path -LiteralPath $BundleRoot).Path
 Write-InstallLog "Resolved BundleRoot='$BundleRoot'."
+if (Test-Path -LiteralPath (Join-Path $BundleRoot 'backend\windows-x64\python.exe')) {
+  & (Join-Path $BundleRoot 'windows\native-install.ps1') -BundleRoot $BundleRoot -InstallDir $InstallDir -Port $Port -NoBrowser:$NoBrowser -NoShortcuts:$NoShortcuts -ResolveConflicts:$ResolveConflicts -LogPath $LogPath
+  return
+}
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
   Write-Host "Install Docker Desktop: https://docs.docker.com/desktop/setup/install/windows-install/"
   if (-not $NoBrowser) { Start-Process "https://docs.docker.com/desktop/setup/install/windows-install/" }

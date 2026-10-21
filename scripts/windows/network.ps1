@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)][string]$InstallDir
+  [Parameter(Mandatory = $true)][string]$InstallDir,
+  [switch]$Native
 )
 $ErrorActionPreference = 'Stop'
 
@@ -198,7 +199,7 @@ if ($mode -eq 'manual') {
     if ($remaining -le 0) { break }
     $uri = $null
     if ([Uri]::TryCreate($candidate, [UriKind]::Absolute, [ref]$uri) -and (Test-HttpProxy $uri ([Math]::Min(6500, $remaining)))) {
-      $hostName = if ($uri.IsLoopback -or $uri.DnsSafeHost -in @('0.0.0.0', '::')) { 'host.docker.internal' } else { $uri.DnsSafeHost }
+      $hostName = if ($uri.IsLoopback -or $uri.DnsSafeHost -in @('0.0.0.0', '::')) { $(if ($Native) { '127.0.0.1' } else { 'host.docker.internal' }) } else { $uri.DnsSafeHost }
       if ($hostName.Contains(':')) { $hostName = '[' + $hostName + ']' }
       $selected = "$($uri.Scheme)://${hostName}:$($uri.Port)"
       $source = 'windows_proxy'

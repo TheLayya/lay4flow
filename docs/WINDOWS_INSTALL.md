@@ -1,42 +1,52 @@
 # Windows 一键安装
 
-下载 `lay4flow-remote-版本-windows-x64-setup.exe`，双击安装；也可解压 `lay4flow-remote-版本-windows-x64.zip` 后双击 `install.cmd`。安装完成后启动 **Lay4Flow 桌面应用**，在独立窗口内使用创作工作台。EXE 和桌面启动快捷方式使用与 TkCRM 相同的头像图标。默认管理员账号和密码均为 `admin`，登录后在后台修改。
+下载 `lay4flow-remote-版本-windows-x64-setup.exe` 后双击安装，完成后打开桌面上的 **lay4flow-remote**。安装包自带后台服务、Python 运行时、依赖和 Cloak 浏览器，用户无需安装 Docker、Python、Node、Git 或 .NET。ZIP 包也包含同样组件，解压后运行 `install.cmd`。
 
-首次使用先安装 [Docker Desktop for Windows](https://docs.docker.com/desktop/setup/install/windows-install/)，启用 WSL 2 和 Linux containers，完成 Docker Desktop 的初始设置。桌面窗口使用 Microsoft Edge WebView2 Runtime；安装器检查并引导安装缺失组件。桌面程序自带 .NET 运行时，不要求主机安装 .NET、Python、Node 或 Git。首次构建需要联网下载基础镜像和依赖，后续启动直接复用已有镜像。
+桌面界面使用 Microsoft Edge WebView2；Windows 10/11 通常已包含，缺失时安装器会引导安装微软官方组件。安装器、桌面程序和快捷方式沿用 TkCRM 同款图标。管理员账号和密码默认均为 `admin`，安装后在设置内修改。
 
-左下角版本号就是更新入口，点击后打开和 TkCRM 一致的「更新日志」抽屉；侧栏、用户菜单和桌面菜单也有相同入口。抽屉显示当前版本与逐版变更，发现新版本后直接点击「立即更新」：先校验 Windows 安装包和 Docker 运行包，服务完成切换后再重启桌面端。更新期间窗口保持可用，失败会保留日志并恢复原桌面文件。关闭窗口后 Docker 后台任务继续执行，再次打开可查看已有任务。
-
-正式桌面包由 Windows 构建机生成，内含 `Lay4Flow.Desktop.exe` 和自包含 .NET 运行时；ZIP 源码启动包不含该二进制。
-
-默认安装目录为 `%LOCALAPPDATA%\lay4flow-remote`，本机地址默认 `http://127.0.0.1:38000`。EXE 安装时若已有同名 Docker 项目，会为新目录选择独立项目；默认端口被占用时选择下一个可用端口，结果保存在安装目录 `.env` 和日志中。服务仅监听本机。也可在 PowerShell 指定目录和端口：
-
-安装失败时，安装器会显示具体原因并打开完整 PowerShell/Docker 日志：`%TEMP%\lay4flow-remote-install.log`。已创建安装目录时也保留 `.lay4flow-install.log`。手工指定的项目名或端口发生冲突时会退出并提示，原实例与数据保持原位。
+默认安装目录为 `%LOCALAPPDATA%\lay4flow-remote`，服务只监听本机，默认端口 `38000`。端口已被占用时安装器自动选择空闲端口，结果保存在安装目录 `.env`。可指定目录和端口：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir "D:\lay4flow-remote" -Port 38001
 ```
 
-生成内容前，在管理后台填写远程打码 API Key；在 [打码服务](https://cap.tk218.top/) 申请。Windows 安装器优先解析 Windows 系统代理和 PAC；显式 PAC 对 Google 登录地址返回 `DIRECT` 时遵循该直连路由。未得到显式 PAC 路由时，再探测正在运行的 Clash / Mihomo / sing-box 等代理程序实际监听端口，并把通过 HTTP CONNECT 或 SOCKS5 完整握手检查的出口写入容器可访问的 `host.docker.internal` 地址。不会写死 `7890`，也不要求一定开启 TUN。可在安装目录 `.env` 中设置 `LAY4FLOW_HOST_PROXY_MODE=auto`（默认自动探测）、`direct`（直连）或 `manual`，手动模式配合 `LAY4FLOW_HOST_PROXY=http://host.docker.internal:端口` / `socks5://host.docker.internal:端口` 使用。当前探测结果保存在 `data/host-network.json`；账号代理池绑定仍按账号自身的固定或随机策略执行。
+安装过程不下载应用依赖，不运行 Docker Compose。应用联网访问 Google 和远程打码服务仍需可用网络；生成 Flow 内容前，在 [打码服务](https://cap.tk218.top/) 申请 API Key 并在工坊设置中填写。
 
-## 启动、停止与卸载
+## 本机网络
 
-双击解压目录中的 `start.cmd` 启动桌面应用，`stop.cmd` 停止服务，`uninstall.cmd` 移除容器和桌面快捷方式。卸载保留安装目录及 `.env`、`config`、`data`、`tmp`；确认备份后自行删除目录即可完整清理。上述入口默认管理默认安装目录，自定义目录需带参数，例如：
+启动时自动解析 Windows 系统代理和 PAC；显式 PAC 对 Google 登录地址选择 `DIRECT` 时遵循直连。随后探测正在运行的 Clash / Mihomo / sing-box 等代理程序的实际监听端口，通过 HTTP CONNECT 或 SOCKS5 完整握手后接入。端口任意，不要求 TUN。
 
-```powershell
-.\stop.cmd -InstallDir "D:\lay4flow-remote"
-.\uninstall.cmd -InstallDir "D:\lay4flow-remote"
+Windows 原生后台直接连接 `127.0.0.1:实际端口`，并以账号原绑定 SOCKS5 作为最终出口。可在安装目录 `.env` 设置：
+
+```dotenv
+LAY4FLOW_HOST_PROXY_MODE=auto
 ```
 
-再次运行安装器会先比较安装包与现有版本：同版本保留运行文件并刷新桌面启动资产，新版本使用包内已校验的运行包升级 Docker 服务，通过健康与版本检查后再更新桌面资产；旧版本安装包会退出并保留现有安装。桌面升级从左下角版本号进入「更新日志」，点击「立即更新」即可完成桌面和 Docker 服务更新；不再创建独立 update 桌面快捷方式。仅更新 Docker 服务时，可使用解压包内的 `update.cmd -InstallDir "D:\lay4flow-remote"`。更新先校验固定版本运行包、构建候选镜像，再备份数据并切换容器，健康或版本检查失败则回滚。切换期间会短暂中断服务，进行中的生成任务应先完成。
+`direct` 使用直连；`manual` 配合 `LAY4FLOW_HOST_PROXY=http://127.0.0.1:实际端口` 或 `socks5://127.0.0.1:实际端口`。修改后重新打开桌面端。探测结果存放在 `data/host-network.json`，工坊状态可查看实际端口连通性。
 
-## 打包
+## 账号浏览器
 
-维护者先构建前端并通过项目检查，再运行：
+Windows 中的 Cloak 登录直接打开本机原生浏览器窗口。在账号页即可显示窗口、刷新凭据、关闭窗口和完成账号添加。每个账号继续保留独立 Profile、固定代理和身份校验；服务器 Docker 部署继续使用网页账号画面。
+
+## 启动、停止与更新
+
+桌面快捷方式或 `start.cmd` 启动原生后台和桌面；关闭桌面窗口后已提交后台任务继续处理。`stop.cmd` 正常停止后台并关闭 Profile，`uninstall.cmd` 停止本机后台并移除所属快捷方式，保留 `.env`、`config`、`data`、`tmp`。自定义目录需带 `-InstallDir` 参数。
+
+左下角版本号打开「更新日志」，在同一抽屉检查版本与执行更新。更新包先下载并校验；退出桌面后安装完整应用，后台和资料先备份，通过健康与版本检查后重新打开桌面。失败时恢复之前的运行文件和资料。更新前等待生成、导入和账号登录操作结束。
+
+再次运行同版安装包刷新程序文件；新版安装包升级后台和桌面，保留现有配置与账号资料；旧版安装包退出并保留现有安装。旧 Docker 桌面版覆盖升级时会沿用原安装目录的数据，先停止其所属容器再启动原生后台，其他 Docker 项目保持原位。
+
+安装日志：`%TEMP%\lay4flow-remote-install.log`。本机后台日志：安装目录 `data\native-service.log` 及 `.error`；桌面菜单「应用 → 启动日志」可查看启动详情。
+
+## 维护者打包
+
+先构建前端并通过项目检查，再构建后端和桌面运行时：
 
 ```powershell
+python scripts/build_native_runtime.py desktop/runtime/backend/windows-x64 --cloak-binary "已验证的Cloak目录/chrome.exe"
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_desktop.ps1
-python scripts/package_windows.py dist/lay4flow-remote-1.4.0-windows-x64.zip --desktop-runtime desktop/runtime/windows-x64
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_setup.ps1 -BundleZip dist/lay4flow-remote-1.4.0-windows-x64.zip -OutputDir dist/setup
+python scripts/build_release.py dist/1.5.0 --desktop-runtime desktop/runtime/windows-x64 --backend-runtime desktop/runtime/backend/windows-x64
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_setup.ps1 -BundleZip dist/1.5.0/lay4flow-remote-1.5.0-windows-x64.zip -OutputDir dist/1.5.0
 ```
 
-ZIP 使用公开运行时白名单，包含 MIT 和 NOTICE，不包含本机账号、密码、数据库、浏览器 Profile、日志或生成内容。`runtime/SHA256SUMS` 校验内置运行包；整个 ZIP 的 SHA-256 由打包命令输出，并随 Release 发布。EXE 使用 Inno Setup 6 包装同一份运行包，依赖 Docker Desktop，当前未做 Authenticode 签名。
+应用运行包、Python 和 Cloak 只包含公开组件，账号、密钥、Profile、数据库、日志和生成内容均排除在发布包之外。ZIP、运行包与 EXE 的 SHA-256 随构建清单保存。安装器当前未做 Authenticode 签名。

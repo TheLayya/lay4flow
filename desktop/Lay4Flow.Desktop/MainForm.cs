@@ -147,7 +147,8 @@ internal sealed class MainForm : Form
             await browser.EnsureCoreWebView2Async(environment);
             ConfigureView(browser);
             browser.CoreWebView2.WebMessageReceived += (_, args) => _ = HandleWebMessage(args);
-            await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync($"window.lay4flowDesktop = Object.freeze({JsonSerializer.Serialize(new { version = Version })});");
+            var runtime = IsNativeRuntime() ? "native" : "docker";
+            await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync($"window.lay4flowDesktop = Object.freeze({JsonSerializer.Serialize(new { version = Version, runtime })});");
             browser.NavigationCompleted += async (_, eventArgs) =>
             {
                 if (!eventArgs.IsSuccess) { ShowFailure(new Exception("页面加载失败：" + eventArgs.WebErrorStatus)); return; }
@@ -186,11 +187,13 @@ internal sealed class MainForm : Form
         catch (Exception error) { ShowFailure(error); }
     }
 
+    private bool IsNativeRuntime() => File.Exists(Path.Combine(options.InstallDir, ".lay4flow-windows", "native-service.py"));
+
     private async Task StartService()
     {
         var script = Path.Combine(options.InstallDir, ".lay4flow-windows", "start.ps1");
         if (!File.Exists(script)) throw new FileNotFoundException("安装文件缺失，请重新运行安装包。", script);
-        loading.Text = "正在检查 Docker 并启动服务…\n首次启动可能需要稍等片刻。";
+        loading.Text = "正在启动本地后台服务…\n首次启动可能需要稍等片刻。";
         var info = new ProcessStartInfo("powershell.exe")
         {
             UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = options.InstallDir,
@@ -355,7 +358,7 @@ internal sealed class MainForm : Form
         Log(error.ToString());
         if (IsDisposed) return;
         loading.Visible = true;
-        loading.Text = "启动遇到问题，请检查 Docker 是否已启动。\n点击「应用 → 启动日志」查看具体原因。\n\n" + error.Message;
+        loading.Text = "启动遇到问题。\n点击「应用 → 启动日志」查看具体原因。\n\n" + error.Message;
         browser.Visible = false;
     }
 
