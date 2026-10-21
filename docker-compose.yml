@@ -3,7 +3,7 @@ name: lay4flow-remote
 services:
   app:
     build: .
-    image: ${LAY4FLOW_REMOTE_IMAGE:-lay4flow-remote:1.2.1}
+    image: ${LAY4FLOW_REMOTE_IMAGE:-lay4flow-remote:1.3.0}
     init: true
     restart: unless-stopped
     ports:

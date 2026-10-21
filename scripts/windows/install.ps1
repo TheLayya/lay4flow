@@ -228,6 +228,32 @@ function New-Shortcut([string]$Path, [string]$Target, [string]$Arguments, [strin
   $shortcut.Save()
 }
 
+function Copy-LauncherAssets([string]$Bundle, [string]$Target) {
+  $windowsDir = Join-Path $Target ".lay4flow-windows"
+  New-Item -ItemType Directory -Force -Path $windowsDir | Out-Null
+  Get-ChildItem -LiteralPath (Join-Path $Bundle "windows") -File | Copy-Item -Destination $windowsDir -Force
+  $desktopSource = Join-Path $Bundle "desktop\windows-x64"
+  if (Test-Path -LiteralPath $desktopSource) {
+    $desktopTarget = Join-Path $windowsDir "desktop"
+    New-Item -ItemType Directory -Force -Path $desktopTarget | Out-Null
+    Get-ChildItem -LiteralPath $desktopSource -Force | Copy-Item -Destination $desktopTarget -Recurse -Force
+  }
+  return $windowsDir
+}
+
+function New-ApplicationShortcuts([string]$WindowsDir) {
+  $desktop = [Environment]::GetFolderPath("Desktop")
+  $ps = (Get-Command powershell.exe).Source
+  $shortcutName = if ($ProjectName -eq "lay4flow-remote") { "lay4flow-remote" } else { "lay4flow-remote ($ProjectName)" }
+  $desktopExe = Join-Path $WindowsDir "desktop\Lay4Flow.Desktop.exe"
+  if (Test-Path -LiteralPath $desktopExe) {
+    New-Shortcut (Join-Path $desktop "$shortcutName.lnk") $desktopExe "--install-dir `"$InstallDir`"" $InstallDir
+  } else {
+    New-Shortcut (Join-Path $desktop "$shortcutName.lnk") $ps "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$WindowsDir\start.ps1`" -InstallDir `"$InstallDir`" -Port $Port -ProjectName $ProjectName" $InstallDir
+  }
+  New-Shortcut (Join-Path $desktop "$shortcutName update.lnk") $ps "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$WindowsDir\update.ps1`" -InstallDir `"$InstallDir`"" $InstallDir
+}
+
 try {
 $logParent = Split-Path -Parent $script:InstallLogPath
 if ($logParent) { New-Item -ItemType Directory -Force -Path $logParent | Out-Null }
@@ -312,17 +338,8 @@ Write-InstallLog "Installation target: '$InstallDir'; Compose project: '$Project
 if (Test-Path -LiteralPath (Join-Path $InstallDir "docker-compose.yml")) {
   Write-Host "An existing installation was found at $InstallDir. Its files and data will be preserved."
   # Refresh the launcher assets so reinstalling a bundle also updates the shortcut icon.
-  $bundleWindows = Join-Path $BundleRoot "windows"
-  $windowsDir = Join-Path $InstallDir ".lay4flow-windows"
-  New-Item -ItemType Directory -Force -Path $windowsDir | Out-Null
-  Get-ChildItem -LiteralPath $bundleWindows -File | Copy-Item -Destination $windowsDir -Force
-  if (-not $NoShortcuts) {
-    $desktop = [Environment]::GetFolderPath("Desktop")
-    $ps = (Get-Command powershell.exe).Source
-    $shortcutName = if ($ProjectName -eq "lay4flow-remote") { "lay4flow-remote" } else { "lay4flow-remote ($ProjectName)" }
-    New-Shortcut (Join-Path $desktop "$shortcutName.lnk") $ps "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$windowsDir\start.ps1`" -InstallDir `"$InstallDir`" -Port $Port -ProjectName $ProjectName" $InstallDir
-    New-Shortcut (Join-Path $desktop "$shortcutName update.lnk") $ps "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$windowsDir\update.ps1`" -InstallDir `"$InstallDir`"" $InstallDir
-  }
+  $windowsDir = Copy-LauncherAssets $BundleRoot $InstallDir
+  if (-not $NoShortcuts) { New-ApplicationShortcuts $windowsDir }
   & (Join-Path $BundleRoot "windows\start.ps1") -InstallDir $InstallDir -Port $Port -ProjectName $ProjectName -NoBrowser:$NoBrowser
   Write-InstallLog "Existing installation was started successfully."
   Copy-InstallLogToTarget
@@ -354,10 +371,7 @@ try {
   if (-not (Test-Path -LiteralPath $existingEnv)) {
     @("LAY4FLOW_REMOTE_PORT=$Port", "COMPOSE_PROJECT_NAME=$ProjectName") | Set-Content -LiteralPath $existingEnv -Encoding ascii
   }
-  $bundleWindows = Join-Path $BundleRoot "windows"
-  $windowsDir = Join-Path $InstallDir ".lay4flow-windows"
-  New-Item -ItemType Directory -Force -Path $windowsDir | Out-Null
-  Get-ChildItem -LiteralPath $bundleWindows -File | Copy-Item -Destination $windowsDir -Force
+  $windowsDir = Copy-LauncherAssets $BundleRoot $InstallDir
   $envPath = Join-Path $InstallDir ".env"
   $envText = if (Test-Path -LiteralPath $envPath) { Get-Content -LiteralPath $envPath -Raw } else { "" }
   if ($envText -notmatch '(?m)^LAY4FLOW_REMOTE_PORT=') {
@@ -368,13 +382,7 @@ try {
   }
   Invoke-Compose $compose @("--project-directory", $InstallDir, "--env-file", $existingEnv, "-p", $ProjectName, "-f", (Join-Path $InstallDir "docker-compose.yml"), "up", "-d", "--build")
   & (Join-Path $windowsDir "start.ps1") -InstallDir $InstallDir -Port $Port -ProjectName $ProjectName -AlreadyStarted -NoBrowser
-  if (-not $NoShortcuts) {
-    $desktop = [Environment]::GetFolderPath("Desktop")
-    $ps = (Get-Command powershell.exe).Source
-    $shortcutName = if ($ProjectName -eq "lay4flow-remote") { "lay4flow-remote" } else { "lay4flow-remote ($ProjectName)" }
-    New-Shortcut (Join-Path $desktop "$shortcutName.lnk") $ps "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$windowsDir\start.ps1`" -InstallDir `"$InstallDir`" -Port $Port -ProjectName $ProjectName" $InstallDir
-    New-Shortcut (Join-Path $desktop "$shortcutName update.lnk") $ps "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$windowsDir\update.ps1`" -InstallDir `"$InstallDir`"" $InstallDir
-  }
+  if (-not $NoShortcuts) { New-ApplicationShortcuts $windowsDir }
   Write-Host "lay4flow-remote is installed at $InstallDir"
   Write-InstallLog "lay4flow-remote is installed at $InstallDir."
   Copy-InstallLogToTarget

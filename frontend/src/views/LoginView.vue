@@ -11,6 +11,7 @@ import {
     VideoPause,
     VideoPlay,
     RefreshRight,
+    Document,
 } from '@element-plus/icons-vue'
 import { api } from '../lib/api'
 import { acceptSession } from '../router'
@@ -31,6 +32,9 @@ function replayMotion() {
     motionPaused.value = false
     scene.value?.replay()
     mobileScene.value?.replay()
+}
+function openReleaseHistory() {
+    window.dispatchEvent(new Event('open-release-history'))
 }
 const form = reactive({ username: '', password: '' }),
     formRef = ref(),
@@ -157,6 +161,7 @@ onMounted(async () => {
                 </router-link>
             </div>
             <footer class="login-footer">
+                <el-button class="login-release-trigger" text :icon="Document" @click="openReleaseHistory">更新日志</el-button>
                 <div class="login-mediums">
                     <span>
                         <el-icon><Picture /></el-icon>
@@ -362,6 +367,10 @@ onMounted(async () => {
     width: 100%;
     color: var(--muted);
     font-size: 12px;
+}
+.login-release-trigger.el-button {
+    margin-bottom: 14px;
+    color: var(--accent-strong);
 }
 .login-mediums {
     display: flex;

@@ -14,6 +14,10 @@ data/
 tmp/
 output/
 dist/
+desktop/**/bin/
+desktop/**/obj/
+desktop/runtime/
+desktop/build/
 .lay4flow-updates/
 .lay4flow-windows/
 browser_data*/

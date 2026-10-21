@@ -210,14 +210,18 @@ def create_settings_router(
             },
         }
 
-    @router.get("/api/admin/release")
-    async def get_release_metadata(token: str = Depends(verify_token)):
-        """Return the local release identity and checked-in changelog."""
+    @router.get("/api/release")
+    async def get_public_release_metadata():
+        """Return the local release notes for the login screen and desktop shell.
+
+        The payload contains only checked-in public metadata and the changelog;
+        account, proxy, and runtime settings remain behind the admin session.
+        """
         return {"success": True, **_read_release_metadata()}
 
-    @router.get("/api/admin/release/check")
-    async def check_latest_release(token: str = Depends(verify_token)):
-        """Check the trusted GitHub release page without delaying app startup."""
+    @router.get("/api/release/check")
+    async def check_public_release():
+        """Check the trusted GitHub release page without requiring a login."""
         async with release_check_lock:
             if (
                 release_check_cache["result"] is None
@@ -226,6 +230,16 @@ def create_settings_router(
                 release_check_cache["result"] = await _check_latest_release()
                 release_check_cache["at"] = time.monotonic()
             return release_check_cache["result"]
+
+    @router.get("/api/admin/release")
+    async def get_release_metadata(token: str = Depends(verify_token)):
+        """Return the local release identity and checked-in changelog."""
+        return await get_public_release_metadata()
+
+    @router.get("/api/admin/release/check")
+    async def check_latest_release(token: str = Depends(verify_token)):
+        """Check the trusted GitHub release page without delaying app startup."""
+        return await check_public_release()
 
     @router.get("/docs/{document}", include_in_schema=False)
     async def get_release_document(document: str):

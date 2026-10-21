@@ -97,7 +97,7 @@
 
 ### Windows 一键安装
 
-Windows 双击 `lay4flow-remote-版本-windows-x64-setup.exe` 安装，或解压 ZIP 后双击 **`install.cmd`**。安装 EXE 和启动、更新快捷方式使用与 TkCRM 相同的头像图标。正式发布资产位于 [GitHub Releases](https://github.com/TheLayya/lay4flow/releases)。需要先安装 [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/) 并启用 Linux 容器；安装器自动准备配置、构建并启动服务，成功后打开管理页并创建桌面快捷方式。
+Windows 双击 `lay4flow-remote-版本-windows-x64-setup.exe` 安装，或解压 ZIP 后双击 **`install.cmd`**。桌面快捷方式启动 **Lay4Flow 独立应用窗口**，在窗口内使用创作工作台；应用内提供更新日志和检查更新入口，安装器与桌面程序沿用 TkCRM 同款图标。正式发布资产位于 [GitHub Releases](https://github.com/TheLayya/lay4flow/releases)。需要 [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/) 和 WebView2 Runtime；安装器自动准备配置、构建并启动服务。
 
 默认安装到 `%LOCALAPPDATA%\lay4flow-remote`，账号和密码均为 **`admin`**。详细的启动、更新、停止与保留数据卸载方式见 [Windows 安装指引](docs/WINDOWS_INSTALL.md)。
 

@@ -7,6 +7,9 @@
 #ifndef OutputDir
   #define OutputDir "..\..\dist"
 #endif
+#ifndef WebView2Bootstrapper
+  #error Pass Microsoft-signed WebView2 bootstrapper path
+#endif
 
 [Setup]
 AppId={{7A53958F-0D3A-4831-A9BE-B52BDF0D83C8}
@@ -33,11 +36,38 @@ LicenseFile={#BundleDir}\LICENSE
 
 [Files]
 Source: "{#BundleDir}\*"; DestDir: "{tmp}\lay4flow-remote-bundle"; Flags: recursesubdirs createallsubdirs deleteafterinstall
+Source: "{#WebView2Bootstrapper}"; Flags: dontcopy
 
 [Code]
 var
   InstallFailure: Integer;
   InstallLogPath: String;
+
+function HasWebViewRuntime(Root: Integer): Boolean;
+var
+  Version: String;
+begin
+  Result := RegQueryStringValue(Root, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', Version)
+    and (Version <> '') and (Version <> '0.0.0.0');
+end;
+
+function IsWebView2Installed(): Boolean;
+begin
+  Result := HasWebViewRuntime(HKLM32) or HasWebViewRuntime(HKCU32) or HasWebViewRuntime(HKLM64) or HasWebViewRuntime(HKCU64);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ExitCode: Integer;
+begin
+  Result := '';
+  if IsWebView2Installed() then Exit;
+  ExtractTemporaryFile('MicrosoftEdgeWebview2Setup.exe');
+  if not Exec(ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe'), '/silent /install', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+    Result := 'Microsoft Edge WebView2 Runtime setup did not start. Install the runtime and try again.'
+  else if (ExitCode <> 0) or not IsWebView2Installed() then
+    Result := 'Microsoft Edge WebView2 Runtime installation did not finish. Check the network and try again. Code: ' + IntToStr(ExitCode);
+end;
 
 procedure ReportInstallFailure(const Message: String);
 var

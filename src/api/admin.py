@@ -382,6 +382,8 @@ _ROUTE_ORDER = (
     "get_call_logic_config",
     "update_call_logic_config",
     "get_system_info",
+    "get_public_release_metadata",
+    "check_public_release",
     "get_release_metadata",
     "check_latest_release",
     "get_release_document",

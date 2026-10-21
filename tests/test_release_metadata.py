@@ -106,6 +106,23 @@ class ReleaseMetadataRouteTests(unittest.TestCase):
         with TestClient(app) as client:
             self.assertEqual(client.get("/api/admin/release").status_code, 401)
             self.assertEqual(client.get("/api/admin/release/check").status_code, 401)
+            with patch.object(settings.urllib.request, "urlopen") as network:
+                response = client.get("/api/release")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["version"], settings.VERSION)
+            self.assertEqual(
+                set(response.json()),
+                {
+                    "success",
+                    "project",
+                    "version",
+                    "release_date",
+                    "entries",
+                    "release_page",
+                    "update_docs",
+                },
+            )
+            network.assert_not_called()
             app.dependency_overrides[denied] = lambda: "synthetic-session"
             with patch.object(settings.urllib.request, "urlopen") as network:
                 response = client.get("/api/admin/release")
@@ -117,6 +134,7 @@ class ReleaseMetadataRouteTests(unittest.TestCase):
                 "_check_latest_release",
                 new=AsyncMock(return_value={"success": True, "status": "up_to_date"}),
             ) as checker:
+                self.assertEqual(client.get("/api/release/check").status_code, 200)
                 self.assertEqual(client.get("/api/admin/release/check").status_code, 200)
                 self.assertEqual(client.get("/api/admin/release/check").status_code, 200)
             self.assertEqual(checker.await_count, 1)

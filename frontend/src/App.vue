@@ -32,6 +32,7 @@ import BrandMark from './components/BrandMark.vue'
 import Mascot from './components/Mascot.vue'
 import SparkIcon from './components/SparkIcon.vue'
 import ProfileImportNotice from './components/ProfileImportNotice.vue'
+import ReleaseHistoryDrawer from './components/ReleaseHistoryDrawer.vue'
 
 const route = useRoute(),
     router = useRouter()
@@ -106,6 +107,15 @@ function navigate(path) {
 function manageAccounts() {
     notificationOpen.value = false
     navigate('/accounts')
+}
+function openReleaseHistory() {
+    mobileOpen.value = false
+    window.dispatchEvent(new Event('open-release-history'))
+}
+function userCommand(command) {
+    if (command === 'logout') logout()
+    else if (command === 'releases') openReleaseHistory()
+    else navigate('/settings')
 }
 function resize() {
     isMobile.value = window.innerWidth < 768
@@ -199,6 +209,7 @@ onUnmounted(() => {
 <template>
     <el-config-provider :locale="zhCn" :button="{ autoInsertSpace: false }">
         <a class="skip-link" href="#main-content" @click.prevent="skipToContent">跳到主要内容</a>
+        <ReleaseHistoryDrawer />
         <router-view v-if="isLogin || isProfile" />
         <div
             v-else
@@ -242,6 +253,13 @@ onUnmounted(() => {
                     </el-tooltip>
                 </nav>
                 <div class="sidebar-bottom">
+                    <el-tooltip content="更新日志" placement="right" :disabled="!collapsed">
+                        <button class="release-history-trigger" @click="openReleaseHistory">
+                            <el-icon><Document /></el-icon>
+                            <span class="release-trigger-label">更新日志</span>
+                            <span v-if="health?.version" class="release-trigger-version">v{{ health.version }}</span>
+                        </button>
+                    </el-tooltip>
                     <div class="companion-note">
                         <Mascot compact portrait mood="sleepy" />
                         <div>
@@ -256,7 +274,7 @@ onUnmounted(() => {
                     <el-dropdown
                         trigger="click"
                         placement="top-start"
-                        @command="(command) => (command === 'logout' ? logout() : navigate('/settings'))"
+                        @command="userCommand"
                     >
                         <button class="user-menu">
                             <span class="user-avatar">{{ username.slice(0, 1).toUpperCase() }}</span>
@@ -269,6 +287,7 @@ onUnmounted(() => {
                         <template #dropdown>
                             <el-dropdown-menu>
                                 <el-dropdown-item command="settings" :icon="Setting">账号与设置</el-dropdown-item>
+                                <el-dropdown-item command="releases" :icon="Document">更新日志</el-dropdown-item>
                                 <el-dropdown-item command="logout" :icon="SwitchButton" divided>
                                     退出登录
                                 </el-dropdown-item>
@@ -434,6 +453,49 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.release-history-trigger {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 40px;
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    border: 1px solid #43506a;
+    border-radius: 10px;
+    color: #e7ecf7;
+    background: transparent;
+    text-align: left;
+}
+.release-history-trigger:hover {
+    background: #344259;
+}
+.release-trigger-label {
+    font-size: 13px;
+}
+.release-trigger-version {
+    margin-left: auto;
+    color: #b9c7df;
+    font-size: 11px;
+}
+.rail-collapsed .release-trigger-label,
+.rail-collapsed .release-trigger-version {
+    display: none;
+}
+.rail-collapsed .release-history-trigger {
+    justify-content: center;
+    padding-inline: 0;
+}
+@media (max-width: 767px) {
+    .rail-collapsed .release-trigger-label,
+    .rail-collapsed .release-trigger-version {
+        display: block;
+    }
+    .rail-collapsed .release-history-trigger {
+        justify-content: flex-start;
+        padding-inline: 12px;
+    }
+}
 .captcha-setup-notice {
     display: flex;
     flex-shrink: 0;

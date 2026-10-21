@@ -25,7 +25,29 @@ try {
 } finally {
   $ErrorActionPreference = $savedErrorAction
 }
-if ($infoExit -ne 0) { throw "Docker Desktop is not running. Start it and retry." }
+if ($infoExit -ne 0) {
+  $dockerDesktop = @(
+    (Join-Path ${env:ProgramFiles} "Docker\Docker\Docker Desktop.exe"),
+    (Join-Path $env:LOCALAPPDATA "Programs\DockerDesktop\Docker Desktop.exe"),
+    (Join-Path $env:LOCALAPPDATA "Docker\Docker Desktop.exe")
+  ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+  if ($dockerDesktop) { Start-Process -FilePath $dockerDesktop -WindowStyle Hidden | Out-Null }
+  $dockerDeadline = (Get-Date).AddSeconds(120)
+  do {
+    Start-Sleep -Seconds 2
+    try {
+      $ErrorActionPreference = "Continue"
+      & docker info *> $null
+      $infoExit = $LASTEXITCODE
+      if ($infoExit -eq 0) {
+        $osType = [string](& docker info --format '{{.OSType}}' 2>$null)
+        $osTypeExit = $LASTEXITCODE
+        break
+      }
+    } finally { $ErrorActionPreference = $savedErrorAction }
+  } while ((Get-Date) -lt $dockerDeadline)
+}
+if ($infoExit -ne 0) { throw "Docker Desktop did not become ready within 120 seconds. Start it and retry." }
 if ($osTypeExit -ne 0 -or $osType.Trim() -ne "linux") { throw "Docker Desktop must use Linux containers (WSL 2 engine)." }
 $portValue = $Port
 $envPath = Join-Path $InstallDir ".env"
@@ -73,4 +95,11 @@ while ((Get-Date) -lt $deadline) {
 }
 if (-not $healthy) { throw "lay4flow-remote did not become ready at http://127.0.0.1:$portValue/health." }
 Write-Host "lay4flow-remote is ready: http://127.0.0.1:$portValue/login"
-if (-not $NoBrowser) { Start-Process "http://127.0.0.1:$portValue/login" }
+if (-not $NoBrowser) {
+  $desktopExe = Join-Path $InstallDir ".lay4flow-windows\desktop\Lay4Flow.Desktop.exe"
+  if (Test-Path -LiteralPath $desktopExe) {
+    Start-Process -FilePath $desktopExe -ArgumentList @("--install-dir", ('"' + $InstallDir + '"')) -WorkingDirectory $InstallDir
+  } else {
+    Start-Process "http://127.0.0.1:$portValue/login"
+  }
+}

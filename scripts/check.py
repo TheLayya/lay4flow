@@ -15,6 +15,7 @@ COMPONENTS = [
     "tests/test_update_runtime.py",
     "tests/test_update_shell.py",
     "tests/test_windows_installer.py",
+    "tests/test_desktop_contract.py",
     "src/core/auth.py",
     "tests/test_default_credentials.py",
     "src/main.py",

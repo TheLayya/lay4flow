@@ -10,7 +10,12 @@ from pathlib import Path
 from package_release import ROOT, package_release
 
 
-def package_windows(root: Path, output: Path, runtime_archive: Path | None = None) -> dict:
+def package_windows(
+    root: Path,
+    output: Path,
+    runtime_archive: Path | None = None,
+    desktop_runtime: Path | None = None,
+) -> dict:
     root, output = Path(root).resolve(), Path(output).resolve()
     version = (root / "VERSION").read_text(encoding="utf-8").strip()
     bundle_name = f"lay4flow-remote-{version}-windows"
@@ -42,6 +47,32 @@ def package_windows(root: Path, output: Path, runtime_archive: Path | None = Non
                     "if errorlevel 1 pause\r\nendlocal\r\n"
                 )
                 archive.writestr(f"{bundle_name}/{name}.cmd", launcher.encode("ascii"))
+            if desktop_runtime is not None:
+                desktop_runtime = Path(desktop_runtime).resolve()
+                exe = desktop_runtime / "Lay4Flow.Desktop.exe"
+                if not exe.is_file():
+                    raise FileNotFoundError(f"Desktop runtime is missing {exe}")
+                for path in sorted(desktop_runtime.rglob("*")):
+                    if path.is_file():
+                        relative = path.relative_to(desktop_runtime)
+                        allowed_json = path.parent == desktop_runtime and path.name in {
+                            "Lay4Flow.Desktop.deps.json",
+                            "Lay4Flow.Desktop.runtimeconfig.json",
+                        }
+                        if (
+                            path.is_symlink()
+                            or path.suffix.lower() not in {".dll", ".exe", ".pdb", ".xml", ".json"}
+                            or path.suffix.lower() == ".json"
+                            and not allowed_json
+                            or any(
+                                part.lower() in {"data", "tmp", "profiles", "output", "cookies"}
+                                for part in relative.parts
+                            )
+                        ):
+                            raise ValueError(f"Desktop runtime contains private state: {relative}")
+                        archive.write(
+                            path, f"{bundle_name}/desktop/windows-x64/{relative.as_posix()}"
+                        )
             archive.write(root / "docs/WINDOWS_INSTALL.md", f"{bundle_name}/README.md")
             archive.write(root / "LICENSE", f"{bundle_name}/LICENSE")
             archive.write(root / "NOTICE", f"{bundle_name}/NOTICE")
@@ -53,7 +84,10 @@ def package_windows(root: Path, output: Path, runtime_archive: Path | None = Non
     return {
         "project": "lay4flow-remote",
         "version": version,
-        "kind": "windows-docker-installer",
+        "kind": "windows-desktop-docker-installer"
+        if desktop_runtime
+        else "windows-docker-installer",
+        "desktop": bool(desktop_runtime),
         "requires": ["Windows 10/11 x64", "Docker Desktop with Linux containers"],
         "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
         "runtime_sha256": runtime["sha256"],
@@ -64,8 +98,15 @@ def package_windows(root: Path, output: Path, runtime_archive: Path | None = Non
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--desktop-runtime", type=Path)
     args = parser.parse_args()
-    print(json.dumps(package_windows(ROOT, args.output), ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            package_windows(ROOT, args.output, desktop_runtime=args.desktop_runtime),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 

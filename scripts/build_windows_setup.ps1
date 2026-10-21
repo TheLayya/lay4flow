@@ -19,7 +19,15 @@ try {
   Expand-Archive -LiteralPath $BundleZip -DestinationPath $stage
   $bundle = Join-Path $stage "lay4flow-remote-$version-windows"
   if (-not (Test-Path -LiteralPath (Join-Path $bundle "install.ps1"))) { throw "Windows bundle entrypoint is missing" }
-  & $Iscc "/DAppVersion=$version" "/DBundleDir=$bundle" "/DOutputDir=$OutputDir" (Join-Path $PSScriptRoot "windows\installer.iss")
+  if (-not (Test-Path -LiteralPath (Join-Path $bundle "desktop\windows-x64\Lay4Flow.Desktop.exe"))) { throw "Windows bundle does not contain the native desktop host; build_desktop.ps1 and package_windows.py --desktop-runtime are required" }
+  $bootstrapper = Join-Path $root "desktop\build\MicrosoftEdgeWebview2Setup.exe"
+  if (-not (Test-Path -LiteralPath $bootstrapper)) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $bootstrapper) | Out-Null
+    Invoke-WebRequest -UseBasicParsing -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $bootstrapper
+  }
+  $signature = Get-AuthenticodeSignature -LiteralPath $bootstrapper
+  if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { throw "Microsoft WebView2 bootstrapper signature verification failed" }
+  & $Iscc "/DAppVersion=$version" "/DBundleDir=$bundle" "/DOutputDir=$OutputDir" "/DWebView2Bootstrapper=$bootstrapper" (Join-Path $PSScriptRoot "windows\installer.iss")
   if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed: $LASTEXITCODE" }
   $hash = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant()
   Add-Content -LiteralPath (Join-Path $OutputDir "SHA256SUMS") -Encoding ascii -Value "$hash  $([IO.Path]::GetFileName($output))"

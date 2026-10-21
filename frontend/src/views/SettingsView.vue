@@ -12,6 +12,7 @@ import {
     Monitor,
     Tools,
     Search,
+    Document,
 } from '@element-plus/icons-vue'
 import { api, notifyError, parseDate } from '../lib/api'
 import { CAPTCHA_SERVICE_URL } from '../lib/captcha-service'
@@ -242,6 +243,9 @@ async function checkRelease() {
     } finally {
         releaseCheck.loading = false
     }
+}
+function openReleaseHistory() {
+    window.dispatchEvent(new Event('open-release-history'))
 }
 async function save(id, path, body, target = body) {
     if (busy.has(id)) return
@@ -981,6 +985,7 @@ onMounted(load)
                                     </ul>
                                 </details>
                                 <div class="release-links">
+                                    <el-button :icon="Document" @click="openReleaseHistory">打开更新日志</el-button>
                                     <el-button :loading="releaseCheck.loading" :icon="Refresh" @click="checkRelease">检查线上版本</el-button>
                                     <a :href="release.release_page" target="_blank" rel="noreferrer">GitHub 发布页</a>
                                     <a :href="release.update_docs.windows" target="_blank" rel="noreferrer">Windows 一键安装</a>
