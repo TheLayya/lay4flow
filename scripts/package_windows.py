@@ -83,17 +83,21 @@ def package_windows(
                 if not manifest.get("cloak_binary"):
                     raise ValueError("Backend runtime is missing the Cloak browser binary")
                 cloak_binary = manifest.get("cloak_binary")
+                manifest_files = manifest.get("files")
                 if (
                     not isinstance(cloak_binary, str)
                     or not cloak_binary
                     or Path(cloak_binary).is_absolute()
                     or ".." in Path(cloak_binary).parts
+                    or not isinstance(manifest_files, list)
+                    or cloak_binary.replace("\\", "/")
+                    not in {str(item).replace("\\", "/") for item in manifest_files}
                     or not (backend_runtime / cloak_binary).is_file()
                 ):
                     raise FileNotFoundError(
                         "The bundled Windows backend must include a verified Cloak chrome.exe"
                     )
-                for name in manifest["files"]:
+                for name in manifest_files:
                     relative = Path(name)
                     if relative.is_absolute() or ".." in relative.parts:
                         raise ValueError("Unexpected backend runtime path")
