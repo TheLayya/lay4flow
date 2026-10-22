@@ -648,16 +648,14 @@ test('keyboard media tabs wrap, move focus after updates, and ignore actions dur
     assert.equal(prevented, 3)
 })
 
-test('a material-dependent mode reveals the complete upload controls', async () => {
+test('a material-dependent mode retains its required image inputs', async () => {
     const { studio } = makeStudio()
     studio.kind.value = 'video'
     studio.selectedId.value = 'veo_3_1'
     studio.selectModel()
     await flush()
-    studio.editorTab.value = 'prompt'
     studio.params.mode = 'first_last_frame'
     await flush()
-    assert.equal(studio.editorTab.value, 'materials')
     assert.equal(studio.modeLimits.value.minImages, 2)
 })
 

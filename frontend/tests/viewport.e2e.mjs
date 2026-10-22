@@ -99,6 +99,9 @@ try {
                         mainScroll: main.scrollHeight,
                         panelHeight: editor?.clientHeight,
                         panelScroll: editor?.scrollHeight,
+                        panelWidth: editor?.clientWidth,
+                        panelScrollWidth: editor?.scrollWidth,
+                        panelOverflowY: editor && getComputedStyle(editor).overflowY,
                         panelBottom: bounds?.bottom,
                         submitBottom: control?.getBoundingClientRect().bottom,
                     }
@@ -113,23 +116,44 @@ try {
                     `${label}: main scroll ${JSON.stringify(measurements)}`,
                 )
             assert.ok(
-                measurements.panelScroll <= measurements.panelHeight + 1,
-                `${label}: panel overflow ${JSON.stringify(measurements)}`,
+                measurements.panelScrollWidth <= measurements.panelWidth + 1,
+                `${label}: panel horizontal overflow ${JSON.stringify(measurements)}`,
             )
-            if (selector === '.studio-editor')
-                assert.ok(measurements.submitBottom <= measurements.panelBottom + 1, `${label}: submit leaves editor`)
+            if (selector === '.studio-editor') {
+                assert.ok(
+                    ['auto', 'scroll'].includes(measurements.panelOverflowY),
+                    `${label}: editor scroll is missing`,
+                )
+                await page.locator(selector).evaluate((editor) => {
+                    editor.scrollTop = editor.scrollHeight
+                })
+                const submit = await page.locator('.editor-submit').boundingBox()
+                const panel = await page.locator(selector).boundingBox()
+                assert.ok(submit.y >= panel.y - 1, `${label}: submit starts outside editor`)
+                assert.ok(submit.y + submit.height <= panel.y + panel.height + 1, `${label}: submit leaves editor`)
+                await page.screenshot({
+                    path: resolve(output, `${label}-submit-${width}x${height}.png`),
+                    animations: 'disabled',
+                })
+                await page.locator(selector).evaluate((editor) => {
+                    editor.scrollTop = 0
+                })
+            } else
+                assert.ok(
+                    measurements.panelScroll <= measurements.panelHeight + 1,
+                    `${label}: panel overflow ${JSON.stringify(measurements)}`,
+                )
             results.push({ label, width, height, measurements })
             await page.screenshot({ path: resolve(output, `${label}-${width}x${height}.png`), animations: 'disabled' })
         }
-        for (const tab of ['描述', '画面设定', '参考素材']) {
-            await page.getByRole('tab', { name: tab, exact: true }).click()
-            await verify(`studio-${tab}`, '.studio-editor')
-        }
+        assert.equal(await page.locator('.studio-editor [role="tab"]').count(), 0)
+        for (const panel of ['.editor-prompt', '.editor-parameters', '.editor-materials'])
+            assert.ok(await page.locator(panel).isVisible())
+        await verify('studio-image', '.studio-editor')
         await page.locator('[data-kind="video"]').click()
-        for (const tab of ['描述', '画面设定', '参考素材']) {
-            await page.getByRole('tab', { name: tab, exact: true }).click()
-            await verify(`studio-video-${tab}`, '.studio-editor')
-        }
+        for (const panel of ['.editor-prompt', '.editor-parameters', '.editor-materials'])
+            assert.ok(await page.locator(panel).isVisible())
+        await verify('studio-video', '.studio-editor')
         await page.goto(`${base}/manage#/settings`)
         await page.locator('.settings-view h1').waitFor()
         await page.locator('.settings-skeleton').waitFor({ state: 'hidden' })
@@ -142,7 +166,9 @@ try {
     }
     assert.deepEqual(errors, [])
     await writeFile(resolve(output, 'verification.json'), JSON.stringify({ results, errors }, null, 2))
-    console.log(`PASS ${results.length} viewport checks; editor submission and active settings fit without scrolling`)
+    console.log(
+        `PASS ${results.length} viewport checks; editor sections stay visible and submission is reachable within its scroll area`,
+    )
 } finally {
     await browser.close()
 }

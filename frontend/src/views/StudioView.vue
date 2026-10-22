@@ -65,7 +65,6 @@ function configureCaptcha() {
 const details = ref(false),
     documentDrawer = ref(false),
     receiptInput = ref('')
-const editorTab = ref('prompt')
 const flowModels = ref(Object.entries(fallback).map(([id, entry]) => ({ id, ...entry })))
 const vidsModels = ref([]),
     vidsStatus = ref({ configured: false, available: {}, recoverable: {}, quota: {} })
@@ -448,7 +447,6 @@ function normalizeOptions() {
     }
 }
 watch([provider, kind], () => {
-    editorTab.value = 'prompt'
     if (kind.value === 'speech') provider.value = 'vids'
     selectedId.value = models.value[0]?.id || ''
     selectModel()
@@ -460,12 +458,6 @@ watch(
     () => {
         resetMaterials()
         error.value = ''
-    },
-)
-watch(
-    () => [params.mode, kind.value, provider.value],
-    () => {
-        if (modeLimits.value.minImages > 0 || modeLimits.value.videoInput) editorTab.value = 'materials'
     },
 )
 async function navigateKind(event) {
@@ -616,7 +608,6 @@ async function addReferenceFiles(files) {
         return
     }
     for (const file of images) await addImage({ raw: file })
-    if (!error.value) editorTab.value = 'materials'
 }
 async function pasteImages(event) {
     if (imageEditorOpen.value || busy.value || materialBusy.value) return
@@ -771,7 +762,6 @@ async function applyImageEdit({ file, prompt: editPrompt, mode }) {
     }
     if (error.value) return
     imageEditorOpen.value = false
-    editorTab.value = mode === 'edit' ? 'prompt' : 'materials'
     ElMessage.success(mode === 'edit' ? '编辑后的图片已设为原图，修改描述后点击开始绘梦' : '编辑后的图片已加入参考区')
 }
 function studioShortcuts(event) {
@@ -1666,7 +1656,6 @@ async function reuseEntry(entry) {
     for (const [name, value] of Object.entries(entry.settings || {})) if (name in params) params[name] = value
     params.count = 1
     await nextTick()
-    editorTab.value = 'prompt'
     window.scrollTo?.({ top: 0, behavior: 'smooth' })
     ElMessage.success('已带入原提示词与生成参数，可直接修改后重新创作')
 }
@@ -1896,43 +1885,8 @@ onUnmounted(() => {
                     </div>
                     <el-tag effect="plain">{{ provider === 'flow' ? 'FLOW' : 'VIDS' }}</el-tag>
                 </div>
-                <div class="editor-tabs" role="tablist" aria-label="编辑分区">
-                    <button
-                        role="tab"
-                        :aria-selected="editorTab === 'prompt'"
-                        :class="{ active: editorTab === 'prompt' }"
-                        @click="editorTab = 'prompt'"
-                    >
-                        描述
-                    </button>
-                    <button
-                        role="tab"
-                        :aria-selected="editorTab === 'settings'"
-                        :class="{ active: editorTab === 'settings' }"
-                        @click="editorTab = 'settings'"
-                    >
-                        {{ kind === 'speech' ? '声线设置' : '画面设定' }}
-                    </button>
-                    <button
-                        v-if="kind !== 'speech'"
-                        role="tab"
-                        :aria-selected="editorTab === 'materials'"
-                        :class="{ active: editorTab === 'materials' }"
-                        @click="editorTab = 'materials'"
-                    >
-                        参考素材
-                        <span v-if="materials.length || sourceVideo">
-                            · {{ materials.length + (sourceVideo ? 1 : 0) }}
-                        </span>
-                    </button>
-                </div>
                 <el-form label-position="top" :disabled="materialBusy" class="studio-editor-form">
-                    <div
-                        v-show="editorTab === 'prompt'"
-                        class="editor-panel editor-prompt"
-                        role="tabpanel"
-                        aria-label="描述"
-                    >
+                    <div class="editor-panel editor-prompt" role="group" aria-label="描述">
                         <el-form-item label="生成模型" class="model-field">
                             <el-select v-model="selectedId" filterable placeholder="选择模型" :loading="loading">
                                 <el-option
@@ -1988,9 +1942,8 @@ onUnmounted(() => {
                         </div>
                     </div>
                     <div
-                        v-show="editorTab === 'settings'"
                         class="editor-panel editor-parameters"
-                        role="tabpanel"
+                        role="group"
                         :aria-label="kind === 'speech' ? '声线设置' : '画面设定'"
                     >
                         <p class="editor-specification">{{ specificationSummary }}</p>
@@ -2173,13 +2126,12 @@ onUnmounted(() => {
                         </div>
                     </div>
                     <div
-                        v-show="editorTab === 'materials' && kind !== 'speech'"
+                        v-if="kind !== 'speech'"
                         class="editor-panel editor-materials"
-                        role="tabpanel"
+                        role="group"
                         aria-label="参考图片与素材"
                     >
                         <StudioReferenceBoard
-                            v-if="kind !== 'speech'"
                             :materials="materials"
                             :maximum="modeLimits.maxImages || 1"
                             :disabled="materialBusy"
@@ -2592,36 +2544,13 @@ onUnmounted(() => {
     position: sticky;
     top: 22px;
 }
-.editor-tabs {
+.studio-editor-form {
     display: flex;
-    gap: 4px;
-    padding: 3px;
-    margin: -7px 0 14px;
-    border-radius: 9px;
-    background: var(--surface-soft);
-}
-.editor-tabs button {
-    flex: 1;
-    min-width: 0;
-    padding: 7px 8px;
-    border: 0;
-    border-radius: 7px;
-    background: transparent;
-    color: var(--muted);
-    font: inherit;
-    font-size: 12px;
-    white-space: nowrap;
-}
-.editor-tabs button.active {
-    background: var(--surface);
-    color: var(--accent);
-    box-shadow: 0 1px 4px rgb(40 51 72 / 8%);
-}
-.editor-tabs button:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
+    flex-direction: column;
+    gap: 12px;
 }
 .editor-panel {
+    flex-shrink: 0;
     min-height: 0;
 }
 .editor-specification {
@@ -2629,13 +2558,11 @@ onUnmounted(() => {
     color: var(--muted);
     font-size: 12px;
 }
-.editor-materials {
-    max-height: 430px;
-    overflow-y: auto;
-    scrollbar-width: thin;
+.editor-materials :deep(.reference-board) {
+    margin: 0;
 }
 .editor-submit {
-    margin-top: 12px;
+    margin-top: 0;
 }
 .editor-submit .generate-area {
     margin: 0;
@@ -3183,9 +3110,6 @@ onUnmounted(() => {
     .studio-editor {
         position: static;
     }
-    .editor-materials {
-        max-height: none;
-    }
     .studio-canvas {
         min-height: 530px;
     }
@@ -3297,45 +3221,10 @@ onUnmounted(() => {
         font-size: 11px;
     }
     .studio-grid > .studio-editor {
-        display: flex;
-        flex-direction: column;
         padding: 14px 16px;
-        overflow: visible;
     }
     .studio-editor > .section-heading {
         display: none;
-    }
-    .editor-tabs {
-        margin: 0 0 10px;
-        flex-shrink: 0;
-    }
-    .studio-editor-form {
-        min-height: 0;
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-    }
-    .editor-panel {
-        flex: 1;
-    }
-    .editor-prompt {
-        display: flex;
-        flex-direction: column;
-    }
-    .editor-prompt > .el-form-item:nth-child(2) {
-        flex: 1;
-        min-height: 95px;
-        align-items: stretch;
-    }
-    .editor-prompt > .el-form-item:nth-child(2) :deep(.el-form-item__content),
-    .editor-prompt :deep(.el-textarea) {
-        flex: 1;
-        min-height: 0;
-    }
-    .editor-prompt :deep(.el-textarea__inner) {
-        height: 100% !important;
-        min-height: 90px !important;
-        resize: none;
     }
     .editor-prompt .field-hint {
         margin-top: 3px;
@@ -3356,8 +3245,7 @@ onUnmounted(() => {
         min-width: 0;
     }
     .editor-submit {
-        flex-shrink: 0;
-        margin-top: 10px;
+        margin-top: 0;
         padding-top: 9px;
         border-top: 1px solid var(--line);
     }
@@ -3395,13 +3283,6 @@ onUnmounted(() => {
     }
     .generate-area > span {
         font-size: 11px;
-    }
-    .editor-materials {
-        max-height: none;
-        overflow: auto;
-    }
-    .editor-materials :deep(.reference-board) {
-        margin-top: 0;
     }
     .editor-materials :deep(.reference-empty) {
         min-height: 80px;

@@ -112,11 +112,7 @@ const record = (message) => {
     console.log(`PASS ${message}`)
 }
 const promptInput = () => page.locator('.studio-editor textarea')
-async function editorTab(label) {
-    await page.getByRole('tab', { name: label, exact: true }).click()
-}
 async function submit(count, label) {
-    await editorTab('描述')
     await page.locator('#studio-generation-count').fill(String(count))
     await page.locator('#studio-generation-count').blur()
     await page.getByRole('button', { name: `提交 ${count} ${label}`, exact: true }).click()
@@ -143,11 +139,11 @@ try {
     assert.equal(jobs[2].total, 4)
     record('Video has the same quantity control and remains editable after acknowledgement')
 
-    await editorTab('画面设定')
+    assert.equal(await page.locator('.studio-editor [role="tab"]').count(), 0)
+    assert.ok(await page.locator('.editor-prompt').isVisible())
     assert.ok(await page.locator('.editor-parameters').isVisible())
-    await editorTab('参考素材')
     assert.ok(await page.locator('.editor-materials').isVisible())
-    record('Studio keeps settings and materials in separate in-place tabs without moving the submit control')
+    record('Studio shows the prompt, settings and materials together without editor tabs')
 
     await page.reload()
     await page.locator('.studio-view h1').waitFor()

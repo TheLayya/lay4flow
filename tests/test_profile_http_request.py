@@ -13,6 +13,9 @@ from src.services.flow.browser_request import profile_http_request
 ORIGIN = "https://flow.google.com"
 PROXY = "http://fixture-user:fixture-password@proxy.invalid:8080"
 SECRET = "fixture-private-cookie-value"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36"
+)
 
 
 class Headers(dict):
@@ -43,8 +46,23 @@ def browser_cookie(name, value, domain=".google.com", path="/", *, expires=-1, s
 
 class ProfileHTTPRequestTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        self.page = SimpleNamespace(
+            is_closed=Mock(return_value=False),
+            evaluate=AsyncMock(
+                return_value={
+                    "user_agent": USER_AGENT,
+                    "language": "zh-CN",
+                    "languages": ["zh-CN", "zh", "en-US", "en"],
+                }
+            ),
+            close=AsyncMock(),
+        )
         self.context = SimpleNamespace(
-            cookies=AsyncMock(return_value=[]), add_cookies=AsyncMock(), clear_cookies=AsyncMock()
+            cookies=AsyncMock(return_value=[]),
+            add_cookies=AsyncMock(),
+            clear_cookies=AsyncMock(),
+            pages=[self.page],
+            new_page=AsyncMock(),
         )
         self.session = SimpleNamespace(request=AsyncMock(return_value=upstream()))
         self.session_closed = Mock()
@@ -100,6 +118,12 @@ class ProfileHTTPRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs["timeout"], 45)
         self.assertFalse(call.kwargs["allow_redirects"])
         self.assertTrue(call.kwargs["discard_cookies"])
+        self.assertFalse(call.kwargs["default_headers"])
+        self.assertEqual(call.kwargs["impersonate"], "chrome150")
+        self.assertEqual(call.kwargs["headers"]["User-Agent"], USER_AGENT)
+        self.assertEqual(
+            call.kwargs["headers"]["Accept-Language"], "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7"
+        )
         cookie = call.kwargs["headers"]["Cookie"]
         self.assertIn("SID=" + SECRET, cookie)
         self.assertIn("FLOW=flow-host", cookie)
@@ -111,6 +135,45 @@ class ProfileHTTPRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Authorization", call.kwargs["headers"])
         self.session_closed.assert_called_once()
         self.proxy_closed.assert_called_once()
+        self.context.new_page.assert_not_awaited()
+        self.page.close.assert_not_awaited()
+
+    async def test_profile_identity_overrides_request_defaults_without_changing_page(self):
+        async with profile_http_request(self.context, PROXY) as transport:
+            await transport.request.post(
+                ORIGIN + "/_/rpc",
+                headers={
+                    "User-Agent": "old-request-ua",
+                    "accept-language": "en-US,en;q=0.9",
+                },
+            )
+        headers = self.session.request.await_args.kwargs["headers"]
+        self.assertEqual(headers["User-Agent"], USER_AGENT)
+        self.assertEqual(headers["Accept-Language"], "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
+        self.assertNotIn("accept-language", headers)
+        self.page.close.assert_not_awaited()
+        self.context.new_page.assert_not_awaited()
+
+    async def test_no_existing_page_reads_identity_on_an_owned_about_blank_page(self):
+        self.context.pages = []
+        self.context.new_page.return_value = self.page
+        async with profile_http_request(self.context, PROXY) as transport:
+            await transport.request.get(ORIGIN + "/")
+        self.context.new_page.assert_awaited_once()
+        self.page.close.assert_awaited_once()
+        self.assertFalse(hasattr(self.page, "goto"))
+
+    async def test_invalid_profile_identity_stops_before_network_and_omits_secret(self):
+        self.page.evaluate.return_value = {
+            "user_agent": "private-user-agent\r\nheader",
+            "languages": ["en-US"],
+        }
+        with self.assertRaises(Exception) as caught:
+            async with profile_http_request(self.context, PROXY):
+                self.fail("entered transport with invalid identity")
+        self.assertEqual(caught.exception.network_step, "flow_http_identity")
+        self.assertNotIn("private-user-agent", str(caught.exception))
+        self.session.request.assert_not_awaited()
 
     async def test_cookie_rotation_is_available_to_next_request_then_saved_with_scope(self):
         self.context.cookies.return_value = [

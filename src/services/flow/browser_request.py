@@ -1,6 +1,8 @@
 """HTTP requests from a Profile snapshot on its validated fixed exit."""
 
+import asyncio
 import json
+import re
 import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -10,6 +12,8 @@ from urllib.request import Request as URLRequest
 from curl_cffi.requests import AsyncSession
 
 from ..browser.cloak_proxy import transport_proxy
+from .fingerprint import resolve_browser_impersonate
+from .flow_rpc import FlowRPCError
 from .google_cookies import GoogleCookieJar
 
 
@@ -33,6 +37,53 @@ class _Response:
         return json.loads(self._text)
 
 
+async def _profile_identity(context):
+    """Read navigator identity without navigating or touching a manual-login page."""
+    page = next((item for item in getattr(context, "pages", []) if not item.is_closed()), None)
+    owned = page is None
+    try:
+        if page is None:
+            page = await asyncio.wait_for(context.new_page(), 10)
+        values = await asyncio.wait_for(
+            page.evaluate(
+                "() => ({user_agent: navigator.userAgent, language: navigator.language, "
+                "languages: Array.from(navigator.languages || [])})"
+            ),
+            10,
+        )
+        ua = values.get("user_agent") if isinstance(values, dict) else None
+        if (
+            not isinstance(ua, str)
+            or not ua.strip()
+            or len(ua) > 2048
+            or any(ord(char) < 32 or ord(char) == 127 for char in ua)
+        ):
+            raise ValueError("Profile User-Agent is missing")
+        raw_languages = values.get("languages") or [values.get("language")]
+        languages = []
+        for value in raw_languages[:10] if isinstance(raw_languages, list) else []:
+            if isinstance(value, str) and re.fullmatch(
+                r"[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*", value
+            ):
+                if value.casefold() not in {language.casefold() for language in languages}:
+                    languages.append(value)
+        if not languages:
+            raise ValueError("Profile language is missing")
+        accept_language = ",".join(
+            value if index == 0 else f"{value};q={1 - index / 10:.1f}"
+            for index, value in enumerate(languages)
+        )
+        return {
+            "User-Agent": ua.strip(),
+            "Accept-Language": accept_language,
+        }, resolve_browser_impersonate(ua)
+    except Exception:
+        raise FlowRPCError("account_probe_error", "flow_http_identity") from None
+    finally:
+        if owned and page is not None:
+            await asyncio.wait_for(page.close(), 10)
+
+
 @asynccontextmanager
 async def profile_http_request(context, proxy):
     """Keep the scoped Profile jar authoritative, including response deletions."""
@@ -46,13 +97,17 @@ async def profile_http_request(context, proxy):
         rows.append(row)
     jar = GoogleCookieJar(rows)
     before = {_key(row): row for row in jar.export()}
+    identity_headers, impersonate = await _profile_identity(context)
     async with transport_proxy(proxy) as network_proxy, AsyncSession(trust_env=False) as session:
 
         class Request:
             async def send(self, method, url, **kwargs):
                 headers = dict(kwargs.pop("headers", {}))
+                for key in list(headers):
+                    if key.lower() in {"user-agent", "accept-language"}:
+                        del headers[key]
+                headers.update(identity_headers)
                 headers["Cookie"] = jar.header(url)
-                headers.setdefault("Accept-Language", "en-US,en;q=0.9")
                 timeout = kwargs.pop("timeout", 20000) / 1000
                 kwargs.pop("max_redirects", None)
                 if "form" in kwargs:
@@ -64,7 +119,8 @@ async def profile_http_request(context, proxy):
                     proxy=network_proxy,
                     timeout=timeout,
                     allow_redirects=False,
-                    impersonate="chrome136",
+                    impersonate=impersonate,
+                    default_headers=False,
                     discard_cookies=True,
                     **kwargs,
                 )
