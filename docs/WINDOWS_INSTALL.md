@@ -45,8 +45,8 @@ Windows 中的 Cloak 登录直接打开本机原生浏览器窗口。在账号�
 ```powershell
 python scripts/build_native_runtime.py desktop/runtime/backend/windows-x64 --cloak-binary "已验证的Cloak目录/chrome.exe"
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_desktop.ps1
-python scripts/build_release.py dist/1.5.0 --desktop-runtime desktop/runtime/windows-x64 --backend-runtime desktop/runtime/backend/windows-x64
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_setup.ps1 -BundleZip dist/1.5.0/lay4flow-remote-1.5.0-windows-x64.zip -OutputDir dist/1.5.0
+python scripts/build_release.py dist/1.5.1 --desktop-runtime desktop/runtime/windows-x64 --backend-runtime desktop/runtime/backend/windows-x64
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_setup.ps1 -BundleZip dist/1.5.1/lay4flow-remote-1.5.1-windows-x64.zip -OutputDir dist/1.5.1
 ```
 
 应用运行包、Python 和 Cloak 只包含公开组件，账号、密钥、Profile、数据库、日志和生成内容均排除在发布包之外。ZIP、运行包与 EXE 的 SHA-256 随构建清单保存。安装器当前未做 Authenticode 签名。

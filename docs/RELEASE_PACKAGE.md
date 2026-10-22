@@ -25,20 +25,20 @@ python scripts/build_release.py dist/1.3.0
 根目录 `VERSION` 是运行版本来源；API、`/health`、后台更新记录和运行包使用该版本。每版先更新 `docs/CHANGELOG.md`，再运行 `scripts/build_release.py`，在全新输出目录生成：
 
 - `lay4flow-remote-版本-runtime.tar.gz`：Docker 更新用公开运行文件。
-- `lay4flow-remote-版本-windows-x64.zip`：包含自包含 .NET 桌面 EXE、WebView2 组件和 Docker 运行包，双击 `install.cmd` 安装。
+- `lay4flow-remote-版本-windows-x64.zip`：包含自包含 .NET 桌面 EXE、Python 后台、完整 Cloak 浏览器及应用运行包，双击 `install.cmd` 安装。
 - `lay4flow-remote-版本-windows-x64-setup.exe`：使用同一运行包的 Inno Setup 安装 EXE，安装文件和桌面快捷方式沿用 TkCRM 头像图标。
 - `SHA256SUMS`：最终资产的 SHA-256。
 - `release-notes.md`：从本版更新记录提取的 Release 正文。
 - `build-manifest.json`：本地来源提交、文件清单、大小和摘要证据；脏工作区候选不作为正式发布来源。
 
-Windows 桌面采用 WinForms + WebView2，安装器使用 Inno Setup；构建桌面程序需要 .NET 10 SDK，发布包自带 .NET 运行时。运行依赖 Docker Desktop 和 WebView2 Runtime，当前未做 Authenticode 签名。更新使用 GitHub 原生 Releases API 与版本资产，不依赖额外 feed 服务。只在全部检查和安装/更新验收通过后发布版本，既有版本资产保持不变。
+Windows 桌面采用 WinForms + WebView2，安装器使用 Inno Setup；构建桌面程序需要 .NET 10 SDK，发布包自带 .NET、Python 和 Cloak 运行时，用户无需安装 Docker、Python、Node 或 .NET。WebView2 Runtime 缺失时由安装器引导安装，当前未做 Authenticode 签名。更新使用 GitHub 原生 Releases API 与版本资产，不依赖额外 feed 服务。只在全部检查和安装/更新验收通过后发布版本，既有版本资产保持不变；待验候选保存为草稿。
 
 完整 Windows 桌面资产在 Windows 上构建：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_desktop.ps1
-python scripts/build_release.py dist/1.3.0 --desktop-runtime desktop/runtime/windows-x64
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_setup.ps1 -BundleZip dist/1.3.0/lay4flow-remote-1.3.0-windows-x64.zip -OutputDir dist/1.3.0
+python scripts/build_release.py dist/1.5.1 --desktop-runtime desktop/runtime/windows-x64 --backend-runtime desktop/runtime/backend/windows-x64
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_setup.ps1 -BundleZip dist/1.5.1/lay4flow-remote-1.5.1-windows-x64.zip -OutputDir dist/1.5.1
 ```
 
 不传 `--desktop-runtime` 的 ZIP 是源码启动包，供 Linux CI 校验运行文件；正式 Windows 安装 EXE 要求包含已构建桌面程序，缺失时构建直接退出。

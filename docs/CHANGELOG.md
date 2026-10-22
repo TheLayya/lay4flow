@@ -13,8 +13,9 @@
 ### 验证与限制
 
 - 通过 1381 项后端测试、前端测试、离线 smoke，以及原生登录和 Profile 迁移 E2E。
-- 已用账号 3 只读验证新版 Flow 身份、额度和项目 RPC；当前额度现场读数为 895。
-- Windows 安装 EXE 需 .NET 10 SDK 和 Inno Setup 构建；本源码发布候选提供 runtime、ZIP 和 SHA256。
+- 新版 Flow 身份、额度和项目列表 RPC 已完成现场只读验证，用户手动刷新成功；真实内容生成仍待新版接口适配。
+- Windows 包自带 Python、Cloak 与桌面运行时，无需用户安装 Docker 或开发工具；提供安装 EXE、ZIP、runtime 与 SHA256，安装器当前未做 Authenticode 签名。
+- 已在本机独立目录验证安装与原生服务；全新无 Docker Windows 环境及旧版桌面入口更新验收保留待验状态，GitHub 资产以草稿候选保存。
 
 ## 1.5.0 — 2026-10-22
 
