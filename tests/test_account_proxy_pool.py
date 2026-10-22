@@ -181,6 +181,21 @@ class AccountProxyPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((lease.entry_id, lease.proxy_url), (first, fixed.proxy_url))
         await self.manager.release_submission_proxy(lease, success=True)
 
+    async def test_cloak_generation_keeps_profile_exit_even_with_saved_pool_random_setting(self):
+        fixed_id = await self.manager.add_proxy_pool_entry("http://fixed.invalid:8080")
+        await self.manager.add_proxy_pool_entry("http://other.invalid:8080")
+        token = Token(
+            st="profile-fixture",
+            email="profile@example.test",
+            browser_profile_source="cloak",
+            proxy_url="http://fixed.invalid:8080",
+            proxy_pool_id=fixed_id,
+            submission_proxy_mode="pool_random",
+        )
+        lease = await self.manager.acquire_submission_proxy(token)
+        self.assertEqual((lease.entry_id, lease.proxy_url), (fixed_id, token.proxy_url))
+        await self.manager.release_submission_proxy(lease, success=True)
+
     async def test_submission_transport_failure_cools_after_three_and_probe_recovers(self):
         entry = await self.manager.add_proxy_pool_entry("http://probe.invalid:8080")
         url = (await self.db.get_proxy_pool_entry(entry)).proxy_url

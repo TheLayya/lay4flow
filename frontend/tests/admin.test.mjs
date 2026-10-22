@@ -941,7 +941,7 @@ test('account polling updates untouched quick fields while retaining pending edi
     assert.equal(s.quickDraft(s.accounts.value[0]).remark, 'pending edit')
 })
 
-test('submission strategy saves independently of the login binding and retains failed choices', async () => {
+test('cookie account submission strategy saves independently of the login binding and retains failed choices', async () => {
     let fail = true
     const writes = [],
         confirmations = []
@@ -957,7 +957,7 @@ test('submission strategy saves independently of the login binding and retains f
     })
     const row = {
         id: 13,
-        browser_profile_source: 'cloak',
+        browser_profile_source: 'cookies',
         proxy_pool_id: 2,
         proxy_url: 'socks5h://fixed:password@login.fixture:1080',
     }

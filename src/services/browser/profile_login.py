@@ -166,6 +166,7 @@ class DirectProfileLogin:
                         image_enabled=False,
                         video_enabled=False,
                         auto_refresh_enabled=False,
+                        refresh_interval_minutes=30,
                         login_account=email,
                         proxy_url=proxy_url,
                         proxy_pool_id=proxy_pool_id,
@@ -387,6 +388,8 @@ class DirectProfileLogin:
                 browser_profile_status="ready",
                 browser_profile_error="",
                 browser_profile_verified_at=datetime.now(timezone.utc),
+                last_st_refresh_at=datetime.now(timezone.utc),
+                last_st_refresh_result="success",
                 refresh_status="ready",
                 refresh_error="",
                 refresh_reason="",
@@ -396,6 +399,7 @@ class DirectProfileLogin:
             ):
                 raise ViewerError(409, "账号配置已变化，已保留当前启用设置")
             self.tokens.notify_profile_ready(token_id)
+            self.tokens.mark_profile_validated(await self.tokens.db.get_token(token_id))
             pending["result"] = {
                 "success": True,
                 "session_id": session_id,

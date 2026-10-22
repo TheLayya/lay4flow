@@ -590,9 +590,12 @@ class ProfileTransfer:
                     login_password="",
                     protocol_mode="session",
                     auto_refresh_enabled=False,
+                    refresh_interval_minutes=30,
                     browser_profile_source="cloak",
                     refresh_status="ready",
                     last_refresh_at=now,
+                    last_st_refresh_at=now,
+                    last_st_refresh_result="success",
                 )
                 token_id = await self.tokens.db.add_token(token)
                 token.id = token_id
@@ -634,6 +637,7 @@ class ProfileTransfer:
                         "account_changed", "账号配置已变化，已保留当前设置", 409
                     )
                 self.tokens.notify_profile_ready(token_id)
+                self.tokens.mark_profile_validated(await self.tokens.db.get_token(token_id))
                 manager._write_metadata_file(
                     transfer_path,
                     {

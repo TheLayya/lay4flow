@@ -51,6 +51,18 @@ def rpc(rpcid, payload, *, framed=True):
 
 
 class FlowRPCTests(unittest.IsolatedAsyncioTestCase):
+    async def test_generation_bootstrap_rejects_changed_identity_before_write(self):
+        context = SimpleNamespace(
+            request=SimpleNamespace(
+                get=AsyncMock(return_value=bootstrap({**CONFIG, "oPEP7c": "other@gmail.com"})),
+                post=AsyncMock(),
+            )
+        )
+        with self.assertRaises(FlowRPCError) as caught:
+            await flow_rpc(context, "ogiZ0b", [], expected_email=EMAIL)
+        self.assertEqual(caught.exception.reason, "identity_mismatch")
+        context.request.post.assert_not_awaited()
+
     async def test_generic_rpc_uses_current_bootstrap_and_returns_decoded_payload(self):
         context = SimpleNamespace(
             request=SimpleNamespace(
@@ -259,6 +271,187 @@ class FlowRPCTests(unittest.IsolatedAsyncioTestCase):
         context = self.context(credits=response(status=503, url=RPC_URL))
         error = await self.error(context, "transient_error", "flow_credits")
         self.assertEqual(error.http_status, 503)
+
+    async def test_project_source_path_and_timeout_use_same_origin_bootstrap(self):
+        context = self.context()
+        context.request.post.side_effect = None
+        context.request.post.return_value = rpc("ogiZ0b", [["synthetic-result"]])
+        value = await flow_rpc(
+            context,
+            "ogiZ0b",
+            ["payload"],
+            network_step="flow_generate_image",
+            source_path="/project/synthetic-project",
+            timeout_ms=45000,
+        )
+        self.assertEqual(value, [["synthetic-result"]])
+        context.request.get.assert_awaited_once_with(
+            "https://flow.google.com/project/synthetic-project", timeout=20000, max_redirects=0
+        )
+        call = context.request.post.call_args.kwargs
+        self.assertEqual(call["params"]["source-path"], "/project/synthetic-project")
+        self.assertEqual(
+            call["headers"]["Referer"], "https://flow.google.com/project/synthetic-project"
+        )
+        self.assertEqual(call["timeout"], 45000)
+
+    async def test_invalid_source_paths_are_rejected_before_any_requests(self):
+        for path in (
+            "//evil.invalid",
+            "https://evil.invalid",
+            "/project/../other",
+            "/project/a?token=private",
+            "/project/a/b",
+            "/projects#fragment",
+        ):
+            with self.subTest(path=path):
+                context = self.context()
+                with self.assertRaises(FlowRPCError):
+                    await flow_rpc(context, "ogiZ0b", [], source_path=path)
+                context.request.get.assert_not_awaited()
+                context.request.post.assert_not_awaited()
+
+    async def test_explicit_xsrf_rejection_retries_once_with_updated_at_only(self):
+        xsrf = response(json.dumps([["xsrf", "rotated-private-at"]]), url=RPC_URL)
+        context = self.context()
+        context.request.post.side_effect = [xsrf, rpc("ogiZ0b", ["done"])]
+        self.assertEqual(await flow_rpc(context, "ogiZ0b", ["unchanged-payload"]), ["done"])
+        self.assertEqual(context.request.post.await_count, 2)
+        first, second = context.request.post.await_args_list
+        self.assertEqual(first.kwargs["form"]["at"], CONFIG["SNlM0e"])
+        self.assertEqual(second.kwargs["form"]["at"], "rotated-private-at")
+        self.assertEqual(first.kwargs["form"]["f.req"], second.kwargs["form"]["f.req"])
+        self.assertEqual(first.kwargs["params"], second.kwargs["params"])
+
+    async def test_xsrf_sidechannel_with_error_frame_and_no_payload_can_retry(self):
+        body = [["er", None, None, None, None, 400], ["xsrf", "rotated-private-at"]]
+        context = self.context()
+        context.request.post.side_effect = [
+            response(json.dumps(body), url=RPC_URL),
+            rpc("ogiZ0b", ["done"]),
+        ]
+        self.assertEqual(await flow_rpc(context, "ogiZ0b", []), ["done"])
+        self.assertEqual(context.request.post.await_count, 2)
+
+    async def test_xsrf_rotation_does_not_repeat_a_successful_or_unknown_outcome(self):
+        for text in (
+            json.dumps([["xsrf", "private-at"], ["wrb.fr", "ogiZ0b", "[1]"]]),
+            'html mentions ["xsrf","private-at"]',
+        ):
+            with self.subTest(text=text):
+                context = self.context()
+                context.request.post.side_effect = None
+                context.request.post.return_value = response(text, url=RPC_URL)
+                if text.startswith("html"):
+                    with self.assertRaises(FlowRPCError):
+                        await flow_rpc(context, "ogiZ0b", [])
+                else:
+                    self.assertEqual(await flow_rpc(context, "ogiZ0b", []), [1])
+                self.assertEqual(context.request.post.await_count, 1)
+        context = self.context()
+        context.request.post.side_effect = TimeoutError("unknown-private-outcome")
+        with self.assertRaises(FlowRPCError) as caught:
+            await flow_rpc(context, "ogiZ0b", [])
+        self.assertEqual(context.request.post.await_count, 1)
+        self.assertNotIn("unknown-private-outcome", str(caught.exception))
+
+    async def test_repeated_xsrf_failure_stops_after_second_attempt(self):
+        context = self.context()
+        context.request.post.side_effect = [
+            response(json.dumps([["xsrf", "new-at-one"]]), url=RPC_URL),
+            response(json.dumps([["xsrf", "new-at-two"]]), url=RPC_URL),
+        ]
+        with self.assertRaises(FlowRPCError) as caught:
+            await flow_rpc(context, "ogiZ0b", [])
+        self.assertEqual(caught.exception.reason, "xsrf_rejected")
+        self.assertEqual(context.request.post.await_count, 2)
+        self.assertNotIn("new-at", str(caught.exception))
+
+    async def test_er_code_and_public_error_are_bounded_and_do_not_expose_body(self):
+        for code in (401, 16, 400, 99999, "private-code"):
+            context = self.context()
+            context.request.post.side_effect = None
+            context.request.post.return_value = response(
+                json.dumps(
+                    [
+                        [
+                            "er",
+                            None,
+                            "private-response-body",
+                            None,
+                            None,
+                            code,
+                            ["PUBLIC_ERROR_HIGH_TRAFFIC"],
+                        ]
+                    ]
+                ),
+                url=RPC_URL,
+            )
+            with self.assertRaises(FlowRPCError) as caught:
+                await flow_rpc(context, "ogiZ0b", [])
+            error = caught.exception
+            self.assertEqual(
+                error.rpc_code, code if type(code) is int and 0 <= code <= 599 else None
+            )
+            self.assertEqual(error.public_error, "PUBLIC_ERROR_HIGH_TRAFFIC")
+            self.assertNotIn("private-response-body", str(error))
+            self.assertNotIn("private-code", str(error))
+            self.assertEqual(context.request.post.await_count, 1)
+
+    async def test_status_typed_public_aitk_error_maps_numeric_enum_without_message(self):
+        detail = [
+            "type.googleapis.com/google.internal.labs.aisandbox.proto.common.v1.PublicAitkError",
+            [49],
+        ]
+        row = ["wrb.fr", "ogiZ0b", None, None, None, [13, "private-status-message", [detail]]]
+        context = self.context()
+        context.request.post.side_effect = None
+        context.request.post.return_value = response(json.dumps([row]), url=RPC_URL)
+        with self.assertRaises(FlowRPCError) as caught:
+            await flow_rpc(context, "ogiZ0b", [])
+        error = caught.exception
+        self.assertEqual(error.rpc_code, 13)
+        self.assertEqual(error.public_error, "PUBLIC_ERROR_UNUSUAL_ACTIVITY")
+        self.assertTrue(error.retryable)
+        self.assertNotIn("private-status-message", str(error))
+        self.assertEqual(context.request.post.await_count, 1)
+
+    async def test_specific_permanent_public_error_is_not_marked_retryable(self):
+        row = [
+            "wrb.fr",
+            "ogiZ0b",
+            None,
+            None,
+            None,
+            [13, "private-status-message", ["PUBLIC_ERROR_UNSAFE_GENERATION"]],
+        ]
+        context = self.context()
+        context.request.post.side_effect = None
+        context.request.post.return_value = response(json.dumps([row]), url=RPC_URL)
+        with self.assertRaises(FlowRPCError) as caught:
+            await flow_rpc(context, "ogiZ0b", [])
+        self.assertEqual(caught.exception.reason, "rpc_rejected")
+        self.assertEqual(caught.exception.public_error, "PUBLIC_ERROR_UNSAFE_GENERATION")
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(context.request.post.await_count, 1)
+
+    async def test_unknown_public_error_string_is_not_reflected_and_auth_xsrf_is_not_replayed(self):
+        for rows, reason in (
+            (
+                [["wrb.fr", "ogiZ0b", None, None, None, [13, "PUBLIC_ERROR_PRIVATE_SECRET"]]],
+                "transient_error",
+            ),
+            ([["er", None, None, None, None, 401], ["xsrf", "private-token"]], "login_required"),
+        ):
+            context = self.context()
+            context.request.post.side_effect = None
+            context.request.post.return_value = response(json.dumps(rows), url=RPC_URL)
+            with self.assertRaises(FlowRPCError) as caught:
+                await flow_rpc(context, "ogiZ0b", [])
+            self.assertEqual(caught.exception.reason, reason)
+            self.assertEqual(context.request.post.await_count, 1)
+            self.assertNotIn("PRIVATE_SECRET", str(caught.exception))
+            self.assertNotIn("private-token", str(caught.exception))
 
 
 if __name__ == "__main__":

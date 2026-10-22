@@ -229,11 +229,6 @@ class LoadBalancer:
         required_tier = get_required_paygate_tier_for_model(model)
 
         for token in active_tokens:
-            if (for_image_generation or for_video_generation) and getattr(
-                token, "browser_profile_source", ""
-            ) == "cloak":
-                filtered_reasons[token.id] = "新版 Flow 生成接口适配尚未完成"
-                continue
             normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
             if model and not supports_model_for_tier(model, normalized_tier):
                 filtered_reasons[token.id] = "账号等级不足，需要 " + get_paygate_tier_label(
@@ -407,16 +402,6 @@ class LoadBalancer:
         active_tokens = await self.token_manager.get_active_tokens()
         if not active_tokens:
             return None
-
-        if for_image_generation or for_video_generation:
-            generation_tokens = [
-                token
-                for token in active_tokens
-                if getattr(token, "browser_profile_source", "") != "cloak"
-            ]
-            if not generation_tokens:
-                return "Flow 登录态已验证；新版生成接口适配尚未完成"
-            active_tokens = generation_tokens
 
         required_tier = get_required_paygate_tier_for_model(model)
         supported_tokens = []

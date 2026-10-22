@@ -214,7 +214,7 @@ function accountProxy(row) {
     return proxyPool.value.find((proxy) => proxy.id === row.proxy_pool_id)
 }
 function accountProxySummary(row) {
-    if (row.submission_proxy_mode === 'pool_random')
+    if (row.browser_profile_source !== 'cloak' && row.submission_proxy_mode === 'pool_random')
         return `生成 · 代理池随机${row.proxy_pool_id ? ` · 登录 #${row.proxy_pool_id}` : ''}`
     const url = accountProxy(row)?.proxy_url || row.proxy_url
     const prefix = row.proxy_pool_id ? `代理 #${row.proxy_pool_id}` : url ? '固定代理' : '绑定代理'
@@ -263,6 +263,10 @@ async function saveQuickAccount(row, kind = 'proxy') {
         selectedProxy = { ...target }
         body = { proxy_pool_id: target.id }
     } else if (kind === 'strategy') {
+        if (row.browser_profile_source === 'cloak' && draft.submission_proxy_mode !== 'fixed') {
+            quickErrors[row.id] = 'Cloak 生成使用 Profile 固定出口'
+            return
+        }
         if (!['fixed', 'pool_random'].includes(draft.submission_proxy_mode)) {
             quickErrors[row.id] = '请选择生成提交出口'
             return
@@ -2429,10 +2433,10 @@ onUnmounted(() => {
                         <el-form-item label="生成提交出口">
                             <el-select v-model="form.submission_proxy_mode" aria-label="生成提交出口">
                                 <el-option label="账号固定代理" value="fixed" />
-                                <el-option label="代理池随机（每次生成取健康出口）" value="pool_random" />
+                                <el-option label="代理池随机（每次生成取健康出口）" value="pool_random" :disabled="editing?.browser_profile_source === 'cloak'" />
                             </el-select>
                             <span class="field-note">
-                                每份 Flow 生成任务使用一个出口；Cloak 登录和自动续期仍使用账号绑定代理。
+                                Cloak 账号的生成、登录和刷新共用 Profile 固定出口；其他账号可选择代理池出口。
                             </span>
                         </el-form-item>
                         <el-form-item label="账号代理">

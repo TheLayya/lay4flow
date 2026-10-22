@@ -47,7 +47,7 @@ class TokenManager:
         self._project_locks = self._project_pool._locks
         self._refresh_futures: dict[int, asyncio.Task] = {}
         self._refresh_intents: dict[int, dict[str, bool]] = {}
-        self._at_validation_cache: dict[int, float] = {}
+        self._at_validation_cache: dict[int, tuple[float, Optional[tuple[Any, ...]]]] = {}
         self._protocol_refresher_task: Optional[asyncio.Task] = None
 
     async def _get_token_lock(
@@ -168,11 +168,63 @@ class TokenManager:
     def _clear_at_validation_cache(self, token_id: int) -> None:
         self._at_validation_cache.pop(int(token_id), None)
 
-    def _mark_at_valid(self, token_id: int, ttl_seconds: int = 300) -> None:
-        self._at_validation_cache[int(token_id)] = time.monotonic() + ttl_seconds
+    @staticmethod
+    def _profile_validation_key(token: Token) -> tuple[Any, ...]:
+        return tuple(
+            getattr(token, key, None)
+            for key in (
+                "email",
+                "login_account",
+                "st",
+                "google_cookies",
+                "at",
+                "at_expires",
+                "proxy_pool_id",
+                "proxy_url",
+                "browser_profile_source",
+                "browser_profile_epoch",
+            )
+        )
 
-    def _has_recent_at_validation(self, token_id: int) -> bool:
-        return self._at_validation_cache.get(int(token_id), 0) > time.monotonic()
+    def _mark_at_valid(
+        self, token_id: int, ttl_seconds: int = 300, token: Optional[Token] = None
+    ) -> None:
+        key = self._profile_validation_key(token) if token is not None else None
+        self._at_validation_cache[int(token_id)] = (
+            time.monotonic() + max(30, int(ttl_seconds or 300)),
+            key,
+        )
+
+    def _has_recent_at_validation(self, token_id: int, token: Optional[Token] = None) -> bool:
+        value = self._at_validation_cache.get(int(token_id))
+        if not value:
+            return False
+        expires, key = value
+        if expires <= time.monotonic() or (
+            key is not None and token is not None and key != self._profile_validation_key(token)
+        ):
+            self._clear_at_validation_cache(token_id)
+            return False
+        return True
+
+    def is_profile_validation_recent(self, token: Optional[Token]) -> bool:
+        """Return true only for the same full Profile credential/proxy snapshot."""
+        value = (
+            self._at_validation_cache.get(int(token.id)) if token and token.id is not None else None
+        )
+        return bool(
+            token
+            and token.browser_profile_source == "cloak"
+            and value
+            and value[1] is not None
+            and token.refresh_status not in {"config_error", "login_required", "retrying"}
+            and self._has_recent_at_validation(token.id, token)
+        )
+
+    def mark_profile_validated(self, token: Optional[Token]) -> None:
+        """Mark a just-probed Profile snapshot; callers must have verified it first."""
+        if token and token.id is not None and token.browser_profile_source == "cloak":
+            self._mark_at_valid(token.id, token=token)
 
     async def _st_to_at_for_token(self, token: Token, st: str) -> Dict[str, Any]:
         if token.browser_profile_source == "cloak":
@@ -695,6 +747,8 @@ class TokenManager:
                     refresh_error="",
                     refresh_failures=0,
                     last_refresh_at=now,
+                    last_st_refresh_at=now,
+                    last_st_refresh_result="success",
                     browser_profile_status="ready",
                     browser_profile_error="",
                     browser_profile_verified_at=now,
@@ -718,7 +772,7 @@ class TokenManager:
                 ):
                     raise ValueError("账号配置已变化，代理切换已回滚，请刷新后重试")
                 self._clear_at_validation_cache(token.id)
-                self._mark_at_valid(token.id)
+                self.mark_profile_validated(token.model_copy(update=values))
 
             try:
                 await manager.switch_proxy(
@@ -744,9 +798,12 @@ class TokenManager:
             "login_required",
         }:
             return False
-        verified = self._as_utc(token.browser_profile_verified_at)
-        if verified is None and token.refresh_status == "ready":
-            verified = self._as_utc(token.last_refresh_at)
+        verified = (
+            self._as_utc(token.last_st_refresh_at)
+            if self._profile_cycle_anchor_valid(token)
+            else self._as_utc(token.browser_profile_verified_at)
+            or (self._as_utc(token.last_refresh_at) if token.refresh_status == "ready" else None)
+        )
         if verified is None:
             return False
         now = datetime.now(timezone.utc)
@@ -754,6 +811,22 @@ class TokenManager:
             minutes=self._normalize_refresh_interval(token.refresh_interval_minutes)
         )
         return verified <= now and now - verified < interval
+
+    def _profile_cycle_anchor_valid(self, token: Token) -> bool:
+        """Persist one modern-cycle marker without moving the renewal clock on probes."""
+        anchor = self._as_utc(token.last_st_refresh_at)
+        due = self._as_utc(token.browser_profile_next_at)
+        return bool(
+            token.browser_profile_source == "cloak"
+            and token.last_st_refresh_result == "success"
+            and token.at is None
+            and token.at_expires is None
+            and anchor
+            and due
+            and due
+            == anchor
+            + timedelta(minutes=self._normalize_refresh_interval(token.refresh_interval_minutes))
+        )
 
     @staticmethod
     def _profile_credential_updates(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -822,9 +895,14 @@ class TokenManager:
             token = await self.db.get_token(token.id)
             if token is None or not token.is_active or token.browser_profile_source != "cloak":
                 return None
-            if self._profile_session_fresh(token):
+            if token.proxy_pool_id is not None:
+                try:
+                    await self.resolve_account_proxy(token)
+                except AccountProxyUnavailable:
+                    return None
+            if self._profile_session_fresh(token) and self.is_profile_validation_recent(token):
                 return token
-            if await self._refresh_at(token.id):
+            if await self._refresh_at(token.id, validation_only=True):
                 latest = await self.db.get_token(token.id)
                 return (
                     latest
@@ -835,7 +913,7 @@ class TokenManager:
 
         at_rejected = False
         if not self._should_refresh_at(token):
-            if self._has_recent_at_validation(token.id):
+            if self._has_recent_at_validation(token.id, token):
                 return token
             try:
                 credits = await self._get_credits_for_token(token, token.at)
@@ -844,7 +922,7 @@ class TokenManager:
                     credits=credits.get("credits", 0),
                     user_paygate_tier=credits.get("userPaygateTier"),
                 )
-                self._mark_at_valid(token.id)
+                self._mark_at_valid(token.id, token=token)
                 latest = await self.db.get_token(token.id)
                 return latest if latest and latest.is_active else None
             except Exception as exc:
@@ -1096,6 +1174,8 @@ class TokenManager:
                 browser_profile_error="",
                 browser_profile_verified_at=datetime.now(timezone.utc),
                 browser_profile_failures=0,
+                last_st_refresh_at=datetime.now(timezone.utc),
+                last_st_refresh_result="success",
             )
             return updates
         if not refresh_st:
@@ -1161,7 +1241,11 @@ class TokenManager:
         return updates
 
     async def _refresh_at_inner(
-        self, token_id: int, force: bool = False, refresh_st: bool = False
+        self,
+        token_id: int,
+        force: bool = False,
+        refresh_st: bool = False,
+        validation_only: bool = False,
     ) -> bool:
         lock = await self._get_token_lock(self._refresh_locks, self._refresh_lock_guard, token_id)
         async with lock:
@@ -1174,6 +1258,19 @@ class TokenManager:
                 except AccountProxyUnavailable:
                     return False
             now = datetime.now(timezone.utc)
+            validation_only = bool(validation_only and token.browser_profile_source == "cloak")
+            repair_cycle = validation_only and (
+                not self._profile_cycle_anchor_valid(token)
+                or not self._profile_session_fresh(token)
+            )
+            if repair_cycle:
+                # Imported/old rows can have a future next_refresh_at from the
+                # retired AT path. The first verified modern Profile pass must
+                # repair that cycle anchor; subsequent 5-minute probes do not.
+                validation_only = False
+                force = force or (
+                    token.refresh_status == "ready" and token.browser_profile_status == "ready"
+                )
             if not force:
                 if not token.is_active and token.ban_reason != "refresh_failed":
                     return False
@@ -1182,8 +1279,14 @@ class TokenManager:
                     and not token.is_active
                 ):
                     return False
-                if token.next_refresh_at and self._as_utc(token.next_refresh_at) > now:
+                if (
+                    token.next_refresh_at
+                    and self._as_utc(token.next_refresh_at) > now
+                    and (not validation_only or token.refresh_status == "retrying")
+                ):
                     return False
+                if validation_only and self.is_profile_validation_recent(token):
+                    return True
             if not await self.db.update_token_if_credentials_match(
                 token_id,
                 self._refresh_expected(token, token),
@@ -1216,9 +1319,15 @@ class TokenManager:
                     return False
                 now = datetime.now(timezone.utc)
                 if token.browser_profile_source == "cloak":
-                    due = now + timedelta(
-                        minutes=self._normalize_refresh_interval(token.refresh_interval_minutes)
-                    )
+                    if validation_only:
+                        updates.pop("last_st_refresh_at", None)
+                        updates.pop("last_st_refresh_result", None)
+                        due = self._as_utc(token.next_refresh_at)
+                    else:
+                        updates.update(last_st_refresh_at=now, last_st_refresh_result="success")
+                        due = now + timedelta(
+                            minutes=self._normalize_refresh_interval(token.refresh_interval_minutes)
+                        )
                 else:
                     due = updates["at_expires"] - timedelta(hours=1)
                     interval = self._normalize_refresh_interval(token.refresh_interval_minutes)
@@ -1249,7 +1358,7 @@ class TokenManager:
                     refresh_network_step="",
                     refresh_failures=0,
                     last_refresh_at=now,
-                    next_refresh_at=max(now + timedelta(minutes=5), due),
+                    next_refresh_at=max(now + timedelta(minutes=5), due) if due else None,
                 )
                 if token.browser_profile_source == "cloak":
                     updates.update(next_refresh_at=due, browser_profile_next_at=due)
@@ -1278,7 +1387,7 @@ class TokenManager:
                     token_id, expected, **updates
                 ):
                     return False
-                self._mark_at_valid(token_id)
+                self._mark_at_valid(token_id, token=latest.model_copy(update=updates))
                 record_token_refresh("at", "success")
                 if "last_st_refresh_at" in updates:
                     record_token_refresh("st", "success")
@@ -1286,6 +1395,7 @@ class TokenManager:
                     self.notify_profile_ready(token_id)
                 return warning is None
             except Exception as exc:
+                self._clear_at_validation_cache(token_id)
                 latest = await self.db.get_token(token_id)
                 if not latest:
                     return False
@@ -1368,7 +1478,11 @@ class TokenManager:
                 return False
 
     async def _refresh_at(
-        self, token_id: int, force: bool = False, refresh_st: bool = False
+        self,
+        token_id: int,
+        force: bool = False,
+        refresh_st: bool = False,
+        validation_only: bool = False,
     ) -> bool:
         """Share the final result, including stronger intents arriving during a refresh."""
         existing = self._refresh_futures.get(token_id)
@@ -1376,9 +1490,14 @@ class TokenManager:
             intent = self._refresh_intents[token_id]
             intent["force"] |= bool(force)
             intent["refresh_st"] |= bool(refresh_st)
+            intent["renew"] |= not validation_only
             return await asyncio.shield(existing)
 
-        intent = {"force": bool(force), "refresh_st": bool(refresh_st)}
+        intent = {
+            "force": bool(force),
+            "refresh_st": bool(refresh_st),
+            "renew": not validation_only,
+        }
         self._refresh_intents[token_id] = intent
 
         def cleanup(finished):
@@ -1388,17 +1507,28 @@ class TokenManager:
 
         async def runner():
             try:
-                applied_force, applied_st = intent["force"], intent["refresh_st"]
+                applied_force, applied_st, applied_renew = (
+                    intent["force"],
+                    intent["refresh_st"],
+                    intent["renew"],
+                )
                 while True:
+                    kwargs = {} if applied_renew else {"validation_only": True}
                     result = await self._refresh_at_inner(
-                        token_id, force=applied_force, refresh_st=applied_st
+                        token_id, force=applied_force, refresh_st=applied_st, **kwargs
                     )
-                    if (intent["force"] and not applied_force) or (
-                        intent["refresh_st"] and not applied_st
+                    if (
+                        (intent["force"] and not applied_force)
+                        or (intent["refresh_st"] and not applied_st)
+                        or (intent["renew"] and not applied_renew)
                     ):
                         # Force the stronger follow-up past the first run's next_refresh_at.
                         # Both bits only grow: at most two upgrades, never failure retries.
-                        applied_force, applied_st = True, intent["refresh_st"]
+                        applied_force, applied_st, applied_renew = (
+                            True,
+                            intent["refresh_st"],
+                            intent["renew"],
+                        )
                         continue
                     return result
             finally:

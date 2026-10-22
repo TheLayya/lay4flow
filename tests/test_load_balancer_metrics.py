@@ -9,31 +9,25 @@ from src.services.load_balancer import LoadBalancer
 
 
 class LoadBalancerMetricsTests(unittest.IsolatedAsyncioTestCase):
-    async def test_modern_profile_does_not_take_traffic_from_existing_generation_transport(self):
-        modern = SimpleNamespace(id=1, browser_profile_source="cloak", at=None)
-        existing = SimpleNamespace(
+    async def test_modern_profile_is_selected_without_legacy_bearer(self):
+        modern = SimpleNamespace(
             id=2,
-            browser_profile_source="cookies",
-            at="fixture",
+            browser_profile_source="cloak",
+            at=None,
             email="fixture@example.invalid",
             image_enabled=True,
             user_paygate_tier="PAYGATE_TIER_TWO",
             credits=10,
         )
         manager = SimpleNamespace(
-            get_active_tokens=AsyncMock(return_value=[modern, existing]),
-            ensure_valid_token=AsyncMock(return_value=existing),
+            get_active_tokens=AsyncMock(return_value=[modern]),
+            ensure_valid_token=AsyncMock(return_value=modern),
             needs_at_refresh=lambda token: False,
         )
         balancer = LoadBalancer(manager)
-        self.assertIs(await balancer.select_token(for_image_generation=True), existing)
-        manager.ensure_valid_token.assert_awaited_once_with(existing)
-        manager.get_active_tokens.return_value = [modern]
-        self.assertIsNone(await balancer.select_token(for_image_generation=True))
-        self.assertIn(
-            "新版生成接口适配尚未完成",
-            await balancer.get_unavailable_reason(for_image_generation=True),
-        )
+        self.assertIs(await balancer.select_token(for_image_generation=True), modern)
+        manager.ensure_valid_token.assert_awaited_once_with(modern)
+        self.assertIsNone(await balancer.get_unavailable_reason(for_image_generation=True))
 
     async def test_image_and_video_assigned_counts_do_not_overwrite(self):
         balancer = LoadBalancer(token_manager=object())

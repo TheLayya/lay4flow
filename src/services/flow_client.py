@@ -1,43 +1,43 @@
 """Flow API Client for VideoFX (Veo)"""
 
 import asyncio
-import json
-import contextvars
-from contextlib import contextmanager
-from copy import deepcopy
-import time
-import uuid
-import random
 import base64
+import contextvars
 import gzip
-import ssl
+import json
+import random
 import re
-from typing import Dict, Any, Optional, List, Union, Callable, Awaitable
-from urllib.parse import quote, urljoin, urlparse
+import ssl
+import time
 import urllib.error
 import urllib.request
+import uuid
+from contextlib import contextmanager
+from copy import deepcopy
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
+from urllib.parse import quote, urljoin, urlparse
+
 from curl_cffi.requests import AsyncSession
-from ..core.logger import debug_logger
+
 from ..core.config import config
-from .flow import endpoints
-from .flow import media as media_protocol
-from .flow import retry as retry_policy
-from .flow.session import with_session_token
-from .proxy_urls import normalize_proxy_url
+from ..core.logger import debug_logger
 from .browser.cloak_proxy import transport_proxy
+from .flow import endpoints, media as media_protocol, retry as retry_policy
 from .flow.fingerprint import (
     apply_remote_fingerprint_headers,
     merge_cookie_header,
     normalize_remote_fingerprint,
-    resolve_browser_impersonate,
     redact_credentials,
+    resolve_browser_impersonate,
     summarize_remote_http_error,
 )
+from .flow.session import with_session_token
 from .flow.video_edit import (
     validate_optional_video_trim,
     validate_video_trim,  # Re-export for existing service/API imports.
     video_edit_frame_range,
 )
+from .proxy_urls import normalize_proxy_url
 
 try:
     import httpx
@@ -76,6 +76,8 @@ class FlowClient:
         self._remote_browser_prefill_last_sent: Dict[str, float] = {}
         # Trusted account configuration, separate from remote solver fingerprints.
         self._account_proxy_ctx = contextvars.ContextVar("flow_account_proxy", default=None)
+        self._account_token_ctx = contextvars.ContextVar("flow_account_token", default=None)
+        self.token_manager = None
 
         # 仅保留当前上游仍稳定出现的最小浏览器风格头；具体 UA / Accept-Language / UA-CH
         # 统一以当前请求链路绑定的 runtime fingerprint 为准，不再兼容旧版随机平台策略。
@@ -99,6 +101,22 @@ class FlowClient:
             yield
         finally:
             self._account_proxy_ctx.reset(marker)
+
+    @contextmanager
+    def account_request_token(self, token):
+        marker = self._account_token_ctx.set(token)
+        try:
+            yield
+        finally:
+            self._account_token_ctx.reset(marker)
+
+    def _modern_generation(self):
+        token = self._account_token_ctx.get()
+        if token is None or getattr(token, "browser_profile_source", "") != "cloak":
+            return None
+        from .browser.flow_generation import FlowProfileGeneration
+
+        return FlowProfileGeneration(self, self.token_manager, token)
 
     def _set_request_fingerprint(self, fingerprint: Optional[Dict[str, Any]]):
         """设置当前请求链路的浏览器指纹上下文。"""
@@ -932,7 +950,7 @@ class FlowClient:
 
         try:
             result = json.loads(body_text) if body_text else {}
-        except Exception as exc:
+        except Exception:
             raise Exception("Invalid JSON response") from None
 
         if capture_session_token:
@@ -1299,6 +1317,9 @@ class FlowClient:
                 }
             }
         """
+        modern = self._modern_generation()
+        if modern is not None:
+            return await modern.get_media(media_name)
         url = self.api_base_url + endpoints.GET_MEDIA.format(media_name=media_name)
         return await self._make_request(
             method="GET",
@@ -1377,6 +1398,7 @@ class FlowClient:
             JPEG 格式的图片字节数据
         """
         from io import BytesIO
+
         from PIL import Image
 
         img = Image.open(BytesIO(image_bytes))
@@ -1406,6 +1428,9 @@ class FlowClient:
         Returns:
             mediaId
         """
+        modern = self._modern_generation()
+        if modern is not None:
+            return await modern.upload_image(project_id, image_bytes)
         # 转换视频aspect_ratio为图片aspect_ratio
         # VIDEO_ASPECT_RATIO_LANDSCAPE -> IMAGE_ASPECT_RATIO_LANDSCAPE
         # VIDEO_ASPECT_RATIO_PORTRAIT -> IMAGE_ASPECT_RATIO_PORTRAIT
@@ -1539,6 +1564,13 @@ class FlowClient:
         trim_end_ms: int = 10000,
     ) -> str:
         """Upload a video asset through Flow's resumable upload endpoint."""
+        modern = self._modern_generation()
+        if modern is not None:
+            media_id = await modern.upload_video(
+                project_id, video_bytes, mime_type, trim_start_ms, trim_end_ms
+            )
+            await self._wait_for_uploaded_video(at, project_id, media_id)
+            return media_id
         validate_video_trim(trim_start_ms, trim_end_ms)
         project = str(project_id or "").strip()
         if not project:
@@ -1759,6 +1791,22 @@ class FlowClient:
         uploaded_video: bool = False,
     ) -> dict:
         """Edit a video; trim offsets refer to the supplied media asset."""
+        modern = self._modern_generation()
+        if modern is not None:
+            frame_range = await self._get_video_edit_frame_range(
+                at, project_id, video_media_id, trim_start_ms, trim_end_ms, uploaded_video
+            )
+            return await modern.generate_video(
+                mode="edit",
+                project_id=project_id,
+                prompt=prompt,
+                model_name=model_key,
+                aspect_ratio=aspect_ratio,
+                video_media_id=video_media_id,
+                reference_images=reference_images,
+                trim_start_frame=frame_range.get("startFrameIndex"),
+                trim_end_frame=frame_range.get("endFrameIndex"),
+            )
         frame_range = await self._get_video_edit_frame_range(
             at, project_id, video_media_id, trim_start_ms, trim_end_ms, uploaded_video
         )
@@ -1835,6 +1883,11 @@ class FlowClient:
             session_id: 本次成功图片生成请求使用的 sessionId
             perf_trace: 生成重试与链路耗时轨迹
         """
+        modern = self._modern_generation()
+        if modern is not None:
+            return await modern.generate_image(
+                project_id, prompt, model_name, aspect_ratio, image_inputs, progress_callback
+            )
         url = self.api_base_url + endpoints.GENERATE_IMAGES.format(project_id=project_id)
 
         # 403/reCAPTCHA 重试逻辑
@@ -2010,6 +2063,9 @@ class FlowClient:
         Returns:
             base64 编码的图片数据
         """
+        modern = self._modern_generation()
+        if modern is not None:
+            return await modern.upsample_image(project_id, media_id, target_resolution)
         url = self.api_base_url + endpoints.UPSAMPLE_IMAGE
 
         # 403/reCAPTCHA/500 重试逻辑 - 使用配置的最大重试次数
@@ -2196,6 +2252,9 @@ class FlowClient:
                 "remainingCredits": 900
             }
         """
+        modern = self._modern_generation()
+        if modern is not None:
+            return await modern.generate_video_text(project_id, prompt, model_key, aspect_ratio)
         url = self.api_base_url + endpoints.GENERATE_VIDEO_TEXT
 
         # 403/reCAPTCHA 重试逻辑 - reCAPTCHA evaluation failed 时允许更高重试上限
@@ -2777,6 +2836,17 @@ class FlowClient:
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
     ) -> Dict[str, Any]:
+        modern = self._modern_generation()
+        if modern is not None:
+            return await modern.generate_video(
+                mode="references",
+                project_id=project_id,
+                prompt=prompt,
+                model_name=model_usage_key,
+                aspect_ratio=aspect_ratio,
+                duration=duration,
+                reference_images=[{"mediaId": name} for name in reference_media_ids],
+            )
         if not st:
             raise RuntimeError("Omni 参考图视频需要 ST token，但当前账号未提供 ST")
         if not reference_media_ids:
@@ -3036,6 +3106,16 @@ class FlowClient:
         Returns:
             同 generate_video_text
         """
+        modern = self._modern_generation()
+        if modern is not None:
+            return await modern.generate_video(
+                mode="references",
+                project_id=project_id,
+                prompt=prompt,
+                model_name=model_key,
+                aspect_ratio=aspect_ratio,
+                reference_images=reference_images,
+            )
         url = self.api_base_url + endpoints.GENERATE_VIDEO_REFERENCES
 
         # 403/reCAPTCHA 重试逻辑 - reCAPTCHA evaluation failed 时允许更高重试上限
@@ -3180,6 +3260,17 @@ class FlowClient:
         Returns:
             同 generate_video_text
         """
+        modern = self._modern_generation()
+        if modern is not None:
+            return await modern.generate_video(
+                mode="start_end",
+                project_id=project_id,
+                prompt=prompt,
+                model_name=model_key,
+                aspect_ratio=aspect_ratio,
+                start_media_id=start_media_id,
+                end_media_id=end_media_id,
+            )
         url = self.api_base_url + endpoints.GENERATE_VIDEO_FRAMES
 
         # 403/reCAPTCHA 重试逻辑 - reCAPTCHA evaluation failed 时允许更高重试上限
@@ -3323,6 +3414,16 @@ class FlowClient:
         Returns:
             同 generate_video_text
         """
+        modern = self._modern_generation()
+        if modern is not None:
+            return await modern.generate_video(
+                mode="start",
+                project_id=project_id,
+                prompt=prompt,
+                model_name=model_key,
+                aspect_ratio=aspect_ratio,
+                start_media_id=start_media_id,
+            )
         url = self.api_base_url + endpoints.GENERATE_VIDEO_FIRST_FRAME
 
         # 403/reCAPTCHA 重试逻辑 - reCAPTCHA evaluation failed 时允许更高重试上限
@@ -3467,6 +3568,16 @@ class FlowClient:
         Returns:
             同 generate_video_text (operations 列表)
         """
+        modern = self._modern_generation()
+        if modern is not None:
+            return await modern.generate_video(
+                mode="extend",
+                project_id=project_id,
+                prompt=prompt,
+                model_name=model_key,
+                aspect_ratio=aspect_ratio,
+                video_media_id=video_media_id,
+            )
         url = self.api_base_url + endpoints.EXTEND_VIDEO
 
         # 403/reCAPTCHA 重试逻辑 - reCAPTCHA evaluation failed 时允许更高重试上限
@@ -3753,6 +3864,21 @@ class FlowClient:
         token_video_concurrency: Optional[int] = None,
     ) -> dict:
         """Submit one video upscale request with policy retries and a safe trace."""
+        modern = self._modern_generation()
+        if modern is not None:
+            resolution_map = {"1080P": 2, "4K": 3, "360P": 1}
+            normalized_resolution = str(resolution).upper().removeprefix("VIDEO_RESOLUTION_")
+            if normalized_resolution not in resolution_map:
+                raise ValueError("Video upscale resolution is invalid")
+            return await modern.generate_video(
+                mode="upsample",
+                project_id=project_id,
+                prompt="",
+                model_name=model_key,
+                aspect_ratio=aspect_ratio,
+                video_media_id=video_media_id,
+                resolution=resolution_map[normalized_resolution],
+            )
         url = self.api_base_url + endpoints.UPSAMPLE_VIDEO
         max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
         retry_trace: Dict[str, Any] = {"max_retries": max_retries, "generation_attempts": []}
@@ -3985,6 +4111,9 @@ class FlowClient:
                 }]
             }
         """
+        modern = self._modern_generation()
+        if modern is not None:
+            return await modern.check_video_status(operations)
         url = self.api_base_url + endpoints.CHECK_VIDEO
 
         media_refs = self._operations_to_media_refs(operations)
@@ -4071,6 +4200,12 @@ class FlowClient:
         normalized_media_name = str(media_name or "").strip()
         if not normalized_media_name:
             return None
+        modern = self._modern_generation()
+        if modern is not None:
+            media = await modern.get_media(normalized_media_name)
+            return self._extract_video_url_from_media(media) or self._extract_image_url_from_media(
+                [media]
+            )
 
         url = (
             f"{self.labs_base_url}/trpc/media.getMediaUrlRedirect"

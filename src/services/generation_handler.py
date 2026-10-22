@@ -15,8 +15,6 @@ from ..core.account_tiers import (
 )
 from ..core.config import config
 from ..core.logger import debug_logger
-from ..core.models import RequestLog, Task
-from ..core.monitoring import record_generation_result
 
 # Keep historical imports working while the model catalog lives in core.
 from ..core.model_catalog import (
@@ -26,6 +24,8 @@ from ..core.model_catalog import (
     _make_i2v_config as _make_i2v_config,
     _make_t2v_config as _make_t2v_config,
 )
+from ..core.models import RequestLog, Task
+from ..core.monitoring import record_generation_result
 from .file_cache import FileCache
 from .flow import media as media_protocol
 from .flow_client import validate_video_trim
@@ -82,18 +82,26 @@ class GenerationHandler:
             )
         return nullcontext()
 
+    def _account_token_context(self, token):
+        if hasattr(self.flow_client, "account_request_token"):
+            return self.flow_client.account_request_token(token)
+        return nullcontext()
+
     async def _account_generation_pipeline(self, pipeline, token, proxy_url=None):
         """Scope each advance/close, so proxy ContextVar tokens never span a yield."""
         try:
             while True:
                 try:
-                    with self._account_proxy_context(token, proxy_url):
+                    with (
+                        self._account_proxy_context(token, proxy_url),
+                        self._account_token_context(token),
+                    ):
                         chunk = await anext(pipeline)
                 except StopAsyncIteration:
                     return
                 yield chunk
         finally:
-            with self._account_proxy_context(token, proxy_url):
+            with self._account_proxy_context(token, proxy_url), self._account_token_context(token):
                 await pipeline.aclose()
 
     def _create_response_state(self) -> Dict[str, Any]:
@@ -136,8 +144,8 @@ class GenerationHandler:
             or (operation.get("operation") or {}).get("name")
         )
 
-        video_url = ""
-        if media_name and getattr(token, "st", None):
+        video_url = str(video_info.get("fifeUrl") or video_info.get("embeddedUrl") or "")
+        if not video_url and media_name and getattr(token, "st", None):
             video_url = (
                 await self.flow_client.get_media_url_redirect(
                     token.st,
@@ -358,7 +366,7 @@ class GenerationHandler:
             )
 
         # 2. 选择Token
-        debug_logger.log_info(f"[GENERATION] 正在选择可用Token...")
+        debug_logger.log_info("[GENERATION] 正在选择可用Token...")
         token_select_started_at = time.time()
 
         if generation_type == "image":
@@ -486,7 +494,7 @@ class GenerationHandler:
                 slot_wait_ms
             )
 
-            debug_logger.log_info(f"[GENERATION] 检查Token AT有效性...")
+            debug_logger.log_info("[GENERATION] 检查Token AT有效性...")
             if stream:
                 yield self._create_stream_chunk("初始化生成环境...\n")
 
@@ -512,16 +520,8 @@ class GenerationHandler:
                 yield self._create_error_response(error_msg, status_code=503)
                 return
 
-            if getattr(token, "browser_profile_source", "") == "cloak" and not token.at:
-                error_msg = "Flow 登录态已验证；新版生成接口适配尚未完成"
-                record_generation_result(generation_type, "failed", time.time() - start_time)
-                if stream:
-                    yield self._create_stream_chunk(f"错误: {error_msg}\n")
-                yield self._create_error_response(error_msg, status_code=503)
-                return
-
             # 4. 确保Project存在
-            debug_logger.log_info(f"[GENERATION] 检查/创建Project...")
+            debug_logger.log_info("[GENERATION] 检查/创建Project...")
 
             if not supports_model_for_tier(model, token.user_paygate_tier):
                 required_tier = get_required_paygate_tier_for_model(model)
@@ -557,7 +557,9 @@ class GenerationHandler:
                 submission_lease = await acquire_proxy(token)
                 account_proxy = submission_lease.proxy_url
                 perf_trace["submission_proxy"] = {
-                    "mode": getattr(token, "submission_proxy_mode", "fixed"),
+                    "mode": "fixed"
+                    if getattr(token, "browser_profile_source", "") == "cloak"
+                    else getattr(token, "submission_proxy_mode", "fixed"),
                     "pool_id": submission_lease.entry_id,
                 }
             with self._account_proxy_context(token, account_proxy):
@@ -570,7 +572,7 @@ class GenerationHandler:
             # 5. 根据类型处理
             generation_pipeline_started_at = time.time()
             if generation_type == "image":
-                debug_logger.log_info(f"[GENERATION] 开始图片生成流程...")
+                debug_logger.log_info("[GENERATION] 开始图片生成流程...")
                 pipeline = self._handle_image_generation(
                     token,
                     project_id,
@@ -592,7 +594,7 @@ class GenerationHandler:
                             chunk, response_state, request_log_state, "image"
                         )
             else:  # video
-                debug_logger.log_info(f"[GENERATION] 开始视频生成流程...")
+                debug_logger.log_info("[GENERATION] 开始视频生成流程...")
                 pipeline = self._handle_video_generation(
                     token,
                     project_id,
@@ -661,7 +663,7 @@ class GenerationHandler:
             # 重置错误计数 (请求成功时清空连续错误计数)
             await self.token_manager.record_success(token.id)
 
-            debug_logger.log_info(f"[GENERATION] ✅ 生成成功完成")
+            debug_logger.log_info("[GENERATION] ✅ 生成成功完成")
 
             # 7. 记录成功日志
             duration = time.time() - start_time
@@ -1108,7 +1110,7 @@ class GenerationHandler:
                             }
                         )
                         if stream:
-                            yield self._create_stream_chunk(f"⚠️ 放大失败，返回原图...\n")
+                            yield self._create_stream_chunk("⚠️ 放大失败，返回原图...\n")
 
                 except Exception as e:
                     error_str = str(e)
@@ -1225,7 +1227,6 @@ class GenerationHandler:
         try:
             # 获取模型类型和配置
             video_type = model_config.get("video_type")
-            supports_images = model_config.get("supports_images", False)
             min_images = model_config.get("min_images", 0)
             max_images = model_config.get("max_images", 0)
             use_v2_model_config = bool(model_config.get("use_v2_model_config", False))
@@ -1562,7 +1563,7 @@ class GenerationHandler:
 
             # 轮询结果
             if stream:
-                yield self._create_stream_chunk(f"视频生成中...\n")
+                yield self._create_stream_chunk("视频生成中...\n")
 
             # 检查是否需要放大
             upsample_config = model_config.get("upsample")
@@ -1819,7 +1820,11 @@ class GenerationHandler:
                                 )
 
                     # ========== Extend 视频拼接 ==========
-                    if extend_source_media_id and video_media_id:
+                    if (
+                        extend_source_media_id
+                        and video_media_id
+                        and getattr(token, "browser_profile_source", "") != "cloak"
+                    ):
                         try:
                             if stream:
                                 yield self._create_stream_chunk(

@@ -660,6 +660,7 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
             refresh_status="ready",
         )
         self.manager.profile_refresher = Mock(refresh=AsyncMock())
+        self.manager.mark_profile_validated(await self.db.get_token(token_id))
         await self.manager.run_protocol_refresh_once()
         valid = await self.manager.ensure_valid_token(await self.db.get_token(token_id))
         self.assertIsNone(valid.at)

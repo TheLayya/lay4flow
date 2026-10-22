@@ -8,9 +8,9 @@ from typing import Optional
 
 from ..core.database import Database
 from ..core.models import ProxyConfig
-from .proxy_urls import normalize_proxy_url
-from .flow.retry import is_proxy_connection_error, is_retryable_network_error
 from .browser.cloak_proxy import transport_proxy
+from .flow.retry import is_proxy_connection_error, is_retryable_network_error
+from .proxy_urls import normalize_proxy_url
 
 
 @dataclass
@@ -126,7 +126,10 @@ class ProxyManager:
 
     async def acquire_submission_proxy(self, token) -> SubmissionProxyLease:
         """Reserve one exit for a whole generation task; login bindings stay unchanged."""
-        if getattr(token, "submission_proxy_mode", "fixed") != "pool_random":
+        if (
+            getattr(token, "submission_proxy_mode", "fixed") != "pool_random"
+            or getattr(token, "browser_profile_source", "") == "cloak"
+        ):
             proxy = await self.resolve_account_proxy(token)
             entry_id = getattr(token, "proxy_pool_id", None)
             async with self._submission_lock:
@@ -294,7 +297,8 @@ class ProxyManager:
         return [
             entry.proxy_url
             for entry in entries
-            if entry.enabled and getattr(entry, "captcha_enabled", True)
+            if entry.enabled
+            and getattr(entry, "captcha_enabled", True)
             and entry.last_check_ok is not False
             and (entry.cooldown_until is None or self._utc(entry.cooldown_until) <= now)
         ]

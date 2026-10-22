@@ -213,9 +213,10 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(token.proxy_pool_id, self.proxy_id)
         self.assertEqual(token.credits, 1050)
         self.assertEqual(token.user_paygate_tier, "PAYGATE_TIER_ONE")
-        self.assertGreaterEqual(token.next_refresh_at, before + timedelta(minutes=120))
+        self.assertEqual(token.refresh_interval_minutes, 30)
+        self.assertGreaterEqual(token.next_refresh_at, before + timedelta(minutes=30))
         self.assertLessEqual(
-            token.next_refresh_at, datetime.now(timezone.utc) + timedelta(minutes=120)
+            token.next_refresh_at, datetime.now(timezone.utc) + timedelta(minutes=30)
         )
         self.assertEqual(
             result["validation"],

@@ -55,6 +55,12 @@ class FlowProfileCredentialsTests(unittest.IsolatedAsyncioTestCase):
             "refresh_interval_minutes": 120,
         }
         values.update(updates)
+        if values.get("last_st_refresh_result") == "success" and values.get("last_st_refresh_at"):
+            values.setdefault(
+                "browser_profile_next_at",
+                values["last_st_refresh_at"]
+                + timedelta(minutes=values["refresh_interval_minutes"]),
+            )
         token_id = await self.db.add_token(Token(**values))
         persisted_only = {
             key: values[key]
@@ -67,7 +73,7 @@ class FlowProfileCredentialsTests(unittest.IsolatedAsyncioTestCase):
                 "next_refresh_at",
                 "last_refresh_at",
             )
-            if key in updates
+            if key in values
         }
         if persisted_only:
             await self.db.update_token(token_id, **persisted_only)
@@ -98,8 +104,9 @@ class FlowProfileCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(saved.browser_profile_verified_at, before)
         self.assertGreaterEqual(saved.next_refresh_at, before + timedelta(minutes=120))
         self.assertEqual(saved.next_refresh_at, saved.browser_profile_next_at)
-        self.assertIsNone(saved.last_st_refresh_at)
-        self.assertEqual(saved.last_st_refresh_result, "")
+        self.assertGreaterEqual(saved.last_st_refresh_at, before)
+        self.assertEqual(saved.last_st_refresh_result, "success")
+        self.assertTrue(self.manager.is_profile_validation_recent(saved))
         callback.assert_called_once_with(token_id)
         self.assert_no_legacy_requests()
 
@@ -114,7 +121,7 @@ class FlowProfileCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(token.at)
         self.assertFalse(restarted.needs_at_refresh(token))
         self.assertTrue(await restarted.is_at_valid(token_id, old_snapshot))
-        self.assertEqual(self.refresher.refresh.await_count, 1)
+        self.assertEqual(self.refresher.refresh.await_count, 2)
         self.assert_no_legacy_requests()
 
     async def test_stale_ready_profile_is_verified_once_then_reused(self):
@@ -321,6 +328,201 @@ class FlowProfileCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.refresher.refresh.assert_not_awaited()
         self.flow.st_to_at.assert_not_awaited()
         self.login.assert_not_awaited()
+
+    async def test_profile_cache_covers_full_credentials_and_proxy_binding(self):
+        token_id = await self.add()
+        token = await self.db.get_token(token_id)
+        self.manager.mark_profile_validated(token)
+        self.assertTrue(self.manager.is_profile_validation_recent(token))
+        for field, value in (
+            ("email", "other@example.invalid"),
+            ("login_account", "other@example.invalid"),
+            ("st", "new-placeholder"),
+            ("google_cookies", "changed-cookies"),
+            ("at", "old-at"),
+            ("at_expires", datetime.now(timezone.utc)),
+            ("proxy_pool_id", 9),
+            ("proxy_url", "http://changed.invalid:8080"),
+            ("browser_profile_source", "cookies"),
+            ("browser_profile_epoch", "new-epoch"),
+        ):
+            with self.subTest(field=field):
+                self.manager.mark_profile_validated(token)
+                self.assertFalse(
+                    self.manager.is_profile_validation_recent(
+                        token.model_copy(update={field: value})
+                    )
+                )
+        self.manager.mark_profile_validated(token)
+        with patch("src.services.token_manager.time.monotonic", return_value=10**15):
+            self.assertFalse(self.manager.is_profile_validation_recent(token))
+
+    async def test_validation_cache_expiry_probes_once_without_sliding_refresh_cycle(self):
+        now = datetime.now(timezone.utc)
+        last_refresh = now - timedelta(minutes=20)
+        next_refresh = now + timedelta(minutes=100)
+        token_id = await self.add(
+            browser_profile_status="ready",
+            refresh_status="ready",
+            browser_profile_verified_at=last_refresh,
+            last_st_refresh_at=last_refresh,
+            last_st_refresh_result="success",
+            next_refresh_at=next_refresh,
+        )
+        token = await self.db.get_token(token_id)
+        self.assertFalse(self.manager.needs_at_refresh(token))
+        self.assertFalse(self.manager.is_profile_validation_recent(token))
+        self.assertIsNotNone(await self.manager.ensure_valid_token(token))
+        saved = await self.db.get_token(token_id)
+        self.assertEqual(saved.last_st_refresh_at, last_refresh)
+        self.assertEqual(saved.next_refresh_at, next_refresh)
+        self.assertTrue(self.manager.is_profile_validation_recent(saved))
+        self.assertIsNotNone(await self.manager.ensure_valid_token(saved))
+        self.refresher.refresh.assert_awaited_once()
+        self.assert_no_legacy_requests()
+
+    async def test_validation_failure_keeps_backoff_and_last_success(self):
+        now = datetime.now(timezone.utc)
+        last_success = now - timedelta(minutes=20)
+        token_id = await self.add(
+            browser_profile_status="ready",
+            refresh_status="ready",
+            browser_profile_verified_at=last_success,
+            last_st_refresh_at=last_success,
+            last_st_refresh_result="success",
+            next_refresh_at=now + timedelta(minutes=100),
+        )
+        self.refresher.refresh.side_effect = TimeoutError("synthetic")
+        token = await self.db.get_token(token_id)
+        self.assertIsNone(await self.manager.ensure_valid_token(token))
+        saved = await self.db.get_token(token_id)
+        self.assertEqual(saved.last_st_refresh_at, last_success)
+        self.assertEqual(saved.last_st_refresh_result, "success")
+        self.assertIsNone(await self.manager.ensure_valid_token(saved))
+        self.refresher.refresh.assert_awaited_once()
+        self.assert_no_legacy_requests()
+
+    async def test_late_cookie_update_after_success_cas_does_not_gain_validation_cache(self):
+        token_id = await self.add()
+        original = self.db.update_token_if_credentials_match
+
+        async def changed_after_commit(identifier, expected, **updates):
+            saved = await original(identifier, expected, **updates)
+            if saved and updates.get("browser_profile_status") == "ready":
+                await self.db.update_token(identifier, google_cookies="new-unverified-cookie")
+            return saved
+
+        with patch.object(
+            self.db, "update_token_if_credentials_match", side_effect=changed_after_commit
+        ):
+            self.assertTrue(await self.manager._refresh_at(token_id, force=True))
+        latest = await self.db.get_token(token_id)
+        self.assertFalse(self.manager.is_profile_validation_recent(latest))
+
+    async def test_manual_refresh_promotes_running_validation_and_records_success_time(self):
+        now = datetime.now(timezone.utc)
+        last_success = now - timedelta(minutes=20)
+        token_id = await self.add(
+            browser_profile_status="ready",
+            refresh_status="ready",
+            browser_profile_verified_at=last_success,
+            last_st_refresh_at=last_success,
+            last_st_refresh_result="success",
+            next_refresh_at=now + timedelta(minutes=100),
+        )
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def refresh(token, **kwargs):
+            if not kwargs:
+                entered.set()
+                await release.wait()
+            return self.result()
+
+        self.refresher.refresh.side_effect = refresh
+        validation = asyncio.create_task(
+            self.manager.ensure_valid_token(await self.db.get_token(token_id))
+        )
+        await entered.wait()
+        manual = asyncio.create_task(self.manager._refresh_at(token_id, force=True))
+        await asyncio.sleep(0)
+        release.set()
+        valid, saved = await asyncio.gather(validation, manual)
+        self.assertIsNotNone(valid)
+        self.assertTrue(saved)
+        self.assertEqual(self.refresher.refresh.await_count, 2)
+        self.assertGreater((await self.db.get_token(token_id)).last_st_refresh_at, last_success)
+
+    async def test_recent_modern_profile_wins_over_legacy_st_success_timestamp(self):
+        now = datetime.now(timezone.utc)
+        legacy_st = now - timedelta(days=1)
+        next_refresh = now + timedelta(hours=2)
+        token_id = await self.add(
+            browser_profile_status="ready",
+            refresh_status="ready",
+            browser_profile_verified_at=now - timedelta(minutes=1),
+            last_refresh_at=now - timedelta(minutes=1),
+            last_st_refresh_at=legacy_st,
+            last_st_refresh_result="success",
+            browser_profile_next_at=next_refresh,
+            next_refresh_at=next_refresh,
+        )
+        token = await self.db.get_token(token_id)
+        self.assertFalse(self.manager.needs_at_refresh(token))
+        self.assertIsNotNone(await self.manager.ensure_valid_token(token))
+        saved = await self.db.get_token(token_id)
+        self.assertGreater(saved.last_st_refresh_at, legacy_st)
+        self.assertEqual(saved.last_st_refresh_result, "success")
+        self.refresher.refresh.assert_awaited_once()
+        self.assert_no_legacy_requests()
+
+    async def test_stale_profile_with_future_schedule_can_validate_without_waiting(self):
+        now = datetime.now(timezone.utc)
+        stale = now - timedelta(days=1)
+        next_refresh = now + timedelta(hours=2)
+        token_id = await self.add(
+            browser_profile_status="ready",
+            refresh_status="ready",
+            browser_profile_verified_at=stale,
+            last_refresh_at=stale,
+            last_st_refresh_at=stale,
+            last_st_refresh_result="success",
+            next_refresh_at=next_refresh,
+        )
+        self.assertIsNotNone(
+            await self.manager.ensure_valid_token(await self.db.get_token(token_id))
+        )
+        saved = await self.db.get_token(token_id)
+        self.assertGreater(saved.last_st_refresh_at, stale)
+        self.assertGreater(saved.next_refresh_at, now)
+        self.assertTrue(self.manager.is_profile_validation_recent(saved))
+        self.refresher.refresh.assert_awaited_once()
+        self.assert_no_legacy_requests()
+
+    async def test_repeated_validation_probes_do_not_postpone_cookie_renewal_cycle(self):
+        now = datetime.now(timezone.utc)
+        anchor = now - timedelta(minutes=119)
+        token_id = await self.add(
+            browser_profile_status="ready",
+            refresh_status="ready",
+            browser_profile_verified_at=anchor,
+            last_st_refresh_at=anchor,
+            last_st_refresh_result="success",
+            next_refresh_at=anchor + timedelta(minutes=120),
+        )
+        self.assertIsNotNone(
+            await self.manager.ensure_valid_token(await self.db.get_token(token_id))
+        )
+        saved = await self.db.get_token(token_id)
+        self.assertEqual(saved.last_st_refresh_at, anchor)
+        self.manager._clear_at_validation_cache(token_id)
+        with patch("src.services.token_manager.datetime") as clock:
+            clock.now.return_value = now + timedelta(minutes=2)
+            self.assertIsNotNone(await self.manager.ensure_valid_token(saved))
+        renewed = await self.db.get_token(token_id)
+        self.assertGreater(renewed.last_st_refresh_at, anchor)
+        self.assertEqual(renewed.last_st_refresh_result, "success")
+        self.assertEqual(self.refresher.refresh.await_count, 2)
+        self.assert_no_legacy_requests()
 
 
 if __name__ == "__main__":

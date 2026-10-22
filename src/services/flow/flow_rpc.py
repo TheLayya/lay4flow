@@ -27,15 +27,169 @@ _PAYGATE_TIERS = {
     8: "PAYGATE_TIER_TIER1P5",
 }
 
+_PUBLIC_ERRORS = {
+    0: "PUBLIC_ERROR_UNSPECIFIED",
+    2: "PUBLIC_ERROR_USER_QUOTA_REACHED",
+    48: "PUBLIC_ERROR_WORKSPACE_ACCOUNT_QUOTA_REACHED",
+    3: "PUBLIC_ERROR_USER_REQUESTS_THROTTLED",
+    4: "PUBLIC_ERROR_HIGH_TRAFFIC",
+    5: "PUBLIC_ERROR_MODEL_DISABLED_DUE_TO_TRAFFIC",
+    7: "PUBLIC_ERROR_NON_ENGLISH_PROMPT",
+    9: "PUBLIC_ERROR_GENERATION_ALREADY_IN_PROGRESS",
+    1: "PUBLIC_ERROR_UNSAFE_GENERATION",
+    11: "PUBLIC_ERROR_MODEL_ACCESS_DENIED",
+    32: "PUBLIC_ERROR_PER_MODEL_DAILY_QUOTA_REACHED",
+    34: "PUBLIC_ERROR_PER_MODEL_DAILY_QUOTA_REACHED_UPGRADEABLE",
+    33: "PUBLIC_ERROR_AUDIO_FILTERED",
+    8: "PUBLIC_ERROR_UNSAFE_IMAGE_UPLOAD",
+    19: "PUBLIC_ERROR_PROMINENT_PEOPLE_UPLOAD",
+    18: "PUBLIC_ERROR_SEXUAL_UPLOAD",
+    17: "PUBLIC_ERROR_MINOR_UPLOAD",
+    20: "PUBLIC_ERROR_PHOTOREAL_UPLOAD",
+    22: "PUBLIC_ERROR_MINOR_HARM_UPLOAD",
+    26: "PUBLIC_ERROR_UNKNOWN_IMAGE_FILE_FORMAT",
+    31: "PUBLIC_ERROR_IMAGE_TOO_LARGE",
+    44: "PUBLIC_ERROR_IMAGE_TOO_SMALL",
+    24: "PUBLIC_ERROR_PROMINENT_PEOPLE_INPUT_IMAGE",
+    25: "PUBLIC_ERROR_MINOR_INPUT_IMAGE",
+    23: "PUBLIC_ERROR_PHOTOREAL_INPUT_IMAGE",
+    41: "PUBLIC_ERROR_IP_INPUT_IMAGE",
+    12: "PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED",
+    14: "PUBLIC_ERROR_VIOLENCE_FILTER",
+    15: "PUBLIC_ERROR_DANGER_FILTER",
+    16: "PUBLIC_ERROR_SEXUAL",
+    21: "PUBLIC_ERROR_MINOR",
+    47: "PUBLIC_ERROR_IMAGE_OUTPUT_IP_FILTER",
+    27: "PUBLIC_ERROR_VIDEO_GENERATION_TIMED_OUT",
+    28: "PUBLIC_ERROR_MODEL_OVERLOADED",
+    29: "PUBLIC_ERROR_HANDLE_INVALID",
+    30: "PUBLIC_ERROR_HANDLE_TAKEN",
+    35: "PUBLIC_ERROR_SOMETHING_WENT_WRONG",
+    36: "PUBLIC_ERROR_COLLECTION_INVALID",
+    39: "PUBLIC_ERROR_COLLECTION_FULL",
+    40: "PUBLIC_ERROR_COLLECTION_DEPTH_EXCEEDED",
+    42: "PUBLIC_ERROR_APP_UNAVAILABLE",
+    45: "PUBLIC_ERROR_USER_REGION_DISALLOWED",
+    46: "PUBLIC_ERROR_USER_MINOR",
+    49: "PUBLIC_ERROR_UNUSUAL_ACTIVITY",
+    50: "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC",
+    43: "PUBLIC_BOTTLE_CONTENT_WARNING",
+    51: "PUBLIC_ERROR_CONCURRENT_LIMIT_REACHED",
+    52: "PUBLIC_ERROR_MEDIA_GENERATION_CANNOT_BE_CANCELED",
+    53: "PUBLIC_ERROR_UNSAFE_VIDEO_UPLOAD",
+    54: "PUBLIC_ERROR_VIDEO_UPLOAD_TIMEOUT",
+    55: "PUBLIC_ERROR_VIDEO_DURATION_TOO_LONG",
+    75: "PUBLIC_ERROR_PUBLISH_TIME_LIMIT_REACHED",
+    56: "PUBLIC_ERROR_APPLET_SIZE_LIMIT_EXCEEDED",
+    57: "PUBLIC_ERROR_APPLET_STORAGE_QUOTA_EXCEEDED",
+    58: "PUBLIC_ERROR_VIDEO_UPLOAD_FAILED",
+    59: "PUBLIC_ERROR_SPEECH_EDIT",
+    60: "PUBLIC_ERROR_VIDEO_EDIT",
+    61: "PUBLIC_ERROR_REPUTATIONAL",
+    63: "PUBLIC_ERROR_UNDERSPECIFIED_ANIMAL",
+    64: "PUBLIC_ERROR_RESPONSE_TOO_LONG",
+    65: "PUBLIC_ERROR_PROJECT_NOT_ALLOWLISTED",
+    66: "PUBLIC_ERROR_USER_ROLE_NOT_GRANTED",
+    67: "PUBLIC_ERROR_PROJECT_FLOW_ENTERPRISE_NOT_ENABLED",
+    68: "PUBLIC_ERROR_VERTEX_SAFETY_FILTER_TRIGGERED",
+    69: "PUBLIC_ERROR_VERTEX_UNSUPPORTED_INPUT",
+    70: "PUBLIC_ERROR_VERTEX_QUOTA_EXHAUSTED",
+    71: "PUBLIC_ERROR_VERTEX_QUOTA_EXHAUSTED_ADMIN",
+    72: "PUBLIC_ERROR_VERTEX_SERVICE_UNAVAILABLE",
+    73: "PUBLIC_ERROR_UNSAFE_SEARCH",
+    74: "PUBLIC_ERROR_IAM_POLICY_DENIED",
+}
+_RETRYABLE_PUBLIC_ERRORS = {
+    "PUBLIC_ERROR_USER_REQUESTS_THROTTLED",
+    "PUBLIC_ERROR_HIGH_TRAFFIC",
+    "PUBLIC_ERROR_MODEL_DISABLED_DUE_TO_TRAFFIC",
+    "PUBLIC_ERROR_MODEL_OVERLOADED",
+    "PUBLIC_ERROR_SOMETHING_WENT_WRONG",
+    "PUBLIC_ERROR_UNUSUAL_ACTIVITY",
+    "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC",
+    "PUBLIC_ERROR_CONCURRENT_LIMIT_REACHED",
+    "PUBLIC_ERROR_VERTEX_SERVICE_UNAVAILABLE",
+}
+
 
 class FlowRPCError(Exception):
     """A bounded diagnostic that never contains upstream response or token text."""
 
-    def __init__(self, reason: str, network_step: str, http_status: int | None = None):
+    def __init__(
+        self,
+        reason: str,
+        network_step: str,
+        http_status: int | None = None,
+        *,
+        rpc_code: int | None = None,
+        public_error: str | None = None,
+    ):
         self.reason = self.code = reason
         self.network_step = network_step
         self.http_status = http_status
-        super().__init__(f"Flow {network_step}: {reason}")
+        self.rpc_code = rpc_code if type(rpc_code) is int and 0 <= rpc_code <= 599 else None
+        self.public_error = (
+            public_error
+            if isinstance(public_error, str) and public_error in _PUBLIC_ERRORS.values()
+            else None
+        )
+        self.retryable = (
+            reason in {"transient_error", "xsrf_rejected"}
+            or self.public_error in _RETRYABLE_PUBLIC_ERRORS
+        )
+        detail = f" (code={self.rpc_code})" if self.rpc_code is not None else ""
+        if self.public_error:
+            detail += f" {self.public_error}"
+        super().__init__(f"Flow {network_step}: {reason}{detail}")
+
+
+class _XSRFRejected(Exception):
+    def __init__(self, token: str):
+        self.token = token
+
+
+def _source_path(value: Any) -> str:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"/(?:projects|project/[A-Za-z0-9_-]+)?", value
+    ):
+        raise FlowRPCError("account_probe_error", "flow_rpc")
+    return value
+
+
+def _public_error(value: Any, *, depth: int = 0) -> str | None:
+    if depth > 16:
+        return None
+    if isinstance(value, str):
+        return value if value in _PUBLIC_ERRORS.values() else None
+    if isinstance(value, list):
+        # google.protobuf.Any: only map its typed enum, never arbitrary integers.
+        if (
+            len(value) > 1
+            and isinstance(value[0], str)
+            and value[0].endswith("google.internal.labs.aisandbox.proto.common.v1.PublicAitkError")
+        ):
+            body = value[1]
+            code = body[0] if isinstance(body, list) and body else None
+            return _PUBLIC_ERRORS.get(code) if type(code) is int else None
+        for item in value:
+            found = _public_error(item, depth=depth + 1)
+            if found:
+                return found
+    return None
+
+
+def _rpc_error(code: Any, error: Any, step: str, *, executor: bool = False) -> FlowRPCError:
+    public = _public_error(error)
+    auth_codes = (401, 403, 16) if executor else (7, 16, 401, 403)
+    reason = (
+        "login_required"
+        if code in auth_codes
+        else "transient_error"
+        if public in _RETRYABLE_PUBLIC_ERRORS
+        or (public is None and code in (4, 8, 10, 13, 14, 408, 429, 502, 503, 504))
+        else "rpc_rejected"
+    )
+    return FlowRPCError(reason, step, rpc_code=code, public_error=public)
 
 
 def _trusted_flow_url(url: str) -> bool:
@@ -100,12 +254,12 @@ def _email(value: Any) -> str:
 
 
 def _rpc_payload(text: str, rpcid: str, step: str) -> Any:
-    """Decode XSSI-prefixed, length-framed batchexecute records."""
+    """Decode XSSI/length framing; replay only a definite, payload-free XSRF rejection."""
     remaining = text.lstrip()
     if remaining.startswith(")]}'"):
         remaining = remaining[4:]
     decoder = json.JSONDecoder()
-    matches = []
+    matches, errors, xsrf = [], [], []
     try:
         while remaining.strip():
             remaining = remaining.lstrip()
@@ -116,20 +270,45 @@ def _rpc_payload(text: str, rpcid: str, step: str) -> Any:
             remaining = remaining[end:]
             if not isinstance(records, list):
                 raise ValueError
-            for row in records:
-                if not isinstance(row, list) or not row or row[0] != "wrb.fr":
+            rows = [records] if records and isinstance(records[0], str) else records
+            for row in rows:
+                if not isinstance(row, list) or not row:
                     continue
-                if len(row) < 3 or row[1] != rpcid:
-                    continue
-                # wrb.fr field 5 is google.rpc.Status; do not copy its message.
-                error = row[5] if len(row) > 5 else None
-                if error:
-                    code = error[0] if isinstance(error, list) and error else None
-                    reason = "login_required" if code in (7, 16) else "transient_error"
-                    raise FlowRPCError(reason, step)
-                if not isinstance(row[2], str):
-                    raise ValueError
-                matches.append(json.loads(row[2]))
+                if row[0] == "xsrf":
+                    token = row[1] if len(row) > 1 else None
+                    if (
+                        not isinstance(token, str)
+                        or not token
+                        or len(token) > 4096
+                        or any(ord(char) < 32 for char in token)
+                    ):
+                        raise ValueError
+                    xsrf.append(token)
+                elif row[0] == "er":
+                    code = row[5] if len(row) > 5 else None
+                    if code is None and len(row) > 6:
+                        code = row[6]
+                    errors.append(_rpc_error(code, row, step, executor=True))
+                elif row[0] == "wrb.fr" and len(row) >= 3 and row[1] == rpcid:
+                    error = row[5] if len(row) > 5 else None
+                    if error:
+                        code = error[0] if isinstance(error, list) and error else None
+                        errors.append(_rpc_error(code, error, step))
+                    elif isinstance(row[2], str):
+                        matches.append(json.loads(row[2]))
+                    elif row[2] is None:
+                        errors.append(FlowRPCError("account_probe_error", step))
+                    else:
+                        raise ValueError
+        if xsrf and not matches:
+            auth_error = next((error for error in errors if error.reason == "login_required"), None)
+            if auth_error is not None:
+                raise auth_error
+            if len(set(xsrf)) != 1:
+                raise ValueError
+            raise _XSRFRejected(xsrf[0])
+        if errors:
+            raise errors[0]
         if len(matches) != 1:
             raise ValueError
     except (ValueError, TypeError, RecursionError):
@@ -149,31 +328,52 @@ def _identity(payload: Any) -> str:
     return email
 
 
-async def _rpc(request: Any, bootstrap: dict[str, Any], rpcid: str, body: Any, step: str):
+async def _rpc(
+    request: Any,
+    bootstrap: dict[str, Any],
+    rpcid: str,
+    body: Any,
+    step: str,
+    timeout_ms: int = 20000,
+    source_path: str = "/",
+):
+    source_path = _source_path(source_path)
+    form = {
+        "at": bootstrap["SNlM0e"],
+        "f.req": json.dumps(
+            [[[rpcid, json.dumps(body, separators=(",", ":")), None, "generic"]]],
+            separators=(",", ":"),
+        ),
+    }
     try:
-        response = await request.post(
-            FLOW_ORIGIN + bootstrap["eptZe"] + "data/batchexecute",
-            params={
-                "rpcids": rpcid,
-                "source-path": "/",
-                "f.sid": bootstrap["FdrFJe"],
-                "bl": bootstrap["cfb2h"],
-                "authuser": bootstrap.get("QrtxK") or "0",
-                "rt": "c",
-            },
-            form={
-                "at": bootstrap["SNlM0e"],
-                "f.req": json.dumps(
-                    [[[rpcid, json.dumps(body, separators=(",", ":")), None, "generic"]]],
-                    separators=(",", ":"),
-                ),
-            },
-            headers={"Origin": FLOW_ORIGIN, "Referer": FLOW_URL, "X-Same-Domain": "1"},
-            timeout=20000,
-            max_redirects=0,
-        )
-        _check_response(response, step)
-        return _rpc_payload(await response.text(), rpcid, step)
+        for attempt in range(2):
+            response = await request.post(
+                FLOW_ORIGIN + bootstrap["eptZe"] + "data/batchexecute",
+                params={
+                    "rpcids": rpcid,
+                    "source-path": source_path,
+                    "f.sid": bootstrap["FdrFJe"],
+                    "bl": bootstrap["cfb2h"],
+                    "authuser": bootstrap.get("QrtxK") or "0",
+                    "rt": "c",
+                },
+                form=dict(form),
+                headers={
+                    "Origin": FLOW_ORIGIN,
+                    "Referer": FLOW_ORIGIN + source_path,
+                    "X-Same-Domain": "1",
+                },
+                timeout=timeout_ms,
+                max_redirects=0,
+            )
+            _check_response(response, step)
+            try:
+                return _rpc_payload(await response.text(), rpcid, step)
+            except _XSRFRejected as rejected:
+                if attempt or rejected.token == form["at"]:
+                    raise FlowRPCError("xsrf_rejected", step) from None
+                form["at"] = rejected.token
+                bootstrap["SNlM0e"] = rejected.token
     except FlowRPCError:
         raise
     except Exception:
@@ -215,18 +415,30 @@ async def flow_rpc(
     payload: Any,
     *,
     network_step: str = "flow_rpc",
+    timeout_ms: int = 20000,
+    source_path: str = "/",
+    expected_email: str | None = None,
 ) -> Any:
     """Call one current Flow RPC using the browser context's Cookie/proxy jar."""
     if not isinstance(network_step, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", network_step):
         raise FlowRPCError("account_probe_error", "flow_rpc")
     if not isinstance(rpcid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", rpcid):
         raise FlowRPCError("account_probe_error", network_step)
+    source_path = _source_path(source_path)
+    if type(timeout_ms) is not int or timeout_ms <= 0:
+        raise FlowRPCError("account_probe_error", network_step)
     try:
-        response = await context.request.get(FLOW_URL, timeout=20000, max_redirects=0)
+        response = await context.request.get(
+            FLOW_ORIGIN + source_path, timeout=20000, max_redirects=0
+        )
         _check_response(response, "flow_bootstrap")
         bootstrap = _bootstrap(await response.text())
     except FlowRPCError:
         raise
     except Exception:
         raise FlowRPCError("transient_error", "flow_bootstrap") from None
-    return await _rpc(context.request, bootstrap, rpcid, payload, network_step)
+    if expected_email is not None and not same_google_identity(bootstrap["oPEP7c"], expected_email):
+        raise FlowRPCError("identity_mismatch", "flow_bootstrap")
+    return await _rpc(
+        context.request, bootstrap, rpcid, payload, network_step, timeout_ms, source_path
+    )

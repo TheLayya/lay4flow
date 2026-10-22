@@ -38,6 +38,7 @@ def create_services(db: Database | None = None, profile_refresher=None) -> Servi
     proxy = ProxyManager(db)
     client = FlowClient(proxy, db)
     tokens = TokenManager(db, client, profile_refresher=profile_refresher)
+    client.token_manager = tokens
     if profile_refresher is None and config.browser_profile_enabled:
         try:
             import cloakbrowser  # noqa: F401

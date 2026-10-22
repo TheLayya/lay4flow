@@ -1,5 +1,16 @@
 # Windows 原生打包与登录迁移交接记录
 
+## 2026-10-22：1.5.2 生成补齐
+
+- 1.5.1 仅完成认证并临时拦住生成，用户指出后暂停发布；GitHub v1.5.1 保持 Draft，没有提升 latest。
+- 当前工作区接入现代 Flow image/upload/upscale/video/poll RPC，使用 Profile Cookie、固定账号出口及原远程验证码服务；不构造静态假 Bearer。
+- `FlowProfileGeneration` 保留 Profile 会话/锁/关闭语义，通过独立 HTTP jar 发请求并合并受信任 Set-Cookie；结果不明不重发生成。
+- 现场最小 BELUGA 图片 RPC成功，约 15 秒，下载 HTTP 200、436884 字节；证据仅在 `tmp/flow-rpc-evidence/live-image-summary.json`，不入包。
+- 完整当前服务入口 `/v1/images/generations` 已验收 HTTP 200、1 张图片、35.53 秒（2026-10-22 09:00 UTC）；证据 `tmp/flow-rpc-evidence/local-api-image-summary.json`。当前 38001 已运行含该生成修复的镜像。测试中暴露并修复历史刷新 anchor/future schedule冲突及Playwright新请求通道超时；生成使用同Profile Cookie和固定出口的Curl请求，保留scope/删除语义及GUI并发Cookie更新。
+- 刷新周期与五分钟校验缓存分开。新 Cloak 30 分钟；已有用户间隔保留。旧 Labs anchor/未来计划冲突已增加回归，周期不会因轻量探针不断滑动。
+- 对照参考：TheSmallHanCat/flow2api commit `828b62080aa72233555bbc9c0bdbf81f244dc90e`。其 `flow-frontend-cookie` 是本地兼容标记，认证依赖完整 Cookie；本项目继续保存 `at=None`，保留既有身份/固定代理校验。
+- 视频各路由已做合成契约验证；此轮真实网络验收只消耗最小图片请求，视频计费生成与跨系统迁移另记结果。
+
 ## 2026-10-22：Flow 认证已迁移到新版 RPC（当前工作区）
 
 - 官方 Labs `/fx/api/auth/csrf`、`/session` 等旧认证入口实测返回 HTTP 410，正文明确标注认证端点已停用。将旧路径直接换到 `flow.google.com` 返回的是 HTML，也不是认证接口。
