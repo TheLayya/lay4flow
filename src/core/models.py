@@ -59,6 +59,10 @@ class Token(BaseModel):
     last_st_refresh_result: str = ""
     refresh_status: str = "idle"
     refresh_error: str = ""
+    # Sanitized diagnostics for the interactive Cloak login/refresh UI.
+    refresh_reason: str = ""
+    refresh_stage: str = ""
+    refresh_network_step: str = ""
     refresh_failures: int = 0
     next_refresh_at: Optional[datetime] = None
     last_refresh_at: Optional[datetime] = None

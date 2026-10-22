@@ -147,6 +147,26 @@ function accountReads(accounts) {
               : { accounts: [] }
 }
 
+test('orphan Vids-only rows can be deleted individually and in a mixed bulk delete', async () => {
+    const deletes = []
+    const fixture = view('Accounts', {
+        api: {
+            get: accountReads([]),
+            delete: async (path) => { deletes.push(path); return { success: true } },
+        },
+    })
+    const s = fixture.state
+    const orphan = { id: 4, email: '', vidsOnly: true, vids: { token_id: 4, identity_verified: false }, is_active: false }
+    const flow = { id: 2, email: 'flow@fixture.local', is_active: true }
+    s.accounts.value = [flow]
+    s.vids.value = [orphan.vids]
+    await s.action(orphan, 'delete')
+    assert.deepEqual(deletes, ['/api/tokens/4'])
+    s.selected.value = [orphan, flow]
+    await s.bulk('delete')
+    assert.deepEqual(deletes, ['/api/tokens/4', '/api/tokens/4', '/api/tokens/2'])
+})
+
 test('login avoids returning to the root login redirect and preserves a protected destination', () => {
     for (const next of ['/', '/?from=expired', '/login', '/login?next=/accounts', '//elsewhere.test']) {
         const { state } = view('Login', { context: { useRouter: () => ({}), useRoute: () => ({ query: { next } }) } })
@@ -1302,58 +1322,54 @@ test('invalid account input stops before API requests and rejected imports do no
     assert.match(fixture.errors.at(-1).message, /Unexpected fixture request/)
 })
 
-test('Cloak login opens directly, persists only its receipt, keeps validation failures resumable and completes', async () => {
+test('Cloak login opens without an email and automatically completes from its scoped status', async () => {
     const writes = []
-    const viewer = {
-        document: { body: {} },
-        location: {},
-        close() {
-            this.closed = true
-        },
-    }
-    let rejectComplete = true
-    const receipt = {
-        success: true,
-        session_id: 'fixture-session',
-        token_id: 71,
-        viewer_id: 'fixture-viewer',
-        viewer_url: '/api/profile-browser/71',
-        expires_at: '2099-01-01T00:00:00Z',
-    }
+    const reads = []
+    const viewer = { document: { body: {} }, location: {}, close() { this.closed = true } }
+    const receipt = { success: true, session_id: 'fixture-session', token_id: 71, viewer_id: 'fixture-viewer', viewer_url: '/api/profile-browser/71', expires_at: '2099-01-01T00:00:00Z' }
+    let status = { success: true, status: 'waiting', message: '等待登录' }
     const fixture = view('Accounts', {
         context: { window: { open: () => viewer } },
         api: {
-            get: accountReads([{ id: 71, email: 'direct@fixture.local', browser_profile_source: 'cloak' }]),
-            post: async (path, body) => {
-                writes.push({ path, body: plain(body) })
-                if (path === '/api/profile-login') return receipt
-                if (rejectComplete) throw new Error('Finish Google login first')
-                return { success: true, token_id: 71, email: 'direct@fixture.local', is_active: true }
-            },
+            get: async (path) => { reads.push(path); if (path.startsWith('/api/profile-login/')) return status; return accountReads([{ id: 71, email: 'direct@fixture.local', browser_profile_source: 'cloak' }])(path) },
+            post: async (path, body) => { writes.push({ path, body: plain(body) }); return receipt },
         },
     })
     const s = fixture.state
-    s.loginForm.email = 'direct@fixture.local'
     s.loginForm.proxy_pool_id = 17
     await s.startLogin()
-    assert.equal(writes[0].path, '/api/profile-login')
-    assert.equal(writes[0].body.proxy_pool_id, 17)
+    await s.pollLoginStatus()
+    assert.deepEqual(writes, [{ path: '/api/profile-login', body: { proxy_pool_id: 17 } }])
     assert.equal(viewer.location.href, 'http://fixture.local/api/profile-browser/71?viewer_id=fixture-viewer')
     assert.equal(viewer.opener, null)
     const stored = JSON.parse(fixture.storage.get('lay4flow.profileLogin'))
     assert.equal(stored.session_id, 'fixture-session')
-    assert.equal('proxy_url' in stored, false)
+    assert.equal(stored.email, '')
     assert.equal('cookies' in stored, false)
-    await s.completeLogin()
+    assert.equal('proxy_url' in stored, false)
     assert.equal(s.loginSession.value.session_id, 'fixture-session')
-    assert.equal(s.loginFinishing.value, false)
-    rejectComplete = false
-    await s.completeLogin()
+    status = { success: true, status: 'ready', result: { token_id: 71, email: 'direct@fixture.local', is_active: true } }
+    await s.pollLoginStatus()
     assert.equal(s.loginSession.value, null)
+    assert.equal(s.loginOpen.value, false)
     assert.equal(fixture.storage.has('lay4flow.profileLogin'), false)
     assert.equal(s.accounts.value[0].id, 71)
-    assert.deepEqual(writes[1].body, { viewer_id: 'fixture-viewer' })
-    assert.ok(writes.every(({ path }) => !path.includes('/plugin/')))
+    assert.ok(reads.includes('/api/profile-login/fixture-session?viewer_id=fixture-viewer'))
+    assert.equal(writes.some(({ path }) => path.includes('/complete')), false)
+})
+
+test('cancelled login ignores a late ready response and clears its automatic poll', async () => {
+    const pending = deferred()
+    const fixture = view('Accounts', { api: { get: async () => pending.promise, delete: async () => ({ success: true }) } })
+    const s = fixture.state
+    s.loginSession.value = { session_id: 'cancelled-login', viewer_id: 'owned', token_id: 71 }
+    const check = s.pollLoginStatus()
+    await s.cancelLogin()
+    pending.resolve({ success: true, status: 'ready', result: { email: 'late@fixture.local' } })
+    await check
+    assert.equal(s.loginSession.value, null)
+    assert.equal(s.loginStatus.value, '')
+    assert.equal(fixture.notices.length, 0)
 })
 
 test('Cloak login rejects foreign viewers and cancellation preserves receipt until server confirms', async () => {
@@ -1372,11 +1388,39 @@ test('Cloak login rejects foreign viewers and cancellation preserves receipt unt
     assert.equal(s.loginSession.value, null)
 })
 
+test('automatic login errors stay inline and a closed viewer resumes the same scoped session', async () => {
+    const writes = []
+    const failure = { success: true, status: 'error', reason: 'transient_error', message: '登录态验证暂时失败，请继续登录', browser_open: false, retryable: true }
+    const fixture = view('Accounts', {
+        context: { window: { lay4flowDesktop: { runtime: 'native' } } },
+        api: {
+            get: async (path) => path.startsWith('/api/profile-login/') ? failure : accountReads([])(path),
+            post: async (path, body) => { writes.push({ path, body: plain(body) }); return { success: true, session_id: 'retry-login', viewer_id: 'new-owner', token_id: 71, presentation: 'native' } },
+        },
+    })
+    const s = fixture.state
+    const receipt = { session_id: 'retry-login', viewer_id: 'old-owner', token_id: 71, presentation: 'native' }
+    s.loginSession.value = receipt
+    await s.pollLoginStatus()
+    assert.equal(s.loginFailure.value.browser_open, false)
+    assert.match(s.loginStatus.value, /验证暂时失败/)
+    assert.equal(fixture.errors.length, 0)
+    assert.deepEqual(JSON.parse(fixture.storage.get('lay4flow.profileLogin')), { ...receipt, browser_open: false })
+    await s.retryLogin()
+    assert.deepEqual(writes[0], { path: '/api/profile-login/retry-login/retry', body: { viewer_id: 'old-owner' } })
+    assert.equal(s.loginSession.value.session_id, 'retry-login')
+    assert.equal(s.loginSession.value.viewer_id, 'new-owner')
+    assert.equal(writes.some(({ path }) => path === '/api/profile-login'), false)
+})
+
 test('native Cloak login opens no web popup and resumes the owner-bound local window', async () => {
     const writes = []
     const fixture = view('Accounts', {
         context: {
-            window: { lay4flowDesktop: { runtime: 'native' }, open: () => assert.fail('Native login opened a web popup') },
+            window: {
+                lay4flowDesktop: { runtime: 'native' },
+                open: () => assert.fail('Native login opened a web popup'),
+            },
         },
         api: {
             post: async (path, body) => {
@@ -1412,7 +1456,10 @@ test('native account browser controls stay inline and serialize focus, refresh a
     let closeFails = true
     const fixture = view('Accounts', {
         context: {
-            window: { lay4flowDesktop: { runtime: 'native' }, open: () => assert.fail('Native viewer opened a web popup') },
+            window: {
+                lay4flowDesktop: { runtime: 'native' },
+                open: () => assert.fail('Native viewer opened a web popup'),
+            },
         },
         api: {
             post: async (path, body) => {
@@ -1477,7 +1524,7 @@ test('Cloak login resumes a future Unix-seconds receipt after reloading without 
     )
     for (const mount of fixture.mounted) mount()
     assert.equal(fixture.state.loginSession.value.session_id, 'resumable')
-    assert.equal(fixture.state.loginForm.email, 'resume@fixture.local')
+    assert.equal(fixture.state.loginSession.value.email, 'resume@fixture.local')
     assert.equal(fixture.requests.length, 0)
 })
 
@@ -1592,8 +1639,9 @@ test('background imports restore after navigation, show server stages and retry 
             {
                 email: 'second@fixture.local',
                 state: 'failed',
-                stage: 'oauth_renewal',
+                stage: 'flow_verification',
                 reason: 'proxy_timeout',
+                network_step: 'flow_identity',
                 message: 'proxy fixture timed out; profile retained',
             },
         ],
@@ -1602,6 +1650,8 @@ test('background imports restore after navigation, show server stages and retry 
     await new Promise(setImmediate)
     assert.equal(s.activeImportJobs.value.length, 0)
     assert.equal(s.importJobs.value[0].items[1].message, job.items[1].message)
+    assert.equal(s.importStageLabel(s.importJobs.value[0].items[1]), '验证 Flow 会话失败')
+    assert.equal(s.loginNetworkStepLabel(s.importJobs.value[0].items[1].network_step), '校验 Google 账号身份')
     assert.equal(s.importJobProgress(s.importJobs.value[0]), '2 / 2 \u9879')
     assert.equal(fixture.notices.at(-1).type, 'warning')
     await s.retryImportJob(s.importJobs.value[0])

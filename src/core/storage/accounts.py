@@ -28,9 +28,10 @@ class AccountRepository:
                                    protocol_mode, google_cookies, login_account, login_password,
                                    proxy_url, proxy_pool_id, submission_proxy_mode, auto_refresh_enabled, refresh_interval_minutes,
                                    browser_profile_source, last_st_refresh_at, last_st_refresh_result,
-                                   refresh_status, refresh_error, refresh_failures,
+                                   refresh_status, refresh_error,
+                                   refresh_reason, refresh_stage, refresh_network_step, refresh_failures,
                                    next_refresh_at, last_refresh_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     token.st,
@@ -63,6 +64,9 @@ class AccountRepository:
                     token.last_st_refresh_result,
                     token.refresh_status,
                     token.refresh_error,
+                    token.refresh_reason,
+                    token.refresh_stage,
+                    token.refresh_network_step,
                     token.refresh_failures,
                     token.next_refresh_at,
                     token.last_refresh_at,
@@ -290,6 +294,38 @@ class AccountRepository:
             )
             await db.commit()
             return cursor.lastrowid
+
+    async def add_project_if_credentials_match(
+        self,
+        project: Project,
+        expected: Dict[str, Any],
+        *,
+        expected_proxy_binding: tuple[int, str] | None = None,
+    ) -> Optional[int]:
+        """Attach a remote project only to the account binding that created it."""
+        if not expected:
+            return None
+        where = " AND ".join(f"t.{key} IS ?" for key in expected)
+        params = [
+            project.project_id,
+            project.token_id,
+            project.project_name,
+            project.tool_name,
+            project.is_active,
+            project.token_id,
+            *expected.values(),
+        ]
+        if expected_proxy_binding is not None:
+            where += " AND EXISTS (SELECT 1 FROM proxy_pool p WHERE p.id = ? AND p.enabled = 1 AND p.proxy_url IS ?)"
+            params.extend(expected_proxy_binding)
+        async with self._database._connect(write=True) as db:
+            cursor = await db.execute(
+                f"""INSERT INTO projects (project_id, token_id, project_name, tool_name, is_active)
+                    SELECT ?, ?, ?, ?, ? FROM tokens t WHERE t.id = ? AND {where}""",
+                params,
+            )
+            await db.commit()
+            return cursor.lastrowid if cursor.rowcount == 1 else None
 
     async def get_project_by_id(self, project_id: str) -> Optional[Project]:
         """Get project by UUID"""

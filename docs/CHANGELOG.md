@@ -1,5 +1,21 @@
 # 更新记录
 
+## 1.5.1 — 2026-10-22
+
+### 修复
+
+- Cloak 登录、凭据刷新和 Profile 迁移改用 Google Flow 当前的身份与额度 RPC，不再请求已停用的 Labs CSRF、NextAuth session 或旧 ST→AT 入口。
+- Gmail `gmail.com` / `googlemail.com` 别名继续按同一 Google 身份校验；其他邮箱保持严格匹配。
+- 登录失败显示 Flow bootstrap、身份、额度和项目阶段，保留可重试状态，不泄露 Cookie、AT 或代理凭据。
+- Profile 刷新保存浏览器会话和额度，不伪造旧 AT；生成调度暂时跳过尚未接入新版生成 RPC 的 Cloak 账号。
+- Docker/Linux 与 Windows 原生 Profile 迁移保留固定代理、Profile seed、身份和冷启动校验；项目写入增加账号/Profile/代理绑定的原子校验。
+
+### 验证与限制
+
+- 通过 1381 项后端测试、前端测试、离线 smoke，以及原生登录和 Profile 迁移 E2E。
+- 已用账号 3 只读验证新版 Flow 身份、额度和项目 RPC；当前额度现场读数为 895。
+- Windows 安装 EXE 需 .NET 10 SDK 和 Inno Setup 构建；本源码发布候选提供 runtime、ZIP 和 SHA256。
+
 ## 1.5.0 — 2026-10-22
 
 ### Windows 原生安装

@@ -11,10 +11,11 @@ from .profiles import ProfileNotReadyError
 
 
 class ViewerError(RuntimeError):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, *, detail: dict[str, Any] | None = None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.detail = detail
 
 
 class ProfileBrowserViewer:
@@ -24,6 +25,7 @@ class ProfileBrowserViewer:
         if not 0 < ttl_seconds <= 1800:
             raise ValueError("viewer lifetime must be between 0 and 1800 seconds")
         self.token_manager = token_manager
+        self.token_manager.profile_delete_handler = self.delete_token
         self.login = DirectProfileLogin(self)
         self.ttl_seconds = ttl_seconds
         self._guard = asyncio.Lock()
@@ -299,7 +301,12 @@ class ProfileBrowserViewer:
             self._proxy_url = ""
 
     async def refresh(
-        self, token_id: int, owner: str, viewer_id: str | None = None
+        self,
+        token_id: int,
+        owner: str,
+        viewer_id: str | None = None,
+        *,
+        accept_existing_session: bool = False,
     ) -> dict[str, Any]:
         # Share the close/start guard so neither close nor lifetime expiry can
         # destroy the browser while the normal credential pipeline uses it.
@@ -327,7 +334,8 @@ class ProfileBrowserViewer:
             pending = getattr(self.token_manager, "_refresh_futures", {}).get(token_id)
             if pending is not None and not pending.done():
                 raise ViewerError(409, "该账号正在刷新，请等待完成后重试")
-            async with refresher.use_context(self._email, self._context):
+            kwargs = {"accept_existing_session": True} if accept_existing_session else {}
+            async with refresher.use_context(self._email, self._context, **kwargs):
                 operation = asyncio.create_task(
                     self.token_manager._refresh_at(token_id, force=True, refresh_st=True)
                 )
@@ -423,6 +431,14 @@ class ProfileBrowserViewer:
         if self._task is task:
             self._finished(task, self._ready)
         return {"token_id": token_id, "status": "closed", "expires_at": None}
+
+    async def delete_token(self, token_id: int) -> None:
+        """An explicit account delete also owns its viewer and pending login cleanup."""
+        async with self.login._guard, self._switch_guard:
+            if self._task is not None and self._token_id == token_id:
+                await self._close(token_id, self._owner)
+            await self.token_manager._delete_token(token_id)
+            self.login.forget_token(token_id)
 
     async def close_all(self) -> None:
         await self.login.close_all()

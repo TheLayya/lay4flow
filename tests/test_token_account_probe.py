@@ -1,157 +1,180 @@
-"""Synthetic diagnostics for browser session, identity and transport failures."""
+"""Synthetic current Flow identity/credits diagnostics, with no external requests."""
 
-import asyncio
 import unittest
-from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
-
-from playwright.async_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
+from unittest.mock import AsyncMock, patch
 
 from src.services.browser.profile_verifier import ProfileVerifier
-from src.services.browser.token_account_probe import SESSION_URL, TokenManagerAccountProbe
-from src.services.token_manager import RefreshFailure, TokenManager
+from src.services.browser.token_account_probe import TokenManagerAccountProbe
+from src.services.flow.flow_rpc import FlowRPCError
 
 EMAIL = "fixture@example.invalid"
 SECRET = "proxy://fixture-user:fixture-password@fixture.invalid?token=fixture-token"
 
 
 class TokenAccountProbeTests(unittest.IsolatedAsyncioTestCase):
-    def probe(self, *, cookies=None, session_email=EMAIL):
-        token = SimpleNamespace(email=EMAIL)
-        manager = TokenManager(
-            object(), SimpleNamespace(api_base_url="https://flow.google.com/api")
-        )
-        manager._validate_refresh_session = AsyncMock(
-            side_effect=AssertionError("browser probe must use its own request context")
-        )
-        session = SimpleNamespace(
-            status=200,
-            json=AsyncMock(
-                return_value={
-                    "access_token": "fixture-at",
-                    "expires": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
-                    "user": {"email": session_email},
-                }
-            ),
-        )
-        credits = SimpleNamespace(status=200, json=AsyncMock(return_value={"credits": 5}))
-        context = SimpleNamespace(
-            cookies=AsyncMock(
-                return_value=(
-                    cookies
-                    if cookies is not None
-                    else [
-                        {
-                            "name": "__Secure-next-auth.session-token",
-                            "value": "fixture-st",
-                            "domain": "labs.google",
-                            "path": "/",
-                        }
-                    ]
-                )
-            ),
-            request=SimpleNamespace(get=AsyncMock(side_effect=[session, credits])),
-        )
-        probe = TokenManagerAccountProbe(manager, token)
+    def probe(self, *, email=EMAIL, discover_identity=False):
+        context = object()
+        manager = SimpleNamespace(_validate_refresh_session=AsyncMock())
+        token = SimpleNamespace(email=email)
+        probe = TokenManagerAccountProbe(manager, token, discover_identity=discover_identity)
         probe.set_context(context)
-        return probe, context, session, credits
+        return probe, context
 
-    async def test_missing_browser_session_is_not_reported_as_identity_mismatch(self):
-        probe, context, _, _ = self.probe(cookies=[])
-        verified = await ProfileVerifier().verify_account(EMAIL, probe)
-        self.assertEqual(verified.reason, "session_invalid")
-        self.assertIsNone(probe.validated_session)
-        context.request.get.assert_not_awaited()
+    async def test_valid_flow_session_is_fully_validated_without_legacy_tokens(self):
+        probe, context = self.probe()
+        with patch(
+            "src.services.browser.token_account_probe.read_flow_session",
+            AsyncMock(
+                return_value={"email": EMAIL, "credits": 5, "user_paygate_tier": "PAYGATE_TIER_ONE"}
+            ),
+        ) as read:
+            result = await probe.verify(EMAIL)
+        self.assertEqual(result, {"email": EMAIL, "session_valid": True, "credits": 5})
+        self.assertEqual(
+            probe.validated_session,
+            {
+                "at": None,
+                "at_expires": None,
+                "credits": 5,
+                "user_paygate_tier": "PAYGATE_TIER_ONE",
+            },
+        )
+        self.assertEqual(probe.network_step, "flow_credits")
+        read.assert_awaited_once_with(context)
         probe.token_manager._validate_refresh_session.assert_not_awaited()
 
-    async def test_missing_explicit_session_is_reported_before_side_channel_validation(self):
-        manager = SimpleNamespace(_validate_refresh_session=AsyncMock())
-        probe = TokenManagerAccountProbe(manager, SimpleNamespace(email=EMAIL))
-        result = await probe.verify(EMAIL)
-        self.assertEqual(result["reason"], "session_invalid")
-        manager._validate_refresh_session.assert_not_awaited()
+    async def test_missing_browser_context_never_uses_token_manager_side_channel(self):
+        probe = TokenManagerAccountProbe(
+            SimpleNamespace(_validate_refresh_session=AsyncMock()), SimpleNamespace(email=EMAIL)
+        )
+        with patch(
+            "src.services.browser.token_account_probe.read_flow_session", AsyncMock()
+        ) as read:
+            self.assertEqual((await probe.verify(EMAIL))["reason"], "session_invalid")
+        read.assert_not_awaited()
+        probe.token_manager._validate_refresh_session.assert_not_awaited()
 
-    async def test_token_and_expected_account_mismatch_is_explicit(self):
-        probe, context, _, _ = self.probe()
-        result = await probe.verify("another@example.invalid")
+    async def test_expected_account_mismatch_skips_all_requests(self):
+        probe, _ = self.probe()
+        with patch(
+            "src.services.browser.token_account_probe.read_flow_session", AsyncMock()
+        ) as read:
+            result = await probe.verify("another@example.invalid")
         self.assertEqual(result["reason"], "identity_mismatch")
         self.assertIsNone(probe.validated_session)
-        context.cookies.assert_not_awaited()
-        context.request.get.assert_not_awaited()
+        read.assert_not_awaited()
 
-    async def test_session_identity_mismatch_never_requests_credits(self):
-        probe, context, _, _ = self.probe(session_email="another@example.invalid")
-        result = await probe.verify(EMAIL)
-        self.assertEqual(result["reason"], "identity_mismatch")
-        self.assertEqual(context.request.get.await_count, 1)
-        self.assertEqual(context.request.get.call_args.args[0], SESSION_URL)
-        self.assertIsNone(probe.validated_session)
-
-    async def test_known_timeouts_and_connection_failures_are_transient(self):
-        for error in (
-            asyncio.TimeoutError(SECRET),
-            PlaywrightTimeoutError(SECRET),
-            ConnectionResetError(SECRET),
-            PlaywrightError(SECRET),
+    async def test_observed_account_mismatch_is_explicit(self):
+        probe, _ = self.probe()
+        with patch(
+            "src.services.browser.token_account_probe.read_flow_session",
+            AsyncMock(return_value={"email": "other@example.invalid", "credits": 5}),
         ):
-            for step in ("session", "credits"):
-                with self.subTest(error=type(error).__name__, step=step):
-                    probe, context, session, _ = self.probe()
-                    context.request.get.side_effect = (
-                        error if step == "session" else [session, error]
-                    )
-                    result = await probe.verify(EMAIL)
-                    self.assertEqual(result["reason"], "transient_error")
-                    self.assertIsNone(probe.validated_session)
-                    self.assertNotIn(SECRET, repr(result))
+            self.assertEqual((await probe.verify(EMAIL))["reason"], "identity_mismatch")
+        self.assertEqual(probe.observed_email, "other@example.invalid")
+        self.assertIsNone(probe.validated_session)
+        self.assertEqual(probe.network_step, "flow_identity")
 
-    async def test_generic_probe_and_json_errors_remain_probe_errors(self):
-        for step in ("cookies", "request", "session_json", "credits_json"):
-            with self.subTest(step=step):
-                probe, context, session, credits = self.probe()
-                if step == "cookies":
-                    context.cookies.side_effect = PlaywrightError(SECRET)
-                elif step == "request":
-                    context.request.get.side_effect = RuntimeError(SECRET)
-                elif step == "session_json":
-                    session.json.side_effect = ValueError(SECRET)
-                else:
-                    credits.json.side_effect = PlaywrightError(SECRET)
-                result = await probe.verify(EMAIL)
-                self.assertEqual(result["reason"], "account_probe_error")
+    async def test_discovery_adopts_only_valid_official_identity_and_credits(self):
+        probe, context = self.probe(
+            email="profile-pending-synthetic@local.invalid", discover_identity=True
+        )
+        with patch(
+            "src.services.browser.token_account_probe.read_flow_session",
+            AsyncMock(return_value={"email": " Actual.User@gmail.com ", "credits": 0}),
+        ) as read:
+            result = await probe.verify("")
+        self.assertEqual(
+            result, {"email": "actual.user@gmail.com", "session_valid": True, "credits": 0}
+        )
+        self.assertEqual(probe.observed_email, "actual.user@gmail.com")
+        self.assertIsNotNone(probe.validated_session)
+        read.assert_awaited_once_with(context)
+
+    async def test_discovery_rejects_missing_identity_and_invalid_credit_values(self):
+        for payload, reason in (
+            ({"email": "", "credits": 1}, "identity_mismatch"),
+            ({"email": "missing-domain", "credits": 1}, "identity_mismatch"),
+            ({"email": EMAIL, "credits": -1}, "credits_invalid"),
+            ({"email": EMAIL, "credits": True}, "credits_invalid"),
+            ({"email": EMAIL, "credits": "5"}, "credits_invalid"),
+        ):
+            with self.subTest(payload=payload):
+                probe, _ = self.probe(discover_identity=True)
+                with patch(
+                    "src.services.browser.token_account_probe.read_flow_session",
+                    AsyncMock(return_value=payload),
+                ):
+                    self.assertEqual((await probe.verify(""))["reason"], reason)
                 self.assertIsNone(probe.validated_session)
-                self.assertNotIn(SECRET, repr(result))
 
-    async def test_known_refresh_failure_codes_keep_their_diagnostics(self):
-        for code, reason in (
-            ("session_invalid", "session_invalid"),
-            ("login_required", "login_required"),
-            ("invalid_cookies", "identity_mismatch"),
-            ("transient_error", "transient_error"),
-            ("invalid_proxy", "invalid_proxy"),
-            ("proxy_error", "proxy_error"),
-            ("unrecognized", "account_probe_error"),
+    async def test_flow_errors_preserve_only_structured_reason_and_network_step(self):
+        for reason, step in (
+            ("login_required", "flow_bootstrap"),
+            ("identity_mismatch", "flow_identity"),
+            ("credits_invalid", "flow_credits"),
+            ("transient_error", "flow_credits"),
+            ("account_probe_error", "flow_identity"),
         ):
-            with self.subTest(code=code):
-                manager = SimpleNamespace(
-                    _validate_refresh_session=AsyncMock(side_effect=RefreshFailure(SECRET, code))
-                )
-                probe = TokenManagerAccountProbe(
-                    manager, SimpleNamespace(email=EMAIL), "fixture-st"
-                )
-                result = await probe.verify(EMAIL)
+            with self.subTest(reason=reason):
+                probe, _ = self.probe()
+                with patch(
+                    "src.services.browser.token_account_probe.read_flow_session",
+                    AsyncMock(side_effect=FlowRPCError(reason, step, 503)),
+                ):
+                    result = await probe.verify(EMAIL)
+                self.assertEqual(result, {"reason": reason})
+                self.assertEqual(probe.network_step, step)
+                self.assertIsNone(probe.validated_session)
+
+    async def test_unexpected_errors_do_not_expose_secret_text(self):
+        for error, reason in (
+            (TimeoutError(SECRET), "transient_error"),
+            (ConnectionError(SECRET), "transient_error"),
+            (RuntimeError(SECRET), "account_probe_error"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                probe, _ = self.probe()
+                with patch(
+                    "src.services.browser.token_account_probe.read_flow_session",
+                    AsyncMock(side_effect=error),
+                ):
+                    result = await probe.verify(EMAIL)
                 self.assertEqual(result["reason"], reason)
                 self.assertNotIn(SECRET, repr(result))
 
-    async def test_valid_browser_session_keeps_full_identity_and_credits_validation(self):
-        probe, context, _, _ = self.probe()
-        result = await probe.verify(EMAIL)
-        self.assertEqual(result, {"email": EMAIL, "session_valid": True, "credits": 5})
-        self.assertEqual(probe.validated_session["st"], "fixture-st")
-        self.assertEqual(probe.validated_session["at"], "fixture-at")
-        self.assertEqual(context.request.get.await_count, 2)
-        probe.token_manager._validate_refresh_session.assert_not_awaited()
+    async def test_each_verify_uses_current_context_and_resets_previous_success(self):
+        probe, first = self.probe()
+        second = object()
+        with patch(
+            "src.services.browser.token_account_probe.read_flow_session",
+            AsyncMock(
+                side_effect=[
+                    {"email": EMAIL, "credits": 1},
+                    FlowRPCError("login_required", "flow_bootstrap"),
+                ]
+            ),
+        ) as read:
+            self.assertTrue((await probe.verify(EMAIL))["session_valid"])
+            self.assertEqual((await probe.verify(EMAIL, second))["reason"], "login_required")
+        self.assertEqual(read.await_args_list[0].args, (first,))
+        self.assertEqual(read.await_args_list[1].args, (second,))
+        self.assertIsNone(probe.validated_session)
+        self.assertEqual(probe.observed_email, "")
+
+    async def test_verifier_uses_existing_identity_policy_after_rpc(self):
+        for official, expected in (
+            (EMAIL.upper(), EMAIL),
+            ("person@googlemail.com", "person@gmail.com"),
+        ):
+            probe, _ = self.probe(email=expected)
+            with patch(
+                "src.services.browser.token_account_probe.read_flow_session",
+                AsyncMock(return_value={"email": official, "credits": 1}),
+            ):
+                result = await ProfileVerifier().verify_account(expected, probe)
+            self.assertEqual(result.reason, "account_ready")
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 import json
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -44,13 +45,16 @@ class VidsConsoleTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         with (
+            TemporaryDirectory() as directory,
             patch.object(app.state.vids_dispatcher, "public_accounts", lookup),
             patch.object(
                 config,
                 "get_raw_config",
                 side_effect=lambda: {
                     "vids": {
-                        "accounts": [{"token_id": row["token_id"]} for row in lookup.return_value]
+                        "accounts": [{"token_id": row["token_id"]} for row in lookup.return_value],
+                        # Deletion markers belong to this test's synthetic registry.
+                        "registry_path": str(Path(directory) / "bindings.json"),
                     }
                 },
             ),

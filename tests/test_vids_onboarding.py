@@ -17,6 +17,7 @@ from src.api.admin_routes.vids import create_vids_admin_router
 from src.api.admin_routes.vids_onboarding import create_vids_onboarding_router
 from src.services.vids.bindings import read_bindings, session_key_file, write_bindings
 from src.services.vids.client import VidsProtocolError
+from src.services.vids.deletion_markers import is_deleted
 from src.services.vids.dispatcher import VidsProviderDispatcher
 from src.services.vids.gateway import GatewayError
 from src.services.vids.onboarding import (
@@ -99,6 +100,91 @@ class VidsOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.resume_factory.stop()
         self.factory.stop()
         self.directory.cleanup()
+
+    async def test_delete_cleans_orphan_binding_session_marker_and_runtime_without_sibling(self):
+        await self.service.onboard(1)
+        await self.service.onboard(2)
+        root = self.service.runtime_dir / "1"
+        sibling = self.service.runtime_dir / "2"
+        key = self.service.secrets_dir / "account1.key"
+        marker = self.service.registry_path.parent / "auto-onboarding" / "1"
+        marker.parent.mkdir(exist_ok=True)
+        marker.write_text("{}")
+        self.runtime.account_errors[1] = "account_not_found"
+        self.dispatcher._claims["synthetic"] = 1
+        self.dispatcher._document_refs["synthetic"] = (1, "shape")
+        self.tokens.pop(1)
+
+        await self.service.delete_account(1)
+        await self.service.delete_account(1)
+
+        self.assertEqual(
+            [row["token_id"] for row in read_bindings(self.service.registry_path)], [2]
+        )
+        self.assertFalse(root.exists())
+        self.assertFalse(key.exists())
+        self.assertFalse(marker.exists())
+        self.assertTrue(sibling.exists())
+        self.assertEqual(set(self.dispatcher._accounts), {2})
+        self.assertNotIn(1, self.runtime.account_errors)
+        self.assertNotIn(1, self.runtime.binding_rows)
+        self.assertNotIn("synthetic", self.dispatcher._claims)
+        self.assertNotIn("synthetic", self.dispatcher._document_refs)
+
+    async def test_delete_busy_account_preserves_binding_and_files(self):
+        await self.service.onboard(1)
+        gateway = self.dispatcher._accounts[1].gateway
+        async with gateway.lock:
+            with self.assertRaises(GatewayError) as caught:
+                await self.service.delete_account(1)
+        self.assertEqual(caught.exception.status, 409)
+        self.assertTrue((self.service.runtime_dir / "1").exists())
+        self.assertEqual(len(read_bindings(self.service.registry_path)), 1)
+
+    async def test_delete_does_not_follow_custom_shared_runtime_or_key(self):
+        shared = self.root / "shared-runtime"
+        shared.mkdir()
+        (shared / "keep").write_text("other account")
+        shared_key = self.root / "shared.key"
+        shared_key.write_text("keep")
+        write_bindings(
+            self.service.registry_path,
+            [{"token_id": 1, "runtime_dir": str(shared), "session_key_file": str(shared_key)}],
+        )
+        await self.service.delete_account(1)
+        self.assertEqual((shared / "keep").read_text(), "other account")
+        self.assertEqual(shared_key.read_text(), "keep")
+
+    async def test_deleted_static_binding_stays_absent_after_restart_and_admin_listing(self):
+        await self.service.onboard(1)
+        static = read_bindings(self.service.registry_path)[0]
+        settings = {"accounts": [static], "registry_path": str(self.service.registry_path)}
+        await self.service.delete_account(1)
+        self.assertTrue(is_deleted(self.service.registry_path, 1))
+        await self.runtime.close()
+        await self.runtime.start(settings)
+        self.assertEqual(self.runtime.binding_rows, {})
+        self.assertEqual(self.runtime.account_errors, {})
+        self.assertEqual(self.dispatcher._accounts, {})
+
+        async def authenticate():
+            return "admin"
+
+        app = FastAPI()
+        app.include_router(
+            create_vids_admin_router(
+                self.dispatcher, authenticate, get_settings=lambda: settings, runtime=self.runtime
+            )
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as http:
+            response = await http.get("/api/admin/vids/accounts/detail")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["accounts"], [])
+
+        await self.service.onboard(1)
+        self.assertFalse(is_deleted(self.service.registry_path, 1))
 
     async def test_ready_binding_persists_only_metadata_and_restores_without_profile(self):
         result = await self.service.onboard(1, create_blank=True)

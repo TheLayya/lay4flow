@@ -185,3 +185,9 @@ class VidsAutoOnboarding:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def cancel_account(self, token_id):
+        task = self._tasks.pop(token_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

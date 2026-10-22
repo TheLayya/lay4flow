@@ -1,13 +1,12 @@
 import asyncio
 import unittest
-from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from src.services.browser.profile_verifier import ProfileVerifier
 from src.services.browser.token_account_probe import TokenManagerAccountProbe
-from src.services.token_manager import RefreshFailure, TokenManager
+from src.services.flow.flow_rpc import FlowRPCError
 
 
 def snapshot(text="edit\ndelete", *, path="/", ready="complete"):
@@ -271,327 +270,133 @@ class ProfileVerifierTests(unittest.IsolatedAsyncioTestCase):
                 result = await verifier.verify_account("User@example.com", Probe(value))
                 self.assertEqual(result.reason, reason)
 
-    async def test_token_manager_probe_reuses_canonical_validation(self):
-        class Manager:
-            def __init__(self, result=None, error=None):
-                self.result = result
-                self.error = error
-                self.calls = []
+    def _new_probe(self, email="user@example.com", *, discover_identity=False):
+        token = SimpleNamespace(email=email)
+        context = SimpleNamespace(request=SimpleNamespace())
+        return TokenManagerAccountProbe(
+            object(), token, discover_identity=discover_identity
+        ), context
 
-            async def _validate_refresh_session(self, token, st):
-                self.calls.append((token, st))
-                if self.error:
-                    raise self.error
-                return self.result
-
-        token = type("Token", (), {"email": "user@example.com"})()
-        manager = Manager({"st": "rotated", "at": "valid", "credits": 8})
-        probe = TokenManagerAccountProbe(manager, token, "synthetic-st")
-        result = await probe.verify("USER@example.com")
+    async def test_token_manager_probe_uses_flow_identity_and_credits(self):
+        probe, context = self._new_probe()
+        session = {
+            "email": "USER@example.com",
+            "credits": 8,
+            "user_paygate_tier": "PAYGATE_TIER_ONE",
+        }
+        with patch(
+            "src.services.browser.token_account_probe.read_flow_session",
+            new=AsyncMock(return_value=session),
+        ) as read:
+            result = await probe.verify("USER@example.com", context)
+        read.assert_awaited_once_with(context)
         self.assertEqual(result, {"email": "user@example.com", "session_valid": True, "credits": 8})
-        self.assertEqual(manager.calls, [(token, "synthetic-st")])
-
-        mismatch = await TokenManagerAccountProbe(manager, token, "synthetic-st").verify(
-            "other@example.com"
-        )
-        self.assertFalse(mismatch["session_valid"])
-        failed = await TokenManagerAccountProbe(
-            Manager(error=RuntimeError("secret token")), token, "synthetic-st"
-        ).verify("user@example.com")
-        self.assertNotIn("secret", repr(failed))
-
-    async def test_token_manager_probe_reads_current_profile_session_cookie(self):
-        class Context:
-            async def cookies(self):
-                return [
-                    {
-                        "name": "__Secure-next-auth.session-token.1",
-                        "value": "second",
-                        "domain": "labs.google",
-                        "path": "/",
-                    },
-                    {
-                        "name": "__Secure-next-auth.session-token.0",
-                        "value": "first",
-                        "domain": ".labs.google",
-                        "path": "/",
-                    },
-                    {
-                        "name": "__Secure-next-auth.session-token",
-                        "value": "foreign",
-                        "domain": "evil.test",
-                    },
-                ]
-
-        class Manager:
-            async def _validate_refresh_session(self, token, st):
-                self.st = st
-                return {"st": st, "at": "valid", "credits": 1}
-
-        token = type("Token", (), {"email": "user@example.com"})()
-        manager = Manager()
-        probe = TokenManagerAccountProbe(manager, token)
-        probe.set_context(Context())
-        result = await probe.verify("user@example.com")
-        self.assertTrue(result["session_valid"])
-        self.assertEqual(manager.st, "firstsecond")
-
-    async def test_token_manager_probe_preserves_safe_refresh_failure_classification(self):
-        token = SimpleNamespace(email="user@example.com")
-        for code, reason in (
-            ("session_invalid", "session_invalid"),
-            ("login_required", "login_required"),
-            ("invalid_cookies", "identity_mismatch"),
-            ("transient_error", "transient_error"),
-            ("invalid_proxy", "invalid_proxy"),
-            ("proxy_error", "proxy_error"),
-        ):
-            with self.subTest(code=code):
-                manager = SimpleNamespace(
-                    _validate_refresh_session=AsyncMock(
-                        side_effect=RefreshFailure("secret-cookie", code)
-                    )
-                )
-                probe = TokenManagerAccountProbe(manager, token, "synthetic-st")
-                result = await probe.verify(token.email)
-                self.assertEqual(result["reason"], reason)
-                self.assertFalse(result["session_valid"])
-                self.assertNotIn("secret", repr(result))
-
-    async def test_token_manager_probe_rejects_missing_current_profile_session(self):
-        class Context:
-            async def cookies(self):
-                return []
-
-        token = type("Token", (), {"email": "user@example.com"})()
-        probe = TokenManagerAccountProbe(object(), token)
-        probe.set_context(Context())
-        result = await probe.verify("user@example.com")
-        self.assertFalse(result["session_valid"])
-
-    def _browser_probe(self, *, session_json, credits_response):
-        class Response:
-            def __init__(self, status, payload):
-                self.status = status
-                self.payload = payload
-
-            async def json(self):
-                return self.payload
-
-        calls = []
-
-        async def get(url, **kwargs):
-            calls.append((url, kwargs))
-            if url.endswith("/session"):
-                return Response(200, session_json)
-            return credits_response
-
-        class Context:
-            request = SimpleNamespace(get=get)
-            cookie_reads = 0
-
-            async def cookies(self):
-                self.cookie_reads += 1
-                return [
-                    {
-                        "name": "__Secure-next-auth.session-token",
-                        "value": "initial-st" if self.cookie_reads == 1 else "rotated-st",
-                        "domain": "labs.google",
-                        "path": "/",
-                    }
-                ]
-
-        token = SimpleNamespace(email="user@example.com")
-
-        class Manager:
-            flow_client = SimpleNamespace(api_base_url="https://flow.google.com/api")
-
-            def _parse_at_expires(self, value):
-                return TokenManager._parse_at_expires(self, value)
-
-            def _as_utc(self, value):
-                return TokenManager._as_utc(self, value)
-
-        return TokenManagerAccountProbe(Manager(), token), Context(), calls
-
-    async def test_browser_probe_expired_access_token_never_calls_credits(self):
-        probe, context, calls = self._browser_probe(
-            session_json={
-                "access_token": "expired-at",
-                "expires": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
-                "user": {"email": "user@example.com"},
-            },
-            credits_response=SimpleNamespace(
-                status=200, json=AsyncMock(return_value={"credits": 99})
-            ),
-        )
-        result = await probe.verify("user@example.com", context)
-        self.assertEqual(result["reason"], "session_invalid")
-        self.assertIsNone(probe.validated_session)
-        self.assertEqual(len(calls), 1)
-
-    async def test_browser_probe_identity_mismatch_never_calls_credits(self):
-        probe, context, calls = self._browser_probe(
-            session_json={
-                "access_token": "valid-at",
-                "expires": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
-                "user": {"email": "other@example.com"},
-            },
-            credits_response=SimpleNamespace(
-                status=200, json=AsyncMock(return_value={"credits": 99})
-            ),
-        )
-        result = await probe.verify("user@example.com", context)
-        self.assertEqual(result["reason"], "identity_mismatch")
-        self.assertIsNone(probe.validated_session)
-        self.assertEqual(len(calls), 1)
-
-    async def test_browser_probe_credits_401_is_session_invalid(self):
-        probe, context, calls = self._browser_probe(
-            session_json={
-                "access_token": "valid-at",
-                "expires": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
-                "user": {"email": "user@example.com"},
-            },
-            credits_response=SimpleNamespace(status=401, json=AsyncMock()),
-        )
-        result = await probe.verify("user@example.com", context)
-        self.assertEqual(result["reason"], "session_invalid")
-        self.assertIsNone(probe.validated_session)
-        self.assertEqual(len(calls), 2)
-
-    async def test_browser_probe_malformed_credits_never_marks_session_valid(self):
-        for value in (True, -1, "1040"):
-            with self.subTest(value=value):
-                probe, context, calls = self._browser_probe(
-                    session_json={
-                        "access_token": "valid-at",
-                        "expires": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
-                        "user": {"email": "user@example.com"},
-                    },
-                    credits_response=SimpleNamespace(
-                        status=200, json=AsyncMock(return_value={"credits": value})
-                    ),
-                )
-                result = await probe.verify("user@example.com", context)
-                self.assertEqual(result["reason"], "credits_invalid")
-                self.assertIsNone(probe.validated_session)
-                self.assertEqual(len(calls), 2)
-
-    async def test_browser_probe_success_records_validated_session_and_rotated_st(self):
-        expires = datetime.now(timezone.utc) + timedelta(hours=1)
-        probe, context, calls = self._browser_probe(
-            session_json={
-                "access_token": "valid-at",
-                "expires": expires.isoformat(),
-                "user": {"email": "user@example.com"},
-            },
-            credits_response=SimpleNamespace(
-                status=200, json=AsyncMock(return_value={"credits": 1040, "userPaygateTier": "pro"})
-            ),
-        )
-        result = await probe.verify("user@example.com", context)
+        self.assertEqual(probe.network_step, "flow_credits")
         self.assertEqual(
-            result, {"email": "user@example.com", "session_valid": True, "credits": 1040}
-        )
-        self.assertEqual(probe.validated_session["st"], "rotated-st")
-        self.assertEqual(probe.validated_session["at"], "valid-at")
-        self.assertEqual(probe.validated_session["at_expires"], expires)
-        self.assertEqual(probe.validated_session["credits"], 1040)
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[1][0], "https://flow.google.com/api/credits")
-
-    async def test_account_verification_accepts_googlemail_alias(self):
-        class Probe:
-            async def verify(self, expected_email):
-                return {"email": "first.last@googlemail.com", "session_valid": True, "credits": 1}
-
-        result = await ProfileVerifier().verify_account("first.last@gmail.com", Probe())
-        self.assertEqual(result.reason, "account_ready")
-
-    async def test_browser_probe_accepts_matching_googlemail_alias(self):
-        probe, context, calls = self._browser_probe(
-            session_json={
-                "access_token": "valid-at",
-                "expires": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
-                "user": {"email": "user@googlemail.com"},
+            probe.validated_session,
+            {
+                "at": None,
+                "at_expires": None,
+                "credits": 8,
+                "user_paygate_tier": "PAYGATE_TIER_ONE",
             },
-            credits_response=SimpleNamespace(
-                status=200, json=AsyncMock(return_value={"credits": 8})
-            ),
         )
-        probe.token.email = "user@gmail.com"
-        result = await probe.verify("USER@gmail.com", context)
-        self.assertTrue(result["session_valid"])
-        self.assertEqual(len(calls), 2)
 
-    async def test_browser_probe_rejects_other_googlemail_mailboxes(self):
-        for observed in (
-            "other@googlemail.com",
-            "user+tag@googlemail.com",
-            "u.ser@googlemail.com",
-            "user@example.com",
+    async def test_token_manager_probe_requires_context_and_does_not_use_legacy_labs(self):
+        probe, _ = self._new_probe()
+        result = await probe.verify("user@example.com")
+        self.assertEqual(result["reason"], "session_invalid")
+        self.assertIsNone(probe.validated_session)
+
+    async def test_token_manager_probe_rejects_expected_identity_before_network(self):
+        probe, context = self._new_probe("other@example.com")
+        with patch(
+            "src.services.browser.token_account_probe.read_flow_session", new=AsyncMock()
+        ) as read:
+            result = await probe.verify("user@example.com", context)
+        self.assertEqual(result["reason"], "identity_mismatch")
+        read.assert_not_awaited()
+
+    async def test_token_manager_probe_accepts_only_gmail_domain_alias(self):
+        for observed, expected, accepted in (
+            ("user@googlemail.com", "user@gmail.com", True),
+            ("user+tag@googlemail.com", "user@gmail.com", False),
+            ("u.ser@googlemail.com", "user@gmail.com", False),
+            ("other@googlemail.com", "user@gmail.com", False),
+            ("user@corp.example", "user@gmail.com", False),
         ):
             with self.subTest(observed=observed):
-                probe, context, calls = self._browser_probe(
-                    session_json={
-                        "access_token": "valid-at",
-                        "expires": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
-                        "user": {"email": observed},
-                    },
-                    credits_response=SimpleNamespace(
-                        status=200, json=AsyncMock(return_value={"credits": 8})
-                    ),
+                probe, context = self._new_probe(expected)
+                with patch(
+                    "src.services.browser.token_account_probe.read_flow_session",
+                    new=AsyncMock(return_value={"email": observed, "credits": 1}),
+                ) as read:
+                    result = await probe.verify(expected, context)
+                self.assertEqual(result.get("session_valid", False), accepted)
+                if accepted:
+                    read.assert_awaited_once_with(context)
+                else:
+                    self.assertEqual(result["reason"], "identity_mismatch")
+
+    async def test_token_manager_probe_maps_flow_rpc_errors_without_secrets(self):
+        token = "private-token-and-upstream-message"
+        for error, reason, step in (
+            (
+                FlowRPCError("login_required", "flow_bootstrap", 401),
+                "login_required",
+                "flow_bootstrap",
+            ),
+            (
+                FlowRPCError("identity_mismatch", "flow_identity"),
+                "identity_mismatch",
+                "flow_identity",
+            ),
+            (FlowRPCError("credits_invalid", "flow_credits"), "credits_invalid", "flow_credits"),
+            (TimeoutError(token), "transient_error", "flow_bootstrap"),
+            (ConnectionError(token), "transient_error", "flow_bootstrap"),
+            (RuntimeError(token), "account_probe_error", "flow_bootstrap"),
+        ):
+            with self.subTest(reason=reason, step=step):
+                probe, context = self._new_probe()
+                with patch(
+                    "src.services.browser.token_account_probe.read_flow_session",
+                    new=AsyncMock(side_effect=error),
+                ):
+                    result = await probe.verify("user@example.com", context)
+                self.assertEqual(result["reason"], reason)
+                self.assertEqual(
+                    probe.network_step,
+                    step if isinstance(error, FlowRPCError) else "flow_bootstrap",
                 )
-                probe.token.email = "user@gmail.com"
-                result = await probe.verify("user@gmail.com", context)
-                self.assertEqual(result["reason"], "identity_mismatch")
-                self.assertIsNone(probe.validated_session)
-                self.assertEqual(len(calls), 1)
+                self.assertNotIn(token, repr(result))
 
-    async def test_browser_probe_navigation_response_is_single_use_and_reads_current_cookie(self):
-        expires = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
-        session = {
-            "access_token": "navigation-at",
-            "expires": expires,
-            "user": {"email": "user@example.com"},
-        }
-        probe, context, calls = self._browser_probe(
-            session_json={**session, "access_token": "renewed-at"},
-            credits_response=SimpleNamespace(
-                status=200, json=AsyncMock(return_value={"credits": 7})
-            ),
-        )
-        probe.set_context(context, session_response=(200, session))
-        result = await probe.verify("user@example.com")
-        self.assertTrue(result["session_valid"])
-        self.assertEqual(probe.validated_session["at"], "navigation-at")
-        self.assertEqual(probe.validated_session["st"], "rotated-st")
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0], "https://flow.google.com/api/credits")
-        result = await probe.verify("user@example.com")
-        self.assertTrue(result["session_valid"])
-        self.assertEqual(probe.validated_session["at"], "renewed-at")
-        self.assertEqual(calls[1][0], "https://labs.google/fx/api/auth/session")
-        self.assertEqual(len(calls), 3)
+    async def test_token_manager_probe_rejects_malformed_flow_payload(self):
+        for value in (
+            {"email": "user@example.com", "credits": True},
+            {"email": "user@example.com", "credits": -1},
+            {"email": "user@example.com", "credits": "8"},
+            {"email": "", "credits": 8},
+        ):
+            with self.subTest(value=value):
+                probe, context = self._new_probe()
+                with patch(
+                    "src.services.browser.token_account_probe.read_flow_session",
+                    new=AsyncMock(return_value=value),
+                ):
+                    result = await probe.verify("user@example.com", context)
+                expected = "identity_mismatch" if not value.get("email") else "credits_invalid"
+                self.assertEqual(result["reason"], expected)
 
-    async def test_browser_probe_ignores_navigation_response_for_another_context(self):
-        session = {
-            "access_token": "current-at",
-            "expires": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
-            "user": {"email": "user@example.com"},
-        }
-        probe, context, calls = self._browser_probe(
-            session_json=session,
-            credits_response=SimpleNamespace(
-                status=200, json=AsyncMock(return_value={"credits": 7})
-            ),
+    async def test_discover_identity_accepts_observed_mailbox_without_expected_match(self):
+        probe, context = self._new_probe("configured@example.com", discover_identity=True)
+        with patch(
+            "src.services.browser.token_account_probe.read_flow_session",
+            new=AsyncMock(return_value={"email": "observed@example.com", "credits": 2}),
+        ):
+            result = await probe.verify("configured@example.com", context)
+        self.assertEqual(
+            result, {"email": "observed@example.com", "session_valid": True, "credits": 2}
         )
-        probe.set_context(object(), session_response=(401, None))
-        result = await probe.verify("user@example.com", context)
-        self.assertTrue(result["session_valid"])
-        self.assertEqual(calls[0][0], "https://labs.google/fx/api/auth/session")
-        self.assertEqual(probe.validated_session["at"], "current-at")
 
 
 if __name__ == "__main__":

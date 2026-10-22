@@ -37,6 +37,10 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
         login_patch.start()
         self.addCleanup(login_patch.stop)
 
+    @staticmethod
+    def profile_result(credits=100):
+        return {"_validated_session": {"at": None, "at_expires": None, "credits": credits}}
+
     async def test_explicit_viewer_context_uses_live_profile_without_old_protocol_cookies(self):
         token = Token(
             st="old-st",
@@ -47,20 +51,20 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
         )
         refresher = Mock()
         refresher.has_active_context = Mock(return_value=True)
-        refresher.refresh = AsyncMock(return_value={"session_token": "live-profile-session"})
+        refresher.refresh = AsyncMock(return_value=self.profile_result())
         self.manager.profile_refresher = refresher
         result = await self.manager._try_refresh_st(1, token)
-        self.assertEqual(result["session_token"], "live-profile-session")
+        self.assertEqual(result["_validated_session"]["credits"], 100)
         self.login.assert_not_awaited()
         refresher.refresh.assert_awaited_once_with(token)
 
     async def test_cloak_profile_source_uses_injected_profile_refresher(self):
         token = Token(st="old-st", email="test@example.invalid", browser_profile_source="cloak")
         refresher = Mock()
-        refresher.refresh = AsyncMock(return_value={"session_token": "profile-session"})
+        refresher.refresh = AsyncMock(return_value=self.profile_result())
         self.manager.profile_refresher = refresher
         result = await self.manager._try_refresh_st(token.id or 1, token)
-        self.assertEqual(result, {"session_token": "profile-session", "_profile_used": True})
+        self.assertEqual(result, {**self.profile_result(), "_profile_used": True})
         refresher.refresh.assert_awaited_once_with(token)
 
     async def test_cloak_refresh_uses_profile_for_at_only_refresh(self):
@@ -73,16 +77,14 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
         token = await self.db.get_token(token_id)
         self.manager._st_to_at_for_token.side_effect = self.session
         profile_session = {
-            "st": "profile-session",
-            "at": "new-at",
-            "at_expires": datetime.now(timezone.utc) + timedelta(hours=8),
+            "at": None,
+            "at_expires": None,
             "credits": 100,
             "user_paygate_tier": "PAYGATE_TIER_ONE",
         }
         refresher = Mock()
         refresher.refresh = AsyncMock(
             return_value={
-                "session_token": "profile-session",
                 "_validated_session": profile_session,
             }
         )
@@ -92,8 +94,8 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.manager._refresh_at(token_id, force=True, refresh_st=False))
 
         saved = await self.db.get_token(token_id)
-        self.assertEqual(saved.st, "profile-session")
-        self.assertEqual(saved.at, "new-at")
+        self.assertEqual(saved.st, token.st)
+        self.assertIsNone(saved.at)
         self.assertEqual(saved.refresh_status, "ready")
         refresher.refresh.assert_awaited_once_with(token, force=True)
         self.login.assert_not_awaited()
@@ -157,7 +159,7 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
         )
         self.manager.profile_refresher = Mock()
         self.manager.profile_refresher.refresh = AsyncMock(
-            return_value={"session_token": "profile-session"}
+            return_value={"_validated_session": {"at": None, "at_expires": None, "credits": 1}}
         )
         self.assertTrue(await self.manager._refresh_at(token_id, force=True, refresh_st=True))
         saved = await self.db.get_token(token_id)
@@ -172,11 +174,11 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
             google_cookies="SID=expired",
         )
         refresher = Mock()
-        refresher.refresh = AsyncMock(return_value={"session_token": "profile-session"})
+        refresher.refresh = AsyncMock(return_value=self.profile_result())
         self.manager.profile_refresher = refresher
         self.login.return_value = {"success": False, "error_code": "invalid_cookies"}
         result = await self.manager._try_refresh_st(token.id or 1, token)
-        self.assertEqual(result, {"session_token": "profile-session", "_profile_used": True})
+        self.assertEqual(result, {**self.profile_result(), "_profile_used": True})
         self.login.assert_not_awaited()
         refresher.refresh.assert_awaited_once_with(token)
 
@@ -191,18 +193,17 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
         refresher = Mock()
         refresher.refresh = AsyncMock(
             return_value={
-                "session_token": "profile-session",
                 "_validated_session": {
-                    "st": "profile-session",
-                    "at": "new-at",
-                    "at_expires": datetime.now(timezone.utc) + timedelta(hours=8),
+                    "at": None,
+                    "at_expires": None,
                     "credits": 100,
                 },
             }
         )
         self.manager.profile_refresher = refresher
         result = await self.manager._refresh_credentials(token, refresh_st=True)
-        self.assertEqual(result["st"], "profile-session")
+        self.assertIsNone(result["at"])
+        self.assertIsNone(result["at_expires"])
         self.manager._st_to_at_for_token.assert_not_awaited()
         refresher.refresh.assert_awaited_once_with(token)
 
@@ -630,6 +631,9 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
                 at=f"at-{index}",
                 at_expires=now + timedelta(hours=8),
                 browser_profile_source="cloak",
+                browser_profile_status="ready",
+                browser_profile_verified_at=now,
+                refresh_status="ready",
                 protocol_mode="protocol",
                 last_st_refresh_at=now - timedelta(hours=12),
                 next_refresh_at=now - timedelta(minutes=1),
@@ -642,33 +646,32 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.manager._refresh_at.assert_not_awaited()
         self.login.assert_not_awaited()
 
-    async def test_healthy_cloak_at_uses_existing_validation_without_opening_profile(self):
+    async def test_healthy_cloak_profile_reuses_verified_session_without_at(self):
         token_id = await self.add(
             browser_profile_source="cloak",
             at_expires=datetime.now(timezone.utc) + timedelta(hours=8),
         )
+        await self.db.update_token(
+            token_id,
+            at=None,
+            at_expires=None,
+            browser_profile_status="ready",
+            browser_profile_verified_at=datetime.now(timezone.utc),
+            refresh_status="ready",
+        )
         self.manager.profile_refresher = Mock(refresh=AsyncMock())
         await self.manager.run_protocol_refresh_once()
         valid = await self.manager.ensure_valid_token(await self.db.get_token(token_id))
-        self.assertEqual(valid.at, "old-at")
+        self.assertIsNone(valid.at)
         self.manager.profile_refresher.refresh.assert_not_awaited()
         self.manager._st_to_at_for_token.assert_not_awaited()
         self.login.assert_not_awaited()
 
-    async def test_cloak_renewal_uses_original_profile_and_schedules_actual_expiry(self):
-        expiry = datetime.now(timezone.utc) + timedelta(hours=36)
+    async def test_cloak_renewal_uses_original_profile_and_schedules_verification_interval(self):
         self.manager.profile_refresher = Mock(refresh=AsyncMock())
 
         async def refresh(token, **kwargs):
-            return {
-                "session_token": f"profile-st-{token.id}",
-                "_validated_session": {
-                    "st": f"profile-st-{token.id}",
-                    "at": "profile-at",
-                    "at_expires": expiry,
-                    "credits": 100,
-                },
-            }
+            return self.profile_result()
 
         self.manager.profile_refresher.refresh.side_effect = refresh
         for mode in ("protocol", "session"):
@@ -679,37 +682,40 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
                 protocol_mode=mode,
                 at_expires=datetime.now(timezone.utc) + timedelta(minutes=30),
             )
+            before = datetime.now(timezone.utc)
             await self.manager.run_protocol_refresh_once()
             saved = await self.db.get_token(token_id)
-            self.assertEqual(saved.at, "profile-at")
-            self.assertEqual(saved.next_refresh_at, expiry - timedelta(hours=1))
+            self.assertIsNone(saved.at)
+            self.assertEqual(saved.st, f"old-{mode}")
+            self.assertGreaterEqual(saved.next_refresh_at, before + timedelta(minutes=120))
+            self.assertLessEqual(
+                saved.next_refresh_at, datetime.now(timezone.utc) + timedelta(minutes=120)
+            )
             self.assertFalse(self.manager.profile_refresher.refresh.call_args.kwargs)
         self.manager._st_to_at_for_token.assert_not_awaited()
         self.login.assert_not_awaited()
 
-    async def test_rejected_cloak_at_forces_original_profile_even_before_scheduled_refresh(self):
+    async def test_explicit_cloak_refresh_rechecks_profile_before_scheduled_refresh(self):
         token_id = await self.add(
             browser_profile_source="cloak",
             at_expires=datetime.now(timezone.utc) + timedelta(hours=8),
             next_refresh_at=datetime.now(timezone.utc) + timedelta(hours=7),
         )
         token = await self.db.get_token(token_id)
-        self.manager._get_credits_for_token.side_effect = ValueError("HTTP 401")
         self.manager.profile_refresher = Mock(
             refresh=AsyncMock(
                 return_value={
-                    "session_token": "profile-st",
                     "_validated_session": {
-                        "st": "profile-st",
-                        "at": "profile-at",
-                        "at_expires": datetime.now(timezone.utc) + timedelta(hours=8),
+                        "at": None,
+                        "at_expires": None,
                         "credits": 100,
                     },
                 }
             )
         )
+        self.assertTrue(await self.manager._refresh_at(token_id, force=True))
         valid = await self.manager.ensure_valid_token(token)
-        self.assertEqual(valid.at, "profile-at")
+        self.assertIsNone(valid.at)
         self.manager.profile_refresher.refresh.assert_awaited_once_with(token, force=True)
         self.login.assert_not_awaited()
 
@@ -732,7 +738,9 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
         token_id = await self.add(browser_profile_source="cloak", is_active=False)
         await self.db.update_token(token_id, ban_reason="manual")
         self.manager.profile_refresher = Mock(
-            refresh=AsyncMock(return_value={"session_token": "profile-st"})
+            refresh=AsyncMock(
+                return_value={"_validated_session": {"at": None, "at_expires": None, "credits": 1}}
+            )
         )
         await self.manager.run_protocol_refresh_once()
         self.manager.profile_refresher.refresh.assert_not_awaited()
@@ -740,7 +748,7 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
         saved = await self.db.get_token(token_id)
         self.assertFalse(saved.is_active)
         self.assertEqual(saved.ban_reason, "manual")
-        self.assertEqual(saved.st, "profile-st")
+        self.assertEqual(saved.st, "old-st")
 
     async def test_500_due_profiles_use_manager_capacity_and_separate_cookie_workers(self):
         for slots in (1, 2):

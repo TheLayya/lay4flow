@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 import re
+import shutil
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlsplit
@@ -15,6 +16,7 @@ from ..proxy_urls import normalize_proxy_url
 from .auto_onboarding import read_auto_onboarding_state
 from .bindings import read_bindings, session_key_file, write_bindings
 from .client import VidsClient, VidsProtocolError, parse_flags
+from .deletion_markers import clear_deleted, is_deleted, mark_deleted
 from .dispatcher import VidsAccount
 from .gateway import GatewayError, VidsGateway
 from .profile_cookies import _cookie_rows
@@ -141,11 +143,49 @@ class VidsOnboardingService:
         self._lock = asyncio.Lock()
         self.verifier = ProfileVerifier()
 
+    async def delete_account(self, token_id: int):
+        """Remove one Vids binding and only its private artifacts, idempotently."""
+        if type(token_id) is not int or token_id <= 0:
+            raise OnboardingError(400, "invalid_account", "A valid Flow account is required")
+        auto = getattr(self, "auto_onboarding", None)
+        if auto is not None:
+            await auto.cancel_account(token_id)
+        async with self._lock:
+            rows = read_bindings(self.registry_path)
+            targets = [row for row in rows if row.get("token_id") == token_id]
+            runtime_row = self.runtime.binding_rows.get(token_id)
+            if runtime_row is not None and runtime_row not in targets:
+                targets.append(dict(runtime_row))
+            await self.runtime.remove_account(token_id)
+            if targets:
+                write_bindings(
+                    self.registry_path,
+                    [row for row in rows if row.get("token_id") != token_id],
+                )
+            marker = self.registry_path.parent / "auto-onboarding" / str(token_id)
+            marker.unlink(missing_ok=True)
+            mark_deleted(self.registry_path, token_id)
+            expected_root = self.runtime_dir.resolve() / str(token_id)
+            expected_key = self.secrets_dir.resolve() / f"account{token_id}.key"
+            if expected_root.exists():
+                if expected_root.resolve() != expected_root or expected_root.is_symlink():
+                    raise OnboardingError(
+                        409, "invalid_configuration", "Vids account directory is linked"
+                    )
+                shutil.rmtree(expected_root)
+            if expected_key.is_symlink():
+                raise OnboardingError(409, "invalid_configuration", "Vids account key is linked")
+            expected_key.unlink(missing_ok=True)
+
     async def candidates(self):
         try:
             bound = {row.get("token_id") for row in read_bindings(self.registry_path)}
             if self.get_settings is not None:
-                bound.update(row.get("token_id") for row in self.get_settings().get("accounts", []))
+                bound.update(
+                    row.get("token_id")
+                    for row in self.get_settings().get("accounts", [])
+                    if not is_deleted(self.registry_path, row.get("token_id"))
+                )
         except Exception:
             raise OnboardingError(
                 503, "invalid_configuration", "Vids bindings are unavailable"
@@ -291,6 +331,7 @@ class VidsOnboardingService:
                         write_bindings(self.registry_path, old_rows)
                         raise
                     published = True
+                    clear_deleted(self.registry_path, token_id)
                     return {"token_id": token_id, "state": "ready", "identity_verified": True}
                 except OnboardingError:
                     raise

@@ -1,10 +1,35 @@
 # Windows 原生打包与登录迁移交接记录
 
+## 2026-10-22：Flow 认证已迁移到新版 RPC（当前工作区）
+
+- 官方 Labs `/fx/api/auth/csrf`、`/session` 等旧认证入口实测返回 HTTP 410，正文明确标注认证端点已停用。将旧路径直接换到 `flow.google.com` 返回的是 HTML，也不是认证接口。
+- Cloak 登录校验、后台刷新和 Profile 迁移现使用 `https://flow.google.com/` 的 WIZ 配置，以及同一浏览器 Cookie/固定代理上下文中的 `GetPeople(o30O0e)`、`GetCredits(nzlxg)`；不再读取 NextAuth、不再 CSRF/OAuth 续签、不再 ST→AT 回退。
+- 现代 Flow 验证结果保存 `at=None`、`at_expires=None`；数据库原 `st` 字段仅保留唯一占位标识。调度按成功 Profile 验证时间及刷新间隔判断新鲜度。身份比较、固定代理、seed、正常关闭和两次迁移冷启动校验继续保留。
+- 项目准备使用当前 `GetProjects(UpteDb)`，优先复用远程现有项目；没有未入库项目时使用官方当前前端定义的 `CreateProject(jHPbke)` 请求。CreateProject 此轮只做合成校验，未向真实账号发写请求。
+- 2026-10-22 05:52 UTC 只读现场验收：账号 3、固定代理绑定一致；首页、GetPeople、GetCredits 和 GetProjects 全部 HTTP 200，身份一致、895 credits、第一页 12 个项目。只记录布尔结果、额度、数量和状态，不保存凭据或完整身份响应。证据：`tmp/flow-rpc-evidence/live-readonly-summary.json`（本地诊断，不入包）。
+- 新版生成 transport 尚待迁移。当前明确返回“Flow 登录态已验证；新版生成接口适配尚未完成”，防止把空 AT 送到旧 Bearer 接口。登录验证通过不代表生成已验收。
+- 此节优先于下面旧链路记录；下文旧 OAuth/ST/AT 描述仅保留为历史背景。旧 `dist/1.5.0-final` 资产尚未包含本轮改动。
+- 验证结果：`python scripts/check.py` 通过 1381 项 Python 测试（1 项跳过）、Node 契约和离线首次启动/冷重启 smoke；前端 131 项通过，资源已重新构建；隔离端口的原生登录 E2E 4 项、迁移 E2E 5 项通过。最后的 WIZ/GetPeople Gmail 别名比较复用既有身份函数后，登录/RPC/项目/迁移 63 项定向测试再次通过。
+- 当前 `http://127.0.0.1:38001` 已运行 `lay4flow-remote:flow-auth-20261022` 镜像，容器 healthy；确认新模块存在、旧 `_renew_session` 已删除、私有 `flow_ck.env` 未进入镜像。尚未提交工作区或发布 Windows 包。再次 Compose 启动需显式选择该镜像：`LAY4FLOW_REMOTE_IMAGE=lay4flow-remote:flow-auth-20261022`；旧 `lay4flow-remote:1.5.0` 镜像保留用于回滚。
+
 更新时间：2026-10-22
 当前主线提交：`802466d fix: 校验原生 Cloak 二进制被打入安装包`
 当前版本文件：`1.5.0`
 
 交接文档本身随本次提交更新；如果后续版本号或最终包摘要变化，以 `git log`、`VERSION` 和对应 `dist/<version>/build-manifest.json` 为准。
+
+## 2026-10-22 续接修复（当前工作区）
+
+- 用户再次确认的提示为“登录验证未通过，请核对邮箱并完成 Google 登录”。该文案来自强制刷新返回 False 的统一处理，本身没有证明邮箱不匹配。
+- 完成 Cloak 登录现在先读取当前浏览器的 Labs 会话，严格检查邮箱、AT 有效期和 Flow credits；现有会话有效时直接保存，再正常关闭并重开验证持久化。缺少或过期会话继续走 OAuth。手动刷新与 Profile 导入仍强制续签。
+- 登录失败返回脱敏的 `reason`、`stage`、`network_step`、`retryable`、`browser_open`。刷新诊断随数据库升级持久化，成功后清除。前端保留登录回执，提供重试；关闭后的“继续登录”会重开同一 Profile，刷新页面后也保留该状态。
+- Profile 迁移允许 Docker/Linux 与 Windows 原生之间的 runtime、UA、语言、时区和窗口差异；目标端记录自身环境。seed、受支持启动参数、固定代理、Cookie scope、账号身份和额度检查保留，仍需 OAuth 与两次关闭重开通过后才保存账号。
+- 失败迁移只在相同 seed、目标启动配置和固定代理绑定下继续，兼容旧 sidecar 绑定；冷启动校验失败也会返回具体网络步骤。
+- 校验使用合成账号和模拟服务，记录见本节末尾；真实账号与原安装目录未用于检查。`VERSION` 仍为 `1.5.0`，下述 `dist/1.5.0-final/` 是修复前资产，尚未包含本次修复。
+- 当前工作区验证：全项目 `python scripts/check.py` 在本次阶段化修复前通过 1344 项 Python 测试、Node 检查和离线 smoke；阶段化修复后的登录、Profile、迁移、数据库升级定向套件 117 项通过；`npm.cmd --prefix frontend test` 132 项通过；前端构建和两个 Playwright 合成流程通过。
+- 原生 smoke 证据：`tmp/native-smoke-dc77a16923cb4be58155977041219768/smoke-results.json`。隔离复制当前源码、静态资源和既有 bundled runtime，PATH 中 `python.exe`、`node.exe`、`docker.exe` 均不存在；START、重复 START（同 PID）、`/health` 1.5.0/native、合成管理员登录、前端入口、STOP 均通过，停止后进程和状态文件消失。该目录属于本地临时验证资料，不进入发布包。
+
+真实网络验收待使用包含本次修复的新构建完成：确认 Cloak 登录后添加成功，或记录新的具体阶段；确认 Docker 导出包在 Windows 导入、关闭重开后身份保持一致。
 
 ## 本次已完成的 Windows 核心
 
@@ -83,7 +108,7 @@ ZIP 内已检查存在：
 - Docker 原生旧 1.3.0 fixture 覆盖升级到 1.4.0 已验证健康、版本、配置和数据保留；原生 1.5.0 是新 Windows 交付形态。
 - 真实网络链路曾验证：宿主 HTTP → 账号固定 SOCKS5 → HTTPS；labs.google 200、flow.google.com 200、accounts.google.com 302。没有用真实账号 Cookie 生成内容。
 
-## 当前未完成：下一会话只处理这两项
+## 修复前问题与排查依据（历史）
 
 ### A. Cloak 直接登录“邮箱验证未通过”误报
 

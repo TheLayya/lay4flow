@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from ...core.account_identity import same_google_identity
 from ...services.proxy_manager import ProxyManager
+from ...services.vids.gateway import GatewayError
 from ..admin_schemas import AddTokenRequest, ImportTokensRequest, ST2ATRequest, UpdateTokenRequest
 
 
@@ -290,6 +291,8 @@ def create_token_router(
             if get_concurrency_manager():
                 await get_concurrency_manager().remove_token(token_id)
             return {"success": True, "message": "Token删除成功"}
+        except GatewayError as error:
+            raise HTTPException(status_code=error.status, detail=str(error)) from None
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 

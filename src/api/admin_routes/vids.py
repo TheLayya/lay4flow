@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from ...services.vids.bindings import read_bindings
 from ...services.vids.client import VidsProtocolError, VidsTransportError
+from ...services.vids.deletion_markers import is_deleted
 from ...services.vids.dispatcher import VidsDispatchError
 from ...services.vids.gateway import GatewayError
 
@@ -67,7 +68,12 @@ def create_vids_admin_router(
         return set(getattr(runtime, "binding_rows", {})) | {
             row["token_id"]
             for row in rows
-            if isinstance(row, dict) and type(row.get("token_id")) is int and row["token_id"] > 0
+            if isinstance(row, dict)
+            and type(row.get("token_id")) is int
+            and row["token_id"] > 0
+            and not is_deleted(
+                settings.get("registry_path", "data/vids/bindings.json"), row["token_id"]
+            )
         }
 
     def runtime_ready():

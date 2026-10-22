@@ -28,14 +28,6 @@ class ProfileBrowserRouteTests(unittest.TestCase):
             open=AsyncMock(return_value={"token_id": 4, "status": "ready", "expires_at": 123}),
             close=AsyncMock(return_value={"token_id": 4, "status": "closed", "expires_at": None}),
             refresh=AsyncMock(return_value={"success": True, "at_expires": "2099-01-01T00:00:00Z"}),
-            focus=AsyncMock(
-                return_value={
-                    "token_id": 4,
-                    "status": "ready",
-                    "expires_at": 123,
-                    "presentation": "native",
-                }
-            ),
             state=Mock(return_value={"token_id": 4, "status": "ready", "expires_at": 123}),
             owns=Mock(side_effect=lambda token_id, owner: token_id == 4 and owner == "admin-test"),
         )
@@ -90,19 +82,6 @@ class ProfileBrowserRouteTests(unittest.TestCase):
         self.viewer.refresh.assert_awaited_once_with(4, "admin-test")
         self.viewer.close.assert_not_awaited()
 
-    def test_native_focus_requires_origin_and_keeps_the_viewer_open(self):
-        self.login()
-        response = self.client.post("/api/tokens/4/browser/focus")
-        self.assertEqual(response.status_code, 403)
-        response = self.client.post(
-            "/api/tokens/4/browser/focus?viewer_id=current",
-            headers={"Origin": "http://testserver"},
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["presentation"], "native")
-        self.viewer.focus.assert_awaited_once_with(4, "admin-test", viewer_id="current")
-        self.viewer.close.assert_not_awaited()
-
     def test_direct_login_requires_auth_origin_and_bound_viewer_generation(self):
         payload = {"email": "new@example.invalid", "proxy_url": ""}
         self.assertEqual(self.client.post("/api/profile-login", json=payload).status_code, 401)
@@ -119,6 +98,57 @@ class ProfileBrowserRouteTests(unittest.TestCase):
         self.viewer.login.complete.assert_awaited_once_with("pending", "admin-test", "current")
         self.client.delete("/api/profile-login/pending?viewer_id=current", headers=headers)
         self.viewer.login.cancel.assert_awaited_once_with("pending", "admin-test", "current")
+
+    def test_direct_login_allows_anonymous_email_discovery_and_status_retry(self):
+        self.viewer.login.status = Mock(return_value={"success": True, "status": "waiting"})
+        self.viewer.login.retry = AsyncMock(return_value={"success": True, "status": "waiting"})
+        headers = {"Origin": "http://testserver"}
+        self.login()
+        response = self.client.post("/api/profile-login", json={}, headers=headers)
+        self.assertEqual(response.status_code, 200)
+        self.viewer.login.start.assert_awaited_once_with("", "", "admin-test")
+        response = self.client.get(
+            "/api/profile-login/pending?viewer_id=current", headers=headers
+        )
+        self.assertEqual(response.status_code, 200)
+        self.viewer.login.status.assert_called_once_with("pending", "admin-test", "current")
+        self.assertEqual(
+            self.client.post("/api/profile-login/pending/retry", json={}, headers=headers).status_code,
+            422,
+        )
+        response = self.client.post(
+            "/api/profile-login/pending/retry", json={"viewer_id": "current"}, headers=headers
+        )
+        self.assertEqual(response.status_code, 200)
+        self.viewer.login.retry.assert_awaited_once_with("pending", "admin-test", "current")
+
+    def test_login_status_and_retry_check_auth_origin_and_preserve_viewer_errors(self):
+        from src.services.browser.profile_viewer import ViewerError
+
+        self.viewer.login.status = Mock(side_effect=ViewerError(403, "different owner"))
+        self.viewer.login.retry = AsyncMock(side_effect=ViewerError(409, "stale viewer"))
+        path = "/api/profile-login/pending"
+        headers = {"Origin": "http://testserver"}
+        self.assertEqual(self.client.get(path, headers=headers).status_code, 401)
+        self.assertEqual(
+            self.client.post(path + "/retry", json={"viewer_id": "current"}, headers=headers).status_code,
+            401,
+        )
+        self.login()
+        self.assertEqual(self.client.get(path).status_code, 403)
+        self.viewer.login.status.assert_called_once_with("pending", "admin-test", "")
+        self.viewer.login.status.reset_mock()
+        self.assertEqual(
+            self.client.post(path + "/retry", json={"viewer_id": "current"}).status_code,
+            403,
+        )
+        self.viewer.login.retry.assert_not_awaited()
+        self.assertEqual(self.client.get(path, headers=headers).status_code, 403)
+        response = self.client.post(
+            path + "/retry", json={"viewer_id": "current"}, headers=headers
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"], "stale viewer")
 
     def test_page_and_assets_are_protected_and_paths_cannot_escape(self):
         self.assertEqual(self.client.get("/api/profile-browser/4").status_code, 401)

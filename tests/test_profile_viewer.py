@@ -97,6 +97,22 @@ class ProfileViewerTests(unittest.IsolatedAsyncioTestCase):
         self.manager.credential_session.assert_not_called()
         self.backend.open.assert_awaited_once()
 
+    async def test_login_refresh_passes_existing_session_intent_without_changing_manual_default(self):
+        async def refresh(token_id, **kwargs):
+            active = self.refresher._active_context.get()
+            self.assertTrue(active[2])
+            return True
+
+        self.enable_live_refresh(refresh)
+        await self.viewer.open(1, "admin")
+        result = await self.viewer.refresh(1, "admin", accept_existing_session=True)
+        self.assertTrue(result["success"])
+        self.assertFalse(self.refresher.has_active_context(self.token.email))
+        self.token_manager._refresh_at.assert_awaited_once_with(1, force=True, refresh_st=True)
+        self.backend.open.assert_awaited_once()
+        self.backend.close.assert_not_awaited()
+
+
     async def test_background_context_lease_waits_before_close_and_ttl(self):
         for end in ("close", "ttl"):
             with self.subTest(end=end):

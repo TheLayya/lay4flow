@@ -101,7 +101,9 @@ class DesktopContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaises((FileNotFoundError, ValueError)):
-                package_windows(ROOT, fixture / "native.zip", runtime_archive, backend_runtime=backend)
+                package_windows(
+                    ROOT, fixture / "native.zip", runtime_archive, backend_runtime=backend
+                )
 
 
 if __name__ == "__main__":

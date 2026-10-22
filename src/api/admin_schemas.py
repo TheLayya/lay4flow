@@ -15,7 +15,7 @@ class ArchiveMediaRequest(BaseModel):
 
 
 class DirectProfileLoginRequest(BaseModel):
-    email: str = Field(min_length=3, max_length=254)
+    email: str = Field(default="", max_length=254)
     proxy_url: str = Field(default="", max_length=4096)
     proxy_pool_id: Optional[int] = Field(default=None, ge=1, strict=True)
 

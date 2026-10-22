@@ -512,6 +512,14 @@ class GenerationHandler:
                 yield self._create_error_response(error_msg, status_code=503)
                 return
 
+            if getattr(token, "browser_profile_source", "") == "cloak" and not token.at:
+                error_msg = "Flow 登录态已验证；新版生成接口适配尚未完成"
+                record_generation_result(generation_type, "failed", time.time() - start_time)
+                if stream:
+                    yield self._create_stream_chunk(f"错误: {error_msg}\n")
+                yield self._create_error_response(error_msg, status_code=503)
+                return
+
             # 4. 确保Project存在
             debug_logger.log_info(f"[GENERATION] 检查/创建Project...")
 

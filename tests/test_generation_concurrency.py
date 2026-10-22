@@ -86,6 +86,19 @@ class GenerationConcurrencyTests(unittest.IsolatedAsyncioTestCase):
                     release.assert_not_awaited()
         self.assertEqual(await self.cm.get_image_inflight(7), 1)
 
+    async def test_modern_profile_never_submits_empty_bearer_or_calls_legacy_project_api(self):
+        self.token.browser_profile_source = "cloak"
+        self.token.at = None
+        await self.cm.initialize([self.token])
+        response = await self.collect()
+        payload = json.loads(response[0])
+        self.assertEqual(payload["error"]["status_code"], 503)
+        self.assertIn("新版生成接口适配尚未完成", payload["error"]["message"])
+        self.handler.token_manager.ensure_project_exists.assert_not_awaited()
+        self.handler.flow_client.prefill_remote_browser_pool.assert_not_awaited()
+        self.handler.token_manager.record_error.assert_not_awaited()
+        self.assertEqual(await self.cm.get_image_inflight(7), 0)
+
     async def test_invalid_disabled_or_deleted_account_releases_stable_id(self):
         await self.cm.initialize([self.token])
         for latest in (None, types.SimpleNamespace(id=7, is_active=False)):

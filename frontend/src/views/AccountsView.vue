@@ -70,23 +70,22 @@ const importJobState = (job) =>
     })[job.state] || job.state
 const importStageLabel = (item) => {
     if (item.state === 'succeeded') return '已导入'
-    if (item.state === 'failed') return '失败'
     if (item.state === 'cancelled') return '已中断'
-    return (
-        {
-            queued: '等待处理',
-            legacy_import: '验证旧版账号',
-            open_profile: '打开浏览器',
-            restore_state: '恢复登录态',
-            oauth_renewal: '续签 Google 会话',
-            cold_check_1: '验证持久化会话（1/2）',
-            cold_check_2: '验证持久化会话（2/2）',
-            save_account: '保存账号',
-            prepare_workspace: '准备工作空间',
-            finalize: '完成导入',
-            completed: '已导入',
-        }[item.stage] || (item.state === 'running' ? '正在验证' : '等待处理')
-    )
+    const stage = {
+        queued: '等待处理',
+        legacy_import: '验证旧版账号',
+        open_profile: '打开浏览器',
+        restore_state: '恢复登录态',
+        flow_verification: '验证 Flow 会话',
+        cold_check_1: '验证持久化会话（1/2）',
+        cold_check_2: '验证持久化会话（2/2）',
+        save_account: '保存账号',
+        prepare_workspace: '准备工作空间',
+        finalize: '完成导入',
+        completed: '已导入',
+    }[item.stage]
+    if (item.state === 'failed') return stage ? `${stage}失败` : '失败'
+    return stage || (item.state === 'running' ? '正在验证' : '等待处理')
 }
 function importJobProgress(job) {
     return `${(job.items || []).filter((item) => ['succeeded', 'failed', 'cancelled'].includes(item.state)).length} / ${job.total} 项`
@@ -338,6 +337,48 @@ const loginFinishing = ref(false)
 const loginCanceling = ref(false)
 const loginSession = ref(null)
 const loginStatus = ref('')
+let loginStatusTimer
+let loginStatusRequest
+const loginFailure = ref(null)
+const loginStageLabel = (stage) =>
+    ({
+        cold_check: '登录态复核',
+        session_probe: '登录态复核',
+        credits_probe: '额度校验',
+        prepare_workspace: '准备账号工作区',
+    })[stage] || ''
+const loginNetworkStepLabel = (step) =>
+    ({
+        flow_bootstrap: '读取 Flow 会话',
+        flow_identity: '校验 Google 账号身份',
+        flow_credits: '校验 Flow 账号额度',
+        flow_projects: '准备 Flow 项目',
+    })[step] || ''
+function structuredLoginFailure(error) {
+    const detail = error?.payload?.detail
+    if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return null
+    if (detail.error_code !== 'profile_login_verification_failed' && !detail.reason && !detail.stage) return null
+    return {
+        ...detail,
+        message: detail.message || error.message,
+        retryable: detail.retryable !== false,
+    }
+}
+function formatLoginFailure(failure) {
+    if (!failure) return ''
+    const stage = loginStageLabel(failure.stage)
+    const step = loginNetworkStepLabel(failure.network_step)
+    const context = [stage && `阶段：${stage}`, step && `步骤：${step}`].filter(Boolean)
+    return `${failure.message}${context.length ? `（${context.join('；')}）` : ''}`
+}
+function rememberLoginFailure(failure) {
+    if (!failure || !loginSession.value) return
+    loginSession.value = {
+        ...loginSession.value,
+        browser_open: failure.browser_open !== false,
+    }
+    sessionStorage.setItem(loginStorage, JSON.stringify(loginSession.value))
+}
 const nativeDesktop = computed(() => window.lay4flowDesktop?.runtime === 'native')
 const nativePresentation = ref(window.lay4flowDesktop?.runtime === 'native')
 const presentationReady = ref(nativePresentation.value)
@@ -361,7 +402,7 @@ async function detectNativePresentation() {
 // refresh an account.
 const nativeBrowser = ref(null)
 const nativeBrowserBusy = computed(() => busy.has('native-browser'))
-const loginForm = reactive({ email: '', proxy_pool_id: null })
+const loginForm = reactive({ proxy_pool_id: null })
 let pollTimer
 let loadingPromise
 let quotaPromise
@@ -655,6 +696,7 @@ async function refreshVidsQuota() {
     return quotaPromise
 }
 function refreshVisible() {
+    if (!document.hidden && loginSession.value) pollLoginStatus()
     if (!document.hidden) refreshImportJobs()
     if (!document.hidden && !editorOpen.value && quickSavingId.value === null) return load(true)
 }
@@ -737,6 +779,8 @@ async function action(row, type) {
                 { confirmButtonText: '确认删除', cancelButtonText: '保留账号', type: 'warning' },
             )
             ensure(await api.delete(`/api/tokens/${row.id}`))
+            selected.value = selected.value.filter((item) => item.id !== row.id)
+            if (detailId.value === row.id) detailOpen.value = false
         } else if (type === 'quota') {
             const result = await api.post(`/api/admin/vids/accounts/${row.id}/quota-refresh`, {})
             if (result.account) {
@@ -775,7 +819,8 @@ async function action(row, type) {
 }
 async function bulk(type) {
     if (!selected.value.length || busy.has('bulk')) return
-    const targets = selected.value.filter((row) => !row.vidsOnly)
+    const targets = type === 'delete' ? selected.value : selected.value.filter((row) => !row.vidsOnly)
+    if (!targets.length) return
     if (type === 'delete') {
         try {
             await ElMessageBox.confirm(`将删除选中的 ${targets.length} 个账号及其配置。`, '批量删除', {
@@ -1083,7 +1128,11 @@ async function closeNativeBrowser(refresh = false) {
 }
 const loginStorage = 'lay4flow.profileLogin'
 function clearLogin() {
+    clearInterval(loginStatusTimer)
+    loginStatusTimer = undefined
+    loginStatusRequest = undefined
     loginSession.value = null
+    loginFailure.value = null
     sessionStorage.removeItem(loginStorage)
 }
 function loginViewerUrl(receipt) {
@@ -1108,66 +1157,121 @@ function openLoginWindow() {
     return viewer
 }
 async function startLogin() {
-    if (loginStarting.value || loginSession.value) return
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(loginForm.email.trim()))
-        return ElMessage.warning('请填写要登录的 Google 账号邮箱')
+    if (loginStarting.value || loginFinishing.value || loginCanceling.value || (loginSession.value && loginFailure.value?.browser_open !== false)) return
     const native = nativePresentation.value
     let viewer
     let receipt
+    let accepted = false
     try {
         if (!native) viewer = openLoginWindow()
         loginStarting.value = true
-        receipt = ensure(
-            await api.post('/api/profile-login', {
-                email: loginForm.email.trim(),
-                ...(loginForm.proxy_pool_id ? { proxy_pool_id: loginForm.proxy_pool_id } : {}),
-            }),
-        )
+        receipt = ensure(await api.post('/api/profile-login', { ...(loginForm.proxy_pool_id ? { proxy_pool_id: loginForm.proxy_pool_id } : {}) }))
         const presentation = receipt.presentation || (native ? 'native' : 'web')
         if (native && presentation !== 'native') throw new Error('本地账号浏览器服务未返回原生窗口状态')
-        if (presentation === 'native' && (!receipt.viewer_id || !receipt.session_id || !receipt.token_id))
-            throw new Error('本地账号浏览器凭据校验失败')
+        if (presentation === 'native' && (!receipt.viewer_id || !receipt.session_id || !receipt.token_id)) throw new Error('本地账号浏览器凭据校验失败')
         const url = presentation === 'native' ? null : loginViewerUrl(receipt)
-        loginSession.value = {
-            session_id: receipt.session_id,
-            token_id: receipt.token_id,
-            viewer_id: receipt.viewer_id,
-            viewer_url: receipt.viewer_url,
-            presentation,
-            expires_at: receipt.expires_at,
-            email: loginForm.email.trim(),
-        }
+        loginSession.value = { session_id: receipt.session_id, token_id: receipt.token_id, viewer_id: receipt.viewer_id, viewer_url: receipt.viewer_url, presentation, expires_at: receipt.expires_at, email: receipt.email || '', browser_open: true }
+        loginFailure.value = null
+        accepted = true
         sessionStorage.setItem(loginStorage, JSON.stringify(loginSession.value))
-        loginStatus.value = presentation === 'native'
-            ? '本地 Cloak 窗口已打开，请在桌面窗口完成 Google 登录，再点击“完成登录并添加”。'
-            : '请在 Cloak 窗口完成 Google 登录，再点击“完成登录并添加”。'
+        loginStatus.value = native ? '本地 Cloak 窗口已打开，请完成 Google 登录，页面会自动验证并加入账号。' : '请在 Cloak 窗口完成 Google 登录，页面会自动验证并加入账号。'
         if (presentation === 'native') viewer?.close()
-        else {
-            if (!viewer) viewer = openLoginWindow()
-            if (viewer.closed) loginStatus.value = '登录浏览器已就绪，点击“继续登录”重新打开窗口。'
-            else viewer.location.href = url
-        }
+        else { if (!viewer) viewer = openLoginWindow(); if (viewer.closed) loginStatus.value = '登录浏览器已就绪，点击“继续登录”重新打开窗口。'; else viewer.location.href = url }
+        scheduleLoginStatusPoll()
     } catch (error) {
         viewer?.close()
-        if (receipt?.session_id && !loginSession.value)
-            await api
-                .delete(
-                    `/api/profile-login/${encodeURIComponent(receipt.session_id)}?viewer_id=${encodeURIComponent(receipt.viewer_id || '')}`,
-                )
-                .catch(() => {})
+        if (receipt?.session_id && !accepted) await api.delete(`/api/profile-login/${encodeURIComponent(receipt.session_id)}?viewer_id=${encodeURIComponent(receipt.viewer_id || '')}`).catch(() => {})
         notifyError(error)
-    } finally {
-        loginStarting.value = false
-    }
+    } finally { loginStarting.value = false }
+}
+function loginStatusMessage(status, payload) {
+    if (payload?.message) return payload.message
+    return ({ waiting: '等待你在 Cloak 窗口完成 Google 登录…', verifying: '已检测到登录，正在验证会话并保存账号…', ready: '登录完成，正在刷新账号列表…', error: '登录验证失败，请继续登录或取消本次登录。' })[status] || '正在检查 Cloak 登录状态…'
+}
+async function pollLoginStatus() {
+    if (disposed || !loginSession.value || loginStatusRequest) return loginStatusRequest
+    const session = loginSession.value
+    const request = (async () => {
+        try {
+            const payload = ensure(await api.get(`/api/profile-login/${encodeURIComponent(session.session_id)}?viewer_id=${encodeURIComponent(session.viewer_id || '')}`))
+            if (disposed || (loginSession.value?.session_id !== session.session_id || loginSession.value?.viewer_id !== session.viewer_id)) return
+            const status = payload.status || (payload.result ? 'ready' : 'waiting')
+            loginStatus.value = loginStatusMessage(status, payload)
+            if (payload.email) { loginSession.value.email = payload.email; sessionStorage.setItem(loginStorage, JSON.stringify(loginSession.value)) }
+            loginFailure.value = status === 'error' ? payload : null
+            if (status === 'error') rememberLoginFailure(payload)
+            if (status === 'ready') {
+                const result = payload.result || payload
+                clearLogin(); loginOpen.value = false
+                loginStatus.value = `账号已验证并加入：${result.email || 'Google 账号'}`
+                ElMessage.success(result.is_active === false ? 'Cloak 登录完成，账号已保存为暂停状态' : 'Cloak 登录完成，账号已加入调度')
+                await load(true, true)
+            }
+        } catch (error) {
+            if (!disposed && loginSession.value?.session_id === session.session_id && loginSession.value?.viewer_id === session.viewer_id) {
+                if (error?.status === 404 || error?.status === 410) {
+                    clearLogin(); loginOpen.value = false
+                    loginStatus.value = '登录窗口已结束，可直接重新打开 Cloak 登录'
+                } else loginStatus.value = error?.message || '正在等待 Cloak 登录状态…'
+            }
+        }
+        finally { if (loginStatusRequest === request) loginStatusRequest = undefined }
+    })()
+    loginStatusRequest = request
+    return request
+}
+function openCloakLogin() {
+    loginOpen.value = true
+    if (loginSession.value) resumeLogin()
+    else startLogin()
+}
+function scheduleLoginStatusPoll() {
+    clearInterval(loginStatusTimer)
+    loginStatusTimer = setInterval(() => { if (!document.hidden) pollLoginStatus() }, 3000)
+    pollLoginStatus()
+}
+async function retryLogin() {
+    const previous = loginSession.value
+    if (!previous || loginStarting.value || loginFinishing.value || loginCanceling.value) return
+    loginStarting.value = true
+    try {
+        const receipt = ensure(await api.post(`/api/profile-login/${encodeURIComponent(previous.session_id)}/retry`, {
+            viewer_id: previous.viewer_id,
+        }))
+        loginSession.value = { ...previous, ...receipt, email: receipt.email || previous.email || '', browser_open: true }
+        loginFailure.value = null
+        sessionStorage.setItem(loginStorage, JSON.stringify(loginSession.value))
+        if (receipt.presentation === 'native' || previous.presentation === 'native' || nativePresentation.value) {
+            loginStatus.value = '本地 Cloak 窗口已重新打开，完成 Google 登录后页面会自动验证。'
+            if (receipt.token_id) await api.post(`/api/tokens/${receipt.token_id}/browser/focus${receipt.viewer_id ? `?viewer_id=${encodeURIComponent(receipt.viewer_id)}` : ''}`, {}).catch(() => {})
+        } else {
+            const viewer = openLoginWindow()
+            viewer.location.href = loginViewerUrl(loginSession.value)
+            loginStatus.value = 'Cloak 登录窗口已重新打开，完成 Google 登录后页面会自动验证。'
+        }
+        scheduleLoginStatusPoll()
+    } catch (error) {
+        loginFailure.value = { browser_open: false, retryable: true, message: error?.message || '登录窗口暂时不可用。' }
+        loginStatus.value = loginFailure.value.message
+        rememberLoginFailure(loginFailure.value)
+    } finally { loginStarting.value = false }
 }
 function resumeLogin() {
+    if (loginFailure.value?.browser_open === false) {
+        retryLogin()
+        return
+    }
     if (loginSession.value?.presentation === 'native' || nativePresentation.value) {
         const session = loginSession.value
         if (!session?.token_id) return
-        api.post(`/api/tokens/${session.token_id}/browser/focus${session.viewer_id ? `?viewer_id=${encodeURIComponent(session.viewer_id)}` : ''}`, {})
+        api.post(
+            `/api/tokens/${session.token_id}/browser/focus${session.viewer_id ? `?viewer_id=${encodeURIComponent(session.viewer_id)}` : ''}`,
+            {},
+        )
             .then(() => (loginStatus.value = '已显示本地 Cloak 登录窗口，请继续完成 Google 登录。'))
             .catch(notifyError)
         loginOpen.value = true
+        scheduleLoginStatusPoll()
         return
     }
     let viewer
@@ -1176,36 +1280,14 @@ function resumeLogin() {
         viewer = openLoginWindow()
         viewer.location.href = url
         loginOpen.value = true
+        scheduleLoginStatusPoll()
     } catch (error) {
         viewer?.close()
         notifyError(error)
     }
 }
-async function completeLogin() {
-    if (!loginSession.value || loginFinishing.value || loginCanceling.value) return
-    loginFinishing.value = true
-    try {
-        const result = ensure(
-            await api.post(`/api/profile-login/${encodeURIComponent(loginSession.value.session_id)}/complete`, {
-                viewer_id: loginSession.value.viewer_id,
-            }),
-        )
-        clearLogin()
-        loginOpen.value = false
-        loginStatus.value = `账号已验证并加入：${result.email || loginForm.email}`
-        ElMessage.success(
-            result.is_active === false ? 'Cloak 登录完成，账号已保存为暂停状态' : 'Cloak 登录完成，账号已加入调度',
-        )
-        await load(true, true)
-    } catch (error) {
-        loginStatus.value = error.message
-        notifyError(error)
-    } finally {
-        loginFinishing.value = false
-    }
-}
 async function cancelLogin() {
-    if (!loginSession.value || loginFinishing.value || loginCanceling.value) return
+    if (!loginSession.value || loginStarting.value || loginFinishing.value || loginCanceling.value) return
     loginCanceling.value = true
     try {
         ensure(
@@ -1239,10 +1321,16 @@ onMounted(() => {
         ) {
             if (stored.presentation !== 'native' && !nativePresentation.value) loginViewerUrl(stored)
             loginSession.value = stored
-            loginForm.email = stored.email || ''
-            loginStatus.value = stored.presentation === 'native' || nativePresentation.value
-                ? '有一份尚未完成的本地 Cloak 登录，可继续显示窗口。'
-                : '有一份尚未完成的 Cloak 登录，可继续登录或取消。'
+            scheduleLoginStatusPoll()
+            loginFailure.value =
+                stored.browser_open === false
+                    ? { browser_open: false, retryable: true, message: '浏览器已关闭，可继续打开并重试验证。' }
+                    : null
+            loginStatus.value = loginFailure.value
+                ? formatLoginFailure(loginFailure.value) || '浏览器已关闭，可继续打开并重试验证。'
+                : stored.presentation === 'native' || nativePresentation.value
+                  ? '有一份尚未完成的本地 Cloak 登录，可继续显示窗口。'
+                  : '有一份尚未完成的 Cloak 登录，可继续登录或取消。'
         } else clearLogin()
     } catch {
         clearLogin()
@@ -1256,6 +1344,7 @@ onUnmounted(() => {
     quotaVersion++
     clearInterval(pollTimer)
     clearInterval(importJobTimer)
+    clearInterval(loginStatusTimer)
     document.removeEventListener('visibilitychange', refreshVisible)
 })
 </script>
@@ -1269,7 +1358,7 @@ onUnmounted(() => {
             </div>
             <div class="page-actions">
                 <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
-                <el-button type="primary" :icon="Plus" @click="loginOpen = true">添加账号</el-button>
+                <el-button type="primary" :icon="Plus" @click="openCloakLogin">添加账号</el-button>
             </div>
         </header>
         <section
@@ -1324,6 +1413,9 @@ onUnmounted(() => {
                         >
                             <span>{{ item.email }}</span>
                             <strong>{{ importStageLabel(item) }}</strong>
+                            <small v-if="loginNetworkStepLabel(item.network_step)">
+                                步骤：{{ loginNetworkStepLabel(item.network_step) }}
+                            </small>
                             <small v-if="item.message">{{ item.message }}</small>
                         </li>
                     </ul>
@@ -1407,8 +1499,14 @@ onUnmounted(() => {
                     </el-select>
                 </div>
                 <div class="table-tools">
-                    <el-tooltip :content="nativePresentation ? '直接打开本机 Cloak 窗口登录 Google，保存持久化 Profile' : '直接在服务器 Cloak 浏览器登录 Google，保存持久化 Profile'">
-                        <el-button :icon="Connection" @click="loginOpen = true">
+                    <el-tooltip
+                        :content="
+                            nativePresentation
+                                ? '直接打开本机 Cloak 窗口登录 Google，保存持久化 Profile'
+                                : '直接在服务器 Cloak 浏览器登录 Google，保存持久化 Profile'
+                        "
+                    >
+                        <el-button :icon="Connection" @click="openCloakLogin">
                             {{ loginSession ? '继续登录' : 'Cloak 登录' }}
                         </el-button>
                     </el-tooltip>
@@ -1450,10 +1548,29 @@ onUnmounted(() => {
                 <template #default>
                     <p>直接在桌面窗口完成操作，凭据与窗口管理就在这里。</p>
                     <div class="native-browser-actions">
-                        <el-button size="small" :disabled="nativeBrowserBusy" @click="focusNativeBrowser">显示窗口</el-button>
-                        <el-button size="small" type="primary" :disabled="nativeBrowserBusy" @click="refreshNativeBrowser">刷新凭据</el-button>
-                        <el-button size="small" :disabled="nativeBrowserBusy" @click="closeNativeBrowser(true)">保存并关闭后刷新</el-button>
-                        <el-button size="small" type="danger" plain :disabled="nativeBrowserBusy" @click="closeNativeBrowser(false)">关闭窗口</el-button>
+                        <el-button size="small" :disabled="nativeBrowserBusy" @click="focusNativeBrowser">
+                            显示窗口
+                        </el-button>
+                        <el-button
+                            size="small"
+                            type="primary"
+                            :disabled="nativeBrowserBusy"
+                            @click="refreshNativeBrowser"
+                        >
+                            刷新凭据
+                        </el-button>
+                        <el-button size="small" :disabled="nativeBrowserBusy" @click="closeNativeBrowser(true)">
+                            保存并关闭后刷新
+                        </el-button>
+                        <el-button
+                            size="small"
+                            type="danger"
+                            plain
+                            :disabled="nativeBrowserBusy"
+                            @click="closeNativeBrowser(false)"
+                        >
+                            关闭窗口
+                        </el-button>
                     </div>
                 </template>
             </el-alert>
@@ -1463,9 +1580,9 @@ onUnmounted(() => {
                     <strong>{{ selected.length }}</strong>
                     位成员
                 </span>
-                <el-button size="small" :loading="busy.has('bulk')" @click="bulk('enable')">启用</el-button>
-                <el-button size="small" :loading="busy.has('bulk')" @click="bulk('disable')">暂停</el-button>
-                <el-button size="small" :loading="busy.has('bulk')" @click="bulk('refresh-at')">刷新会话</el-button>
+                <el-button v-if="selected.some((row) => !row.vidsOnly)" size="small" :loading="busy.has('bulk')" @click="bulk('enable')">启用</el-button>
+                <el-button v-if="selected.some((row) => !row.vidsOnly)" size="small" :loading="busy.has('bulk')" @click="bulk('disable')">暂停</el-button>
+                <el-button v-if="selected.some((row) => !row.vidsOnly)" size="small" :loading="busy.has('bulk')" @click="bulk('refresh-at')">刷新会话</el-button>
                 <el-button size="small" type="danger" plain :loading="busy.has('bulk')" @click="bulk('delete')">
                     删除
                 </el-button>
@@ -1481,7 +1598,7 @@ onUnmounted(() => {
                 @sort-change="Object.assign(tableSort, $event)"
                 class="accounts-table"
             >
-                <el-table-column type="selection" width="46" :selectable="(row) => !row.vidsOnly" />
+                <el-table-column type="selection" width="46" :selectable="() => true" />
                 <el-table-column type="expand" width="34">
                     <template #default="{ row }">
                         <AccountProxyBinding
@@ -1680,7 +1797,10 @@ onUnmounted(() => {
                         <el-button v-if="!row.vidsOnly" text type="primary" @click="toggleQuickAccount(row)">
                             {{ expandedAccountIds.includes(row.id) ? '收起' : '展开编辑' }}
                         </el-button>
-                        <el-button v-else text type="primary" @click="openDetail(row)">详情</el-button>
+                        <template v-else>
+                            <el-button text type="primary" @click="openDetail(row)">详情</el-button>
+                            <el-button text type="danger" :loading="busy.has(row.id + ':delete')" @click="action(row, 'delete')">删除</el-button>
+                        </template>
                         <el-button
                             v-if="row.browser_profile_source === 'cloak'"
                             text
@@ -1731,7 +1851,6 @@ onUnmounted(() => {
                 <article v-for="row in paginated" :key="row.id" class="mobile-account">
                     <header class="mobile-account-header">
                         <el-checkbox
-                            v-if="!row.vidsOnly"
                             :model-value="selected.some((item) => item.id === row.id)"
                             :aria-label="`选择 ${row.email || row.id}`"
                             @change="(checked) => selectMobile(row, checked)"
@@ -1745,6 +1864,7 @@ onUnmounted(() => {
                         <el-tag :type="row.is_active ? 'success' : 'info'" size="small" effect="light" round>
                             {{ row.is_active ? '已启用' : '已暂停' }}
                         </el-tag>
+                        <el-button v-if="row.vidsOnly" text type="danger" :loading="busy.has(row.id + ':delete')" @click="action(row, 'delete')">删除</el-button>
                     </header>
                     <button
                         v-if="!row.vidsOnly"
@@ -1891,7 +2011,7 @@ onUnmounted(() => {
                     "
                 >
                     <template #image><Mascot portrait compact mood="sleepy" class="empty-mascot" /></template>
-                    <el-button v-if="!accounts.length" type="primary" :icon="Plus" @click="loginOpen = true">
+                    <el-button v-if="!accounts.length" type="primary" :icon="Plus" @click="openCloakLogin">
                         添加账号
                     </el-button>
                 </el-empty>
@@ -2005,6 +2125,18 @@ onUnmounted(() => {
                             show-icon
                             class="account-alert"
                         />
+                        <p
+                            v-if="detail.refresh_reason || detail.refresh_stage || detail.refresh_network_step"
+                            class="field-note"
+                        >
+                            刷新诊断：{{ detail.refresh_reason || '状态异常' }}
+                            <template v-if="loginStageLabel(detail.refresh_stage)">
+                                · 阶段：{{ loginStageLabel(detail.refresh_stage) }}
+                            </template>
+                            <template v-if="loginNetworkStepLabel(detail.refresh_network_step)">
+                                · 步骤：{{ loginNetworkStepLabel(detail.refresh_network_step) }}
+                            </template>
+                        </p>
                         <dl class="session-facts">
                             <div>
                                 <dt>AT 到期</dt>
@@ -2163,6 +2295,7 @@ onUnmounted(() => {
             </el-empty>
             <template #footer>
                 <el-button @click="detailOpen = false">关闭</el-button>
+                <el-button v-if="detail && detail.vidsOnly" type="danger" :loading="busy.has(detail.id + ':delete')" @click="action(detail, 'delete')">删除账号</el-button>
                 <el-button v-if="detail && !detail.vidsOnly" type="primary" @click="editDetail">编辑账号配置</el-button>
             </template>
         </el-drawer>
@@ -2354,22 +2487,15 @@ onUnmounted(() => {
             :close-on-click-modal="false"
         >
             <p class="dialog-note">
-                {{ nativePresentation
-                    ? '登录会直接打开本机 Cloak 窗口；完成 Google 登录后回到这里点击“完成登录并添加”。'
-                    : '在服务器浏览器完成 Google 登录，验证身份与 Flow 会话后保存 Profile 并加入账号小队。' }}
+                {{
+                    nativePresentation
+                        ? '登录会直接打开本机 Cloak 窗口；完成 Google 登录后页面会自动验证并加入账号。'
+                        : '在服务器浏览器完成 Google 登录，验证身份与 Flow 会话后保存 Profile 并加入账号小队。'
+                }}
             </p>
             <p v-if="!presentationReady" class="field-note" role="status">正在连接账号浏览器服务…</p>
             <el-form label-position="top" @submit.prevent="startLogin">
-                <el-form-item label="Google 账号邮箱">
-                    <el-input
-                        v-model="loginForm.email"
-                        type="email"
-                        autocomplete="username"
-                        placeholder="name@gmail.com"
-                        :disabled="!!loginSession || loginStarting"
-                    />
-                </el-form-item>
-                <el-form-item v-if="!loginSession" label="账号代理">
+<el-form-item v-if="!loginSession" label="账号代理">
                     <el-select
                         v-model="loginForm.proxy_pool_id"
                         placeholder="自动分配并绑定"
@@ -2391,9 +2517,9 @@ onUnmounted(() => {
             </el-form>
             <el-alert
                 v-if="loginSession"
-                :title="loginSession.email"
+                :title="loginSession.email || '等待登录'"
                 :description="loginStatus"
-                type="info"
+                :type="loginFailure ? 'warning' : 'info'"
                 :closable="false"
                 show-icon
             />
@@ -2401,26 +2527,28 @@ onUnmounted(() => {
                 <el-button
                     v-if="loginSession"
                     :loading="loginCanceling"
-                    :disabled="loginFinishing"
+                    :disabled="loginStarting || loginFinishing"
                     @click="cancelLogin"
                 >
                     取消本次登录
                 </el-button>
-                <el-button v-if="loginSession" :disabled="loginFinishing || loginCanceling" @click="resumeLogin">
-                    继续登录
-                </el-button>
                 <el-button
                     v-if="loginSession"
-                    type="primary"
-                    :loading="loginFinishing"
-                    :disabled="loginCanceling"
-                    @click="completeLogin"
+                    :loading="loginStarting"
+                    :disabled="loginFinishing || loginCanceling"
+                    @click="resumeLogin"
                 >
-                    完成登录并添加
+                    继续登录
                 </el-button>
+                <el-button v-if="loginSession" text :loading="loginFinishing" :disabled="loginCanceling" @click="pollLoginStatus">刷新登录状态</el-button>
                 <template v-else>
                     <el-button :disabled="loginStarting" @click="loginOpen = false">关闭</el-button>
-                    <el-button type="primary" :loading="loginStarting" :disabled="!presentationReady" @click="startLogin">
+                    <el-button
+                        type="primary"
+                        :loading="loginStarting"
+                        :disabled="!presentationReady"
+                        @click="startLogin"
+                    >
                         {{ nativePresentation ? '打开本地 Cloak 登录' : '打开 Cloak 登录' }}
                     </el-button>
                 </template>

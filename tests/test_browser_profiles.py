@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sqlite3
 import threading
 import unittest
 from pathlib import Path
@@ -367,6 +368,158 @@ class ProfileManagerTests(unittest.IsolatedAsyncioTestCase):
             manager = ProfileManager(root, FakeBackend(), max_concurrent=4)
             specs = await asyncio.gather(*(manager.spec(f"user-{index}") for index in range(20)))
             self.assertEqual(len({spec.fingerprint_seed for spec in specs}), len(specs))
+
+    async def test_adopt_identity_moves_closed_profile_without_changing_seed_or_state(self):
+        with TemporaryDirectory() as root:
+            manager = ProfileManager(root, FakeBackend())
+            old = await manager.spec("pending@example.invalid")
+            (old.profile_dir / "Default").mkdir()
+            (old.profile_dir / "Default" / "Cookies").write_text("cookie", encoding="utf-8")
+            (old.profile_dir / "environment_snapshot.json").write_text("{}", encoding="utf-8")
+            (old.profile_dir / "launch_settings.sha256").write_text("launch", encoding="utf-8")
+            original = json.loads((old.profile_dir / "metadata.json").read_text(encoding="utf-8"))
+
+            adopted = await manager.adopt_identity(
+                "pending@example.invalid", "verified@example.com"
+            )
+
+            self.assertEqual(adopted.fingerprint_seed, old.fingerprint_seed)
+            self.assertFalse(old.profile_dir.exists())
+            self.assertEqual(
+                (adopted.profile_dir / "Default" / "Cookies").read_text(encoding="utf-8"),
+                "cookie",
+            )
+            metadata = json.loads(
+                (adopted.profile_dir / "metadata.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["account_key"], adopted.account_key)
+            self.assertEqual(metadata["profile_dir"], str(adopted.profile_dir))
+            self.assertEqual(metadata["fingerprint_seed"], original["fingerprint_seed"])
+            self.assertEqual(
+                await manager.spec("verified@example.com", existing_only=True), adopted
+            )
+
+    async def test_adopt_identity_never_overwrites_existing_destination(self):
+        with TemporaryDirectory() as root:
+            manager = ProfileManager(root, FakeBackend())
+            old = await manager.spec("pending@example.invalid")
+            target = await manager.spec("verified@example.com")
+            (old.profile_dir / "Default").mkdir()
+            (target.profile_dir / "Default").mkdir()
+            with self.assertRaises(ValueError):
+                await manager.adopt_identity("pending@example.invalid", "verified@example.com")
+            self.assertTrue(old.profile_dir.exists())
+            self.assertTrue(target.profile_dir.exists())
+
+    async def test_adopt_identity_rejects_open_profile(self):
+        with TemporaryDirectory() as root:
+            backend = FakeBackend()
+            manager = ProfileManager(root, backend)
+            old = await manager.spec("pending@example.invalid")
+            (old.profile_dir / "Default").mkdir()
+            async with manager.session("pending@example.invalid"):
+                with self.assertRaises(ProfileNotReadyError) as raised:
+                    await manager.adopt_identity("pending@example.invalid", "verified@example.com")
+                self.assertEqual(raised.exception.reason, "profile_is_open")
+
+    async def test_adopt_identity_rolls_back_profile_and_seed_if_metadata_update_fails(self):
+        with TemporaryDirectory() as root:
+            manager = ProfileManager(root, FakeBackend())
+            old = await manager.spec("pending@example.invalid")
+            (old.profile_dir / "Default").mkdir()
+            metadata_before = (old.profile_dir / "metadata.json").read_bytes()
+            write = manager._write_metadata_file
+
+            def fail_after_write(path, values):
+                write(path, values)
+                raise OSError("synthetic metadata failure")
+
+            with patch.object(manager, "_write_metadata_file", side_effect=fail_after_write):
+                with self.assertRaises(OSError):
+                    await manager.adopt_identity("pending@example.invalid", "verified@example.com")
+            self.assertEqual((old.profile_dir / "metadata.json").read_bytes(), metadata_before)
+            self.assertFalse(
+                (Path(root) / manager._normalize_account_key("verified@example.com")).exists()
+            )
+            database = sqlite3.connect(Path(root) / "fingerprint_seeds.sqlite3")
+            try:
+                self.assertEqual(
+                    database.execute(
+                        "SELECT account_key FROM seeds WHERE seed = ?", (old.fingerprint_seed,)
+                    ).fetchone(),
+                    (old.account_key,),
+                )
+            finally:
+                database.close()
+
+    async def test_adopt_identity_rolls_back_when_seed_database_commit_fails(self):
+        with TemporaryDirectory() as root:
+            manager = ProfileManager(root, FakeBackend())
+            old = await manager.spec("pending@example.invalid")
+            (old.profile_dir / "Default").mkdir()
+            metadata_before = (old.profile_dir / "metadata.json").read_bytes()
+            connect = sqlite3.connect
+
+            class FailedCommitConnection(sqlite3.Connection):
+                def commit(self):
+                    raise sqlite3.OperationalError("synthetic commit failure")
+
+            with patch(
+                "src.services.browser.profiles.sqlite3.connect",
+                side_effect=lambda *args, **kwargs: connect(
+                    *args, factory=FailedCommitConnection, **kwargs
+                ),
+            ):
+                with self.assertRaises(sqlite3.OperationalError):
+                    await manager.adopt_identity("pending@example.invalid", "verified@example.com")
+            self.assertEqual((old.profile_dir / "metadata.json").read_bytes(), metadata_before)
+            self.assertFalse(
+                (Path(root) / manager._normalize_account_key("verified@example.com")).exists()
+            )
+            database = sqlite3.connect(Path(root) / "fingerprint_seeds.sqlite3")
+            try:
+                self.assertEqual(
+                    database.execute(
+                        "SELECT account_key FROM seeds WHERE seed = ?", (old.fingerprint_seed,)
+                    ).fetchone(),
+                    (old.account_key,),
+                )
+            finally:
+                database.close()
+
+    async def test_adopt_identity_keeps_cloak_launch_options_and_supports_reverse_move(self):
+        with TemporaryDirectory() as root:
+            backend = CloakBrowserBackend()
+            manager = ProfileManager(root, backend)
+            old = await manager.spec("pending@example.invalid")
+            (old.profile_dir / "Default").mkdir()
+            old_options = backend._launch_options(old.profile_dir, "http://proxy.invalid:8080")
+            backend._check_launch_settings(old.profile_dir, old_options)
+            digest = (old.profile_dir / "launch_settings.sha256").read_bytes()
+
+            new = await manager.adopt_identity("pending@example.invalid", "verified@example.com")
+            new_options = backend._launch_options(new.profile_dir, "http://proxy.invalid:8080")
+            self.assertEqual(old_options, new_options)
+            backend._check_launch_settings(new.profile_dir, new_options)
+            self.assertEqual((new.profile_dir / "launch_settings.sha256").read_bytes(), digest)
+
+            restored = await manager.adopt_identity(
+                "verified@example.com", "pending@example.invalid"
+            )
+            self.assertEqual(restored, old)
+
+    async def test_adopt_identity_rejects_external_profile_file_lock(self):
+        with TemporaryDirectory() as root:
+            manager = ProfileManager(root, FakeBackend())
+            old = await manager.spec("pending@example.invalid")
+            lock = _ProfileFileLock(old.profile_dir / ".profile.lock", timeout=0)
+            await lock.acquire()
+            try:
+                with self.assertRaises(TimeoutError):
+                    await manager.adopt_identity("pending@example.invalid", "verified@example.com")
+            finally:
+                lock.release()
+            self.assertTrue(old.profile_dir.exists())
 
     async def test_seed_collision_is_rejected(self):
         with TemporaryDirectory() as root:

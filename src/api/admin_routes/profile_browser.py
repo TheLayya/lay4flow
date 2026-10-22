@@ -31,7 +31,7 @@ def create_profile_browser_router(
     frontend_page_path = page_path.parent / "app" / "index.html"
 
     def error_response(error: ViewerError):
-        return HTTPException(status_code=error.status, detail=error.message)
+        return HTTPException(status_code=error.status, detail=error.detail or error.message)
 
     def require_origin(request: Request):
         # Bearer callers may omit Origin; cookie requests must come from this application.
@@ -61,6 +61,30 @@ def create_profile_browser_router(
         require_origin(request)
         try:
             return await get_viewer().login.complete(session_id, owner, payload.viewer_id)
+        except ViewerError as error:
+            raise error_response(error) from None
+
+    @router.get("/api/profile-login/{session_id}")
+    async def profile_browser_login_status(
+        session_id: str, request: Request, owner: str = Depends(verify_token)
+    ):
+        try:
+            return get_viewer().login.status(
+                session_id, owner, request.query_params.get("viewer_id", "")
+            )
+        except ViewerError as error:
+            raise error_response(error) from None
+
+    @router.post("/api/profile-login/{session_id}/retry")
+    async def profile_browser_login_retry(
+        session_id: str,
+        payload: CompleteProfileLoginRequest,
+        request: Request,
+        owner: str = Depends(verify_token),
+    ):
+        require_origin(request)
+        try:
+            return await get_viewer().login.retry(session_id, owner, payload.viewer_id)
         except ViewerError as error:
             raise error_response(error) from None
 

@@ -9,6 +9,23 @@ from ..core.logger import debug_logger
 from ..core.models import Project, Token
 
 
+def profile_project_binding(token: Token) -> dict[str, Any]:
+    return {
+        key: getattr(token, key)
+        for key in (
+            "email",
+            "st",
+            "google_cookies",
+            "proxy_url",
+            "proxy_pool_id",
+            "browser_profile_source",
+            "browser_profile_epoch",
+            "is_active",
+            "ban_reason",
+        )
+    }
+
+
 class ProjectPool:
     """Maintain a bounded, round-robin project pool for each account."""
 
@@ -162,11 +179,25 @@ class ProjectPool:
                     projects = sorter(projects)
                 selector = select_project or self.select_next_project
                 selected_project = selector(token, projects[:target_size])
-                await self.db.update_token(
-                    token_id,
-                    current_project_id=selected_project.project_id,
-                    current_project_name=selected_project.project_name,
-                )
+                updates = {
+                    "current_project_id": selected_project.project_id,
+                    "current_project_name": selected_project.project_name,
+                }
+                if token.browser_profile_source == "cloak":
+                    proxy_binding = (
+                        (token.proxy_pool_id, token.proxy_url)
+                        if token.proxy_pool_id is not None
+                        else None
+                    )
+                    if not await self.db.update_token_if_credentials_match(
+                        token_id,
+                        profile_project_binding(token),
+                        expected_proxy_binding=proxy_binding,
+                        **updates,
+                    ):
+                        raise ValueError("Account binding changed while preparing projects")
+                else:
+                    await self.db.update_token(token_id, **updates)
                 return selected_project.project_id
             except Exception as exc:
                 raise ValueError(f"Failed to prepare project pool: {exc}") from exc

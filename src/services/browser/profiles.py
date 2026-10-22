@@ -253,6 +253,157 @@ class ProfileManager:
                 )
         return ProfileSpec(normalized, profile_dir, seed)
 
+    async def adopt_identity(self, old_account_key: str, new_account_key: str) -> ProfileSpec:
+        """Move a closed Profile to a verified identity without changing its state."""
+        old_normalized = self._normalize_account_key(old_account_key)
+        new_normalized = self._normalize_account_key(new_account_key)
+        if old_normalized == new_normalized:
+            raise ValueError("profile identity is unchanged")
+
+        # Account locks are always acquired in lexical order, then the seed
+        # registry guard.  This matches ``session``/``spec`` and avoids a
+        # rename racing a browser open or seed allocation.
+        lock_keys = sorted((old_normalized, new_normalized))
+        locks = [await self._account_lock(key) for key in lock_keys]
+        if any(lock.locked() for lock in locks):
+            raise ProfileNotReadyError(old_normalized, "profile_is_open")
+        async with locks[0], locks[1], self._seed_guard:
+            if any(
+                key in self._warm_handles
+                or key in self._warm_opening
+                or key in self._warm_sessions
+                or key in self._failed_handles
+                for key in (old_normalized, new_normalized)
+            ):
+                raise ProfileNotReadyError(old_normalized, "profile_is_open")
+
+            root = self.root_dir.absolute()
+            old_dir = self.root_dir / old_normalized
+            new_dir = self.root_dir / new_normalized
+            # Normalized keys are generated locally, but validate the actual
+            # paths too: an imported/junctioned old Profile must never escape
+            # the Profile root, and an existing destination is never replaced.
+            if old_dir.parent.absolute() != root or new_dir.parent.absolute() != root:
+                raise ValueError("profile path is outside the profile root")
+            if old_dir.is_symlink() or new_dir.is_symlink():
+                raise ValueError("linked profile paths are not supported")
+            if not old_dir.is_dir() or new_dir.exists():
+                raise ValueError("source Profile is missing or destination already exists")
+            for directory in (root, old_dir):
+                attributes = directory.lstat()
+                if getattr(attributes, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise ValueError("linked profile paths are not supported")
+            try:
+                if old_dir.resolve().parent != root.resolve():
+                    raise ValueError("source Profile is outside the profile root")
+            except OSError:
+                raise ValueError("source Profile path cannot be resolved") from None
+
+            metadata_path = old_dir / "metadata.json"
+            if metadata_path.is_symlink():
+                raise ValueError("linked Profile metadata is not supported")
+            try:
+                metadata_bytes = metadata_path.read_bytes()
+                metadata = json.loads(metadata_bytes.decode("utf-8"))
+            except (OSError, UnicodeError, TypeError, ValueError):
+                raise ValueError("source Profile metadata is invalid") from None
+            if not isinstance(metadata, dict) or metadata.get("account_key") != old_normalized:
+                raise ValueError("source Profile identity does not match")
+            seed = self._validate_seed(metadata.get("fingerprint_seed"))
+            if seed is None:
+                raise ValueError("source Profile fingerprint seed is invalid")
+            if metadata.get("state") == "starting":
+                raise ProfileNotReadyError(old_normalized, "profile_is_open")
+
+            source_lock = _ProfileFileLock(old_dir / ".profile.lock", timeout=0)
+            database = sqlite3.connect(self.root_dir / "fingerprint_seeds.sqlite3", timeout=30)
+            moved = []
+            destination_created = False
+            db_committed = False
+            try:
+                # The manager lock covers our own sessions; this non-blocking
+                # file lock also catches a browser launched outside this
+                # manager.  An identity move must never race Chromium writes.
+                await source_lock.acquire()
+                with database:
+                    database.execute(
+                        "CREATE TABLE IF NOT EXISTS seeds "
+                        "(seed INTEGER PRIMARY KEY, account_key TEXT UNIQUE NOT NULL)"
+                    )
+                    old_row = database.execute(
+                        "SELECT seed FROM seeds WHERE account_key = ?", (old_normalized,)
+                    ).fetchone()
+                    new_row = database.execute(
+                        "SELECT seed FROM seeds WHERE account_key = ?", (new_normalized,)
+                    ).fetchone()
+                    seed_row = database.execute(
+                        "SELECT account_key FROM seeds WHERE seed = ?", (seed,)
+                    ).fetchone()
+                    if new_row is not None or (
+                        seed_row is not None and seed_row[0] != old_normalized
+                    ):
+                        raise ValueError(
+                            "destination Profile identity already owns a fingerprint seed"
+                        )
+                    if old_row is not None and old_row[0] != seed:
+                        raise ValueError("source Profile fingerprint seed registration conflict")
+                    if seed_row is None:
+                        database.execute(
+                            "INSERT INTO seeds(seed, account_key) VALUES (?, ?)",
+                            (seed, new_normalized),
+                        )
+                    else:
+                        database.execute(
+                            "UPDATE seeds SET account_key = ? WHERE seed = ? AND account_key = ?",
+                            (new_normalized, seed, old_normalized),
+                        )
+                        if database.execute("SELECT changes()").fetchone()[0] != 1:
+                            raise ValueError(
+                                "source Profile fingerprint seed registration conflict"
+                            )
+
+                    new_dir.mkdir()
+                    destination_created = True
+                    for child in old_dir.iterdir():
+                        if child.name == ".profile.lock":
+                            continue
+                        child.rename(new_dir / child.name)
+                        moved.append(child.name)
+                    metadata["account_key"] = new_normalized
+                    metadata["profile_dir"] = str(new_dir)
+                    self._write_metadata_file(new_dir / "metadata.json", metadata)
+                    database.commit()
+                    db_committed = True
+            except BaseException:
+                # ``with database`` rolls back an uncommitted seed update.
+                if destination_created:
+                    try:
+                        if "metadata.json.tmp" not in moved:
+                            (new_dir / "metadata.json.tmp").unlink(missing_ok=True)
+                        for name in reversed(moved):
+                            (new_dir / name).rename(old_dir / name)
+                        metadata_path.write_bytes(metadata_bytes)
+                        new_dir.rmdir()
+                    except OSError as rollback_error:
+                        self._failed_handles[old_normalized] = None
+                        self._failed_handles[new_normalized] = None
+                        _logger.error(
+                            "Profile identity rollback failed: %s", type(rollback_error).__name__
+                        )
+                raise
+            finally:
+                source_lock.release()
+                if db_committed:
+                    try:
+                        (old_dir / ".profile.lock").unlink(missing_ok=True)
+                        old_dir.rmdir()
+                    except OSError:
+                        # The destination and seed row are valid; retain an
+                        # empty source shell rather than deleting unknown data.
+                        _logger.warning("Profile identity source cleanup incomplete")
+                database.close()
+            return ProfileSpec(new_normalized, new_dir, seed)
+
     async def status(self, account_key: str) -> ProfileStatus:
         spec = await self.spec(account_key)
         metadata = self._metadata_path(spec)

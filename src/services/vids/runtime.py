@@ -10,6 +10,7 @@ from pathlib import Path
 from ..proxy_urls import normalize_proxy_url
 from .bindings import read_bindings, session_key_file
 from .client import VidsClient, VidsProtocolError, cookie_rows
+from .deletion_markers import is_deleted
 from .dispatcher import VidsAccount, VidsProviderDispatcher
 from .gateway import GatewayError, VidsGateway
 from .session_store import SessionStore
@@ -54,6 +55,12 @@ class VidsRuntime:
                 if not isinstance(registry_path, str) or not registry_path.strip():
                     raise ValueError
                 rows = [*rows, *read_bindings(registry_path)]
+                rows = [
+                    row
+                    for row in rows
+                    if not isinstance(row, dict)
+                    or not is_deleted(registry_path, row.get("token_id"))
+                ]
             prepared, identifiers, identities, roots, key_names, editors = (
                 [],
                 set(),
@@ -383,6 +390,40 @@ class VidsRuntime:
                 raise GatewayError(503, "session_close_failed", "Vids sessions could not all close")
 
         await self._finish_cleanup(cleanup())
+
+    async def remove_account(self, token_id: int):
+        """Detach one account without closing sibling Vids gateways."""
+        if type(token_id) is not int or token_id <= 0:
+            raise GatewayError(400, "invalid_account", "A valid Flow account is required")
+        async with self._lifecycle_lock:
+            account = self.dispatcher._accounts.get(token_id)
+            preflight = self.dispatcher._preflight_locks.get(token_id)
+            if (
+                token_id in self.dispatcher._pool_pending
+                or (preflight is not None and preflight.locked())
+                or (account is not None and account.gateway.lock.locked())
+            ):
+                raise GatewayError(409, "busy", "Vids account is busy; retry after it finishes")
+            if account is not None:
+                await account.gateway.close()
+                self._gateways = [
+                    gateway for gateway in self._gateways if gateway is not account.gateway
+                ]
+            self.dispatcher._accounts.pop(token_id, None)
+            self.dispatcher._roots.pop(token_id, None)
+            self.dispatcher.unavailable_receipt_roots.pop(token_id, None)
+            self.dispatcher._preflight_locks.pop(token_id, None)
+            self.dispatcher._pool_pending.discard(token_id)
+            self.account_errors.pop(token_id, None)
+            self.binding_rows.pop(token_id, None)
+            self.dispatcher._claims = {
+                key: value for key, value in self.dispatcher._claims.items() if value != token_id
+            }
+            self.dispatcher._document_refs = {
+                key: value
+                for key, value in self.dispatcher._document_refs.items()
+                if value[0] != token_id
+            }
 
     @staticmethod
     async def _finish_cleanup(cleanup):

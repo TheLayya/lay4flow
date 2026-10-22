@@ -132,3 +132,11 @@ class AdminAccountConfigRouteTests(unittest.TestCase):
                 "refresh_interval_minutes": 120,
             },
         )
+
+    def test_delete_failure_is_reported_and_does_not_remove_concurrency_state(self):
+        self.login()
+        self.manager.delete_token.side_effect = OSError("Profile cleanup failed")
+        response = self.client.delete("/api/tokens/7")
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["detail"], "Profile cleanup failed")
+        self.concurrency.remove_token.assert_not_awaited()

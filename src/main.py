@@ -333,6 +333,15 @@ app.state.vids_auto_onboarding = (
 )
 if app.state.vids_auto_onboarding is not None:
     token_manager.profile_ready_callback = app.state.vids_auto_onboarding.schedule
+vids_account_cleanup = app.state.vids_onboarding or VidsOnboardingService(
+    db,
+    vids_runtime,
+    None,
+    registry_path=vids_registry_path,
+    secrets_dir=vids_registry_path.parent.parent / "vids-secrets",
+    runtime_dir=vids_registry_path.parent / "accounts",
+)
+token_manager.account_delete_handler = vids_account_cleanup.delete_account
 
 
 async def repair_vids_session(token_id):

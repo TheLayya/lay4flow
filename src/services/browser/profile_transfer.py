@@ -58,14 +58,15 @@ FAILURE_REASONS = {
     "native_state_unavailable",
     "renewal_unverified",
     "seed_conflict",
+    "account_changed",
 }
 VERIFICATION_MESSAGES = {
     "transient_error": "访问 Google 的网络请求超时或服务暂时异常，请检查该账号的代理后重试",
     "login_required": "Google 登录态已失效，请在账号浏览器中重新登录后导出",
-    "session_invalid": "登录态续签未通过，请在源服务器刷新凭据后重新导出",
+    "session_invalid": "Flow 登录态校验未通过，请在源服务器刷新凭据后重新导出",
     "identity_mismatch": "浏览器中的 Google 账号与迁移账号不一致",
     "invalid_cookies": "登录凭据中的 Google 账号与迁移账号不一致",
-    "environment_changed": "目标浏览器身份环境发生变化，请检查源与目标的浏览器配置",
+    "environment_changed": "目标浏览器身份环境发生变化，请检查目标端浏览器配置",
     "environment_timeout": "读取浏览器身份环境超时，请重试",
     "environment_probe_error": "读取浏览器身份环境失败，请检查浏览器服务",
     "account_probe_error": "账号接口校验失败，请检查代理网络后重试",
@@ -74,7 +75,7 @@ VERIFICATION_MESSAGES = {
 TRANSFER_STAGES = {
     "open_profile": "启动目标浏览器",
     "restore_state": "恢复登录态",
-    "oauth_renewal": "Google 登录态续签",
+    "flow_verification": "Flow 登录态校验",
     "cold_check_1": "首次重开校验",
     "cold_check_2": "再次重开校验",
     "save_account": "保存账号",
@@ -82,12 +83,10 @@ TRANSFER_STAGES = {
     "finalize": "完成账号配置",
 }
 PROFILE_NETWORK_STEPS = {
-    "oauth_csrf": "读取 Google 登录入口",
-    "oauth_signin": "提交 Google 登录续签",
-    "oauth_redirect": "打开 Google 授权回调",
-    "oauth_confirmation": "等待 Google 登录确认",
-    "session_read": "读取更新后的 Flow 会话",
-    "credits_read": "校验 Flow 账号额度接口",
+    "flow_bootstrap": "读取 Flow 会话",
+    "flow_identity": "校验 Google 账号身份",
+    "flow_credits": "校验 Flow 账号额度",
+    "flow_projects": "准备 Flow 项目",
 }
 
 
@@ -219,13 +218,17 @@ class ProfileTransfer:
             raise ProfileTransferError("profile_unavailable", "请先启用 Cloak Profile 服务", 503)
         return value
 
-    def _launch_options(self) -> dict[str, Any]:
-        options = dict(getattr(self.refresher.manager.backend, "options", {}))
-        unknown = set(options) - LAUNCH_KEYS - {"headless", "proxy", "env"}
-        if unknown:
+    def _launch_options(self, options: dict[str, Any] | None = None) -> dict[str, Any]:
+        if options is None:
+            options = dict(getattr(self.refresher.manager.backend, "options", {}))
+            for key in ("headless", "proxy", "env"):
+                options.pop(key, None)
+        if not isinstance(options, dict) or set(options) - LAUNCH_KEYS:
             raise ProfileTransferError("launch_options_unsupported", "当前启动参数需先适配迁移格式")
-        identity = {key: value for key, value in options.items() if key in LAUNCH_KEYS}
-        for arg in identity.get("args", []):
+        args = options.get("args", [])
+        if not isinstance(args, (list, tuple)):
+            raise ProfileTransferError("launch_options_unsupported", "当前启动参数需先适配迁移格式")
+        for arg in args:
             if not isinstance(arg, str) or not (
                 arg in {"--disable-breakpad", "--disable-crash-reporter"}
                 or arg.startswith(("--fingerprint-", "--lang=", "--window-size="))
@@ -233,7 +236,7 @@ class ProfileTransfer:
                 raise ProfileTransferError(
                     "launch_options_unsupported", "当前启动参数需先适配迁移格式"
                 )
-        return identity
+        return dict(options)
 
     @asynccontextmanager
     async def _export_context(self, token):
@@ -325,36 +328,26 @@ class ProfileTransfer:
         seed = manager._validate_seed(browser.get("fingerprint_seed"))
         if seed is None:
             raise ProfileTransferError("invalid_seed", "迁移包指纹 seed 无效")
-        if browser.get("launch_options") != self._launch_options():
-            raise ProfileTransferError("launch_mismatch", "源与目标的浏览器启动身份参数不同")
+        if not isinstance(browser.get("launch_options"), dict):
+            raise ProfileTransferError("launch_options_unsupported", "迁移包浏览器启动参数无效")
+        self._launch_options(browser["launch_options"])
+        self._launch_options()
         runtime = browser.get("runtime")
-        if (
-            not isinstance(runtime, dict)
-            or not isinstance(runtime.get("chromium"), str)
-            or not runtime.get("chromium")
-            or any(runtime.get(key) != value for key, value in _runtime().items())
+        if not isinstance(runtime, dict) or any(
+            not isinstance(runtime.get(key), str) or not runtime[key].strip()
+            for key in ("cloakbrowser", "playwright", "chromium")
         ):
-            raise ProfileTransferError(
-                "runtime_mismatch", "请使用与源服务器相同版本的 Cloak 和 Playwright"
-            )
+            raise ProfileTransferError("invalid_runtime", "迁移包浏览器运行环境无效")
+        _runtime()
         try:
-            environment = EnvironmentSnapshot.from_json(json.dumps(browser["environment"]))
+            EnvironmentSnapshot.from_json(json.dumps(browser["environment"]))
         except (KeyError, TypeError, ValueError):
             raise ProfileTransferError("invalid_environment", "迁移包浏览器环境无效") from None
-        return account, browser, seed, environment, _scoped_state(bundle.get("storage_state"))
+        return account, browser, seed, _scoped_state(bundle.get("storage_state"))
 
-    async def _check_context(self, context, token, environment, browser):
-        if str(getattr(getattr(context, "browser", None), "version", "")) != browser["runtime"].get(
-            "chromium", ""
-        ):
-            raise ProfileTransferError("runtime_mismatch", "源与目标的 Chromium 版本不同")
-        actual = await self.refresher.verifier.environment_snapshot(context)
-        # Headed Chromium restores window bounds from its local Profile. A
-        # freshly reconstructed Profile has no such presentation preferences;
-        # compare the same identity fields as the existing viewer verifier.
-        identity_fields = ("user_agent", "language", "languages", "timezone", "platform")
-        if any(getattr(actual, field) != getattr(environment, field) for field in identity_fields):
-            raise ProfileTransferError("environment_mismatch", "目标浏览器环境与源登录环境不同")
+    async def _check_context(self, context, token):
+        # A new target records its own environment; subsequent opens must keep
+        # that local identity stable. Source OS/runtime settings are provenance.
         spec = await self.refresher.manager.spec(token.email)
         reason = await self.refresher.verifier.verify_environment(
             context, str(spec.profile_dir), allow_viewport_change=True
@@ -362,16 +355,19 @@ class ProfileTransfer:
         if reason != "environment_stable":
             raise ProfileNotReadyError(token.email, reason)
 
-    async def _cold_check(self, token, environment, browser):
+    async def _cold_check(self, token):
         async with self.refresher.manager.session(
             token.email, proxy_url=token.proxy_url
         ) as context:
-            await self._check_context(context, token, environment, browser)
+            await self._check_context(context, token)
             probe = TokenManagerAccountProbe(self.tokens, token)
             probe.set_context(context)
             result = await self.refresher.verifier.verify_account(token.email, probe)
             if result.reason != "account_ready" or not probe.validated_session:
-                raise ProfileNotReadyError(token.email, result.reason)
+                error = ProfileNotReadyError(token.email, result.reason)
+                if probe.network_step in PROFILE_NETWORK_STEPS:
+                    error.profile_network_step = probe.network_step
+                raise error
             rows = []
             for cookie in await context.cookies():
                 row = dict(cookie)
@@ -398,7 +394,7 @@ class ProfileTransfer:
             json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
 
-    def _resume_transfer(self, profile_dir, normalized, seed, binding, environment, proxy_url):
+    def _resume_transfer(self, profile_dir, normalized, seed, binding, legacy_binding, proxy_url):
         try:
             metadata = json.loads((profile_dir / "metadata.json").read_text(encoding="utf-8"))
             if (
@@ -416,15 +412,9 @@ class ProfileTransfer:
                 # we resume their persistent state without injecting it again.
                 manager = self.refresher.manager
                 manager._existing_spec(normalized)
-                existing_environment = EnvironmentSnapshot.from_json(
+                EnvironmentSnapshot.from_json(
                     (profile_dir / "environment_snapshot.json").read_text(encoding="utf-8")
                 )
-                identity_fields = ("user_agent", "language", "languages", "timezone", "platform")
-                if any(
-                    getattr(existing_environment, key) != getattr(environment, key)
-                    for key in identity_fields
-                ):
-                    raise ValueError
                 backend = manager.backend
                 backend._check_launch_settings(
                     profile_dir, backend._launch_options(profile_dir, proxy_url)
@@ -433,13 +423,13 @@ class ProfileTransfer:
             transfer = json.loads(transfer_path.read_text(encoding="utf-8"))
             if (
                 not isinstance(transfer, dict)
-                or transfer.get("binding_sha256") != binding
+                or transfer.get("binding_sha256") not in {binding, legacy_binding}
                 or not isinstance(transfer.get("state_imported"), bool)
                 or transfer.get("transfer_failure_reason")
                 not in FAILURE_REASONS | {"transfer_error", "cancelled"}
             ):
                 raise ValueError
-            return transfer
+            return {**transfer, "binding_sha256": binding}
         except (OSError, TypeError, ValueError, AttributeError):
             raise ProfileTransferError(
                 "profile_exists",
@@ -463,7 +453,7 @@ class ProfileTransfer:
             if on_stage is not None:
                 on_stage(value)
 
-        account, browser, seed, environment, state = self._validate(bundle)
+        account, browser, seed, state = self._validate(bundle)
         async with self._import_lock:
             email = account["email"].strip()
             if any(
@@ -492,7 +482,16 @@ class ProfileTransfer:
                 browser_profile_source="cloak",
             )
             token.proxy_url = await self.refresher._proxy_url(token)
-            binding = self._transfer_binding(email, seed, browser, token.proxy_url, proxy_pool_id)
+            binding = self._transfer_binding(
+                email,
+                seed,
+                {"launch_options": self._launch_options()},
+                token.proxy_url,
+                proxy_pool_id,
+            )
+            legacy_binding = self._transfer_binding(
+                email, seed, browser, token.proxy_url, proxy_pool_id
+            )
             resumed = profile_dir.exists()
             if resumed:
                 if profile_dir.resolve().parent != manager.root_dir.resolve():
@@ -500,7 +499,7 @@ class ProfileTransfer:
                         "profile_exists", "目标 Profile 路径异常，原资料已保留", 409
                     )
                 transfer = self._resume_transfer(
-                    profile_dir, normalized, seed, binding, environment, token.proxy_url
+                    profile_dir, normalized, seed, binding, legacy_binding, token.proxy_url
                 )
             else:
                 profile_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -536,10 +535,9 @@ class ProfileTransfer:
                     )
                 manager._write_metadata_file(transfer_path, transfer)
                 async with manager.session(email, proxy_url=token.proxy_url) as context:
-                    await self._check_context(context, token, environment, browser)
-                    # A valid exported Labs ST is useful compatibility material,
-                    # but admission must prove the portable Google login can
-                    # mint a fresh Labs session without replaying that ST.
+                    await self._check_context(context, token)
+                    # Restore only portable state; admission uses the current
+                    # Flow identity and credits RPCs in this fixed-proxy context.
                     if not transfer.get("state_imported"):
                         progress("restore_state")
                         if not callable(getattr(context, "set_storage_state", None)):
@@ -560,21 +558,22 @@ class ProfileTransfer:
                         await context.set_storage_state(state)
                         transfer["state_imported"] = True
                         manager._write_metadata_file(transfer_path, transfer)
-                    progress("oauth_renewal")
+                    progress("flow_verification")
                     renewed = await self.refresher.refresh_in_context(token, context, force=True)
                     if not renewed.get("_validated_session"):
                         raise ProfileTransferError(
-                            "renewal_unverified", "迁移登录态续签未通过校验", 422
+                            "renewal_unverified", "迁移 Flow 登录态未通过校验", 422
                         )
                 # Native state is injected once. Both reopen checks read only
                 # the persistent target Profile after normal close and slimming.
                 progress("cold_check_1")
-                validated = await self._cold_check(token, environment, browser)
+                validated = await self._cold_check(token)
                 progress("cold_check_2")
-                validated = await self._cold_check(token, environment, browser)
+                validated = await self._cold_check(token)
                 progress("save_account")
                 now = datetime.now(timezone.utc)
                 token = Token(
+                    st="profile-session:" + uuid.uuid4().hex,
                     **validated,
                     email=email,
                     name=email.split("@", 1)[0],
@@ -594,8 +593,6 @@ class ProfileTransfer:
                     browser_profile_source="cloak",
                     refresh_status="ready",
                     last_refresh_at=now,
-                    last_st_refresh_at=now,
-                    last_st_refresh_result="success",
                 )
                 token_id = await self.tokens.db.add_token(token)
                 token.id = token_id
@@ -610,18 +607,32 @@ class ProfileTransfer:
                     banned_at=now,
                 )
                 await manager.mark_verified(email)
+                token = await self.tokens.db.get_token(token_id)
+                expected = self.tokens._refresh_expected(token, token)
+                expected.update(auto_refresh_enabled=False, banned_at=token.banned_at)
                 if account["is_active"]:
                     progress("prepare_workspace")
                     await self.tokens._flow_call_for_token(
                         token, lambda: self.tokens.ensure_project_exists(token_id)
                     )
-                    await self.tokens.enable_token(token_id)
                 progress("finalize")
-                await self.tokens.db.update_token(
+                updates = {
+                    "auto_refresh_enabled": account["auto_refresh_enabled"],
+                    "next_refresh_at": now + timedelta(minutes=token.refresh_interval_minutes),
+                }
+                if account["is_active"]:
+                    updates.update(is_active=True, ban_reason=None, banned_at=None)
+                if not await self.tokens.db.update_token_if_credentials_match(
                     token_id,
-                    auto_refresh_enabled=account["auto_refresh_enabled"],
-                    next_refresh_at=max(now, validated["at_expires"] - timedelta(hours=1)),
-                )
+                    expected,
+                    expected_proxy_binding=(token.proxy_pool_id, token.proxy_url)
+                    if token.proxy_pool_id is not None
+                    else None,
+                    **updates,
+                ):
+                    raise ProfileTransferError(
+                        "account_changed", "账号配置已变化，已保留当前设置", 409
+                    )
                 self.tokens.notify_profile_ready(token_id)
                 manager._write_metadata_file(
                     transfer_path,
@@ -638,7 +649,7 @@ class ProfileTransfer:
                     "email": email,
                     "is_active": account["is_active"],
                     "validation": {
-                        "oauth_renewal": True,
+                        "flow_session_verified": True,
                         "cold_reopens": 2,
                         "identity_verified": True,
                     },
@@ -677,7 +688,7 @@ class ProfileTransfer:
                             "elapsed_seconds": elapsed,
                         },
                     )
-                if token_id is not None:
+                if token_id is not None and getattr(error, "code", "") != "account_changed":
                     await asyncio.shield(
                         self.tokens.db.update_token(
                             token_id,

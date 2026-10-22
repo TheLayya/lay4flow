@@ -185,6 +185,18 @@ class Database:
         """Add a new project"""
         return await self._accounts.add_project(project)
 
+    async def add_project_if_credentials_match(
+        self,
+        project: Project,
+        expected: Dict[str, Any],
+        *,
+        expected_proxy_binding: tuple[int, str] | None = None,
+    ) -> Optional[int]:
+        """Atomically retain the account and fixed-proxy binding of a project."""
+        return await self._accounts.add_project_if_credentials_match(
+            project, expected, expected_proxy_binding=expected_proxy_binding
+        )
+
     async def get_project_by_id(self, project_id: str) -> Optional[Project]:
         """Get project by UUID"""
         return await self._accounts.get_project_by_id(project_id)

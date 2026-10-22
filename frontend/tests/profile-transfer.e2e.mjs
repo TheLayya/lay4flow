@@ -76,23 +76,10 @@ await context.route('**/*', async (route) => {
     if (url.pathname === '/api/profile-login') return json(route, receipt)
     if (url.pathname === '/api/profile-browser/71')
         return route.fulfill({ contentType: 'text/html', body: '<p>Synthetic Cloak login</p>' })
-    if (url.pathname === '/api/profile-login/synthetic-session/complete') {
-        if (!completeReady)
-            return json(
-                route,
-                { detail: { error_code: 'login_required', message: 'Complete synthetic Google login first' } },
-                409,
-            )
-        accounts.push({
-            id: 71,
-            email: 'direct@example.test',
-            is_active: true,
-            credits: 1050,
-            browser_profile_source: 'cloak',
-            browser_profile_status: 'ready',
-            refresh_status: 'ready',
-        })
-        return json(route, { success: true, token_id: 71, email: 'direct@example.test', is_active: true })
+    if (url.pathname === '/api/profile-login/synthetic-session') {
+        if (!completeReady) return json(route, { success: true, status: 'waiting', message: '等待 Google 登录完成' })
+        if (!accounts.length) accounts.push({ id: 71, email: 'direct@example.test', is_active: true, credits: 1050, browser_profile_source: 'cloak', browser_profile_status: 'ready', refresh_status: 'ready' })
+        return json(route, { success: true, status: 'ready', result: { token_id: 71, email: 'direct@example.test', is_active: true } })
     }
     if (url.pathname === '/api/tokens/71/profile-export') return json(route, { success: true, bundle })
     if (url.pathname === '/api/profile-transfer/jobs') {
@@ -113,8 +100,8 @@ await context.route('**/*', async (route) => {
                 {
                     email: bundle.account.email,
                     state: 'running',
-                    stage: 'oauth_renewal',
-                    message: 'Google 登录态续签',
+                    stage: 'flow_verification',
+                    message: '验证 Flow 会话',
                     elapsed_seconds: 3,
                 },
             ],
@@ -148,29 +135,28 @@ const record = (text) => {
     console.log(`PASS ${text}`)
 }
 try {
-    await page.goto(`${base}/login#/accounts`)
+    await page.goto(`${base}/static/app/#/accounts`)
     await page.locator('.accounts-view h1').waitFor()
-    await page.locator('.page-actions').getByRole('button', { name: '添加账号', exact: true }).click()
-    await loginDialog().getByPlaceholder('name@gmail.com').fill('direct@example.test')
     const popupPromise = context.waitForEvent('page')
-    await loginDialog().getByRole('button', { name: '打开 Cloak 登录', exact: true }).click()
+    await page.locator('.page-actions').getByRole('button', { name: '添加账号', exact: true }).click()
     const popup = await popupPromise
     await popup.waitForURL(`${base}/api/profile-browser/71?viewer_id=synthetic-viewer`)
-    await loginDialog().getByRole('button', { name: '完成登录并添加', exact: true }).waitFor()
+    await loginDialog().getByText('等待登录', { exact: true }).waitFor()
+    assert.equal(await loginDialog().getByPlaceholder('name@gmail.com').count(), 0)
+    assert.equal(await loginDialog().getByRole('button', { name: '完成登录并添加', exact: true }).count(), 0)
     assert.ok(await page.evaluate(() => !!sessionStorage.getItem('lay4flow.profileLogin')))
-    record('Add account directly opens a scoped Cloak viewer without extension installation')
+    assert.deepEqual(requests.find((request) => request.path === '/api/profile-login').body, {})
+    record('Add account immediately opens Cloak without an email or manual completion')
 
     await page.reload()
     await page.getByRole('button', { name: '查看登录进度', exact: true }).click()
-    await loginDialog().getByRole('button', { name: '完成登录并添加', exact: true }).click()
-    await loginDialog().getByText('Complete synthetic Google login first', { exact: false }).waitFor()
-    assert.ok(await page.evaluate(() => !!sessionStorage.getItem('lay4flow.profileLogin')))
+    await loginDialog().getByText('等待 Google 登录完成', { exact: false }).waitFor()
     completeReady = true
-    await loginDialog().getByRole('button', { name: '完成登录并添加', exact: true }).click()
     await loginDialog().waitFor({ state: 'hidden' })
     await page.locator('.accounts-table').getByText('direct@example.test', { exact: true }).waitFor()
     assert.equal(await page.evaluate(() => sessionStorage.getItem('lay4flow.profileLogin')), null)
-    record('Reload resumes login; rejected verification keeps it open and successful verification adds the account')
+    assert.equal(requests.some((request) => request.path.endsWith('/complete')), false)
+    record('Reload resumes status polling and automatically adds the detected Google account')
 
     await page.getByRole('button', { name: '更多账号操作', exact: true }).click()
     const downloadPromise = page.waitForEvent('download')
@@ -206,9 +192,10 @@ try {
             {
                 email: bundle.account.email,
                 state: 'failed',
-                stage: 'oauth_renewal',
+                stage: 'flow_verification',
                 reason: 'transient_error',
-                message: 'Google 登录态续签失败：网络请求超时；目标资料已保留',
+                network_step: 'flow_bootstrap',
+                message: 'Flow 会话验证失败：网络请求超时；目标资料已保留',
                 elapsed_seconds: 10,
             },
         ],
@@ -220,7 +207,8 @@ try {
     const task = page.locator('.profile-import-job')
     await task.waitFor()
     if ((await task.getAttribute('open')) === null) await task.locator('summary').click()
-    await task.getByText('Google 登录态续签失败：网络请求超时；目标资料已保留', { exact: false }).waitFor()
+    await task.getByText('Flow 会话验证失败：网络请求超时；目标资料已保留', { exact: false }).waitFor()
+    await task.getByText('读取 Flow 会话', { exact: false }).waitFor()
     record('Navigation and reload recover progress and the specific failed result without resubmitting JSON')
 
     await task.getByRole('button', { name: /重试失败/ }).click()

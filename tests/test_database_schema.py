@@ -48,6 +48,9 @@ async def prepare_legacy_database(database):
             await connection.execute(f"DROP TABLE {table}")
         for table, column in (
             ("tokens", "refresh_status"),
+            ("tokens", "refresh_reason"),
+            ("tokens", "refresh_stage"),
+            ("tokens", "refresh_network_step"),
             ("tokens", "refresh_failures"),
             ("admin_config", "error_ban_threshold"),
             ("generation_config", "max_retries"),
@@ -148,6 +151,23 @@ class DatabaseSchemaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(token.ban_reason, "manual")
         self.assertEqual(token.refresh_status, "idle")
         self.assertEqual(token.refresh_failures, 0)
+        async with self.database._connect() as connection:
+            cursor = await connection.execute(
+                "SELECT refresh_reason, refresh_stage, refresh_network_step FROM tokens WHERE id = ?",
+                (token_id,),
+            )
+            self.assertEqual(await cursor.fetchone(), ("", "", ""))
+        await self.database.update_token(
+            token_id,
+            refresh_reason="transient_error",
+            refresh_stage="oauth_renewal",
+            refresh_network_step="oauth_signin",
+        )
+        token = await self.database.get_token(token_id)
+        self.assertEqual(
+            (token.refresh_reason, token.refresh_stage, token.refresh_network_step),
+            ("transient_error", "oauth_renewal", "oauth_signin"),
+        )
         self.assertEqual((await self.database.get_admin_config()).username, "legacy-admin")
         generation = await self.database.get_generation_config()
         self.assertEqual(

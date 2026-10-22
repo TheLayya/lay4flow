@@ -36,6 +36,8 @@ class TokenManager:
         self.flow_client = flow_client
         self.profile_refresher = profile_refresher
         self.profile_ready_callback = None
+        self.profile_delete_handler = None
+        self.account_delete_handler = None
         self.account_proxy_maintenance = None
         self._refresh_lock_guard = asyncio.Lock()
         self._project_lock_guard = asyncio.Lock()
@@ -173,9 +175,26 @@ class TokenManager:
         return self._at_validation_cache.get(int(token_id), 0) > time.monotonic()
 
     async def _st_to_at_for_token(self, token: Token, st: str) -> Dict[str, Any]:
+        if token.browser_profile_source == "cloak":
+            raise RefreshFailure(
+                "Cloak Profile requires browser session verification", "config_error"
+            )
         return await self._flow_call_for_token(token, lambda: self.flow_client.st_to_at(st))
 
-    async def _get_credits_for_token(self, token: Token, at: str) -> Dict[str, Any]:
+    async def _get_credits_for_token(self, token: Token, at: Optional[str]) -> Dict[str, Any]:
+        if token.browser_profile_source == "cloak":
+            if not await self._refresh_at(token.id, force=True):
+                latest = await self.db.get_token(token.id)
+                raise RefreshFailure(
+                    getattr(latest, "refresh_error", "") or "Cloak Profile verification failed",
+                    getattr(latest, "refresh_reason", "") or "transient_error",
+                )
+            latest = await self.db.get_token(token.id)
+            if latest is None:
+                raise RefreshFailure(
+                    "Account changed during Profile verification", "transient_error"
+                )
+            return {"credits": latest.credits, "userPaygateTier": latest.user_paygate_tier}
         return await self._flow_call_for_token(token, lambda: self.flow_client.get_credits(at))
 
     async def get_personal_warmup_project_ids(
@@ -195,6 +214,12 @@ class TokenManager:
         self, token: Token, pool_index: int, base_name: Optional[str] = None
     ) -> Project:
         """Create a new pooled project for a token and persist it."""
+        if token.browser_profile_source == "cloak":
+            from .browser.flow_projects import create_profile_project
+
+            return await create_profile_project(
+                self, token, self._build_project_name(pool_index, base_name)
+            )
         return await self._flow_call_for_token(
             token,
             lambda: self._project_pool.create_project_for_token(
@@ -224,7 +249,15 @@ class TokenManager:
         return await self.db.get_token(token_id)
 
     async def delete_token(self, token_id: int):
-        """Delete token"""
+        """Close account viewers before deleting their persistent Profile."""
+        if self.profile_delete_handler is not None:
+            return await self.profile_delete_handler(token_id)
+        await self._delete_token(token_id)
+
+    async def _delete_token(self, token_id: int):
+        """Delete a token after its interactive browser lease has been closed."""
+        if self.account_delete_handler is not None:
+            await self.account_delete_handler(token_id)
         token = await self.db.get_token(token_id)
         project_ids: List[str] = []
         if token:
@@ -241,16 +274,6 @@ class TokenManager:
             if project_id and project_id not in project_ids:
                 project_ids.append(project_id)
 
-        await self.db.delete_token(token_id)
-
-        if profile_refresher is not None and profile_email and profile_source == "cloak":
-            try:
-                await profile_refresher.remove_profile(profile_email)
-            except Exception as error:
-                debug_logger.log_warning(
-                    f"[DELETE_TOKEN] ?? Cloak Profile ??: {type(error).__name__}"
-                )
-
         refresh_task = self._refresh_futures.pop(token_id, None)
         self._refresh_intents.pop(token_id, None)
         if refresh_task and not refresh_task.done():
@@ -261,6 +284,11 @@ class TokenManager:
                 pass
             except Exception:
                 pass
+        if profile_refresher is not None and profile_email and profile_source == "cloak":
+            await profile_refresher.remove_profile(profile_email)
+
+        await self.db.delete_token(token_id)
+
         self._refresh_locks.pop(token_id, None)
         self._clear_at_validation_cache(token_id)
         self._project_pool.clear_token(token_id)
@@ -645,10 +673,7 @@ class TokenManager:
                 refresher = ProfileSessionRefresher(staged_manager, verifier, self)
                 result = await refresher.refresh_in_context(candidate, context, force=first)
                 first = False
-                validated = result.get("_validated_session")
-                if not validated or not validated.get("st") or not validated.get("at"):
-                    raise ValueError("新代理下的账号登录态校验未通过")
-                values = dict(validated)
+                values = self._profile_credential_updates(result)
                 if result.get("google_cookies"):
                     values["google_cookies"] = result["google_cookies"]
                 return values
@@ -670,14 +695,17 @@ class TokenManager:
                     refresh_error="",
                     refresh_failures=0,
                     last_refresh_at=now,
-                    last_st_refresh_at=now,
-                    last_st_refresh_result="success",
                     browser_profile_status="ready",
                     browser_profile_error="",
                     browser_profile_verified_at=now,
                     browser_profile_failures=0,
-                    next_refresh_at=max(
-                        now + timedelta(minutes=5), validated["at_expires"] - timedelta(hours=1)
+                    next_refresh_at=now
+                    + timedelta(
+                        minutes=self._normalize_refresh_interval(token.refresh_interval_minutes)
+                    ),
+                    browser_profile_next_at=now
+                    + timedelta(
+                        minutes=self._normalize_refresh_interval(token.refresh_interval_minutes)
                     ),
                 )
                 if not await self.db.update_token_if_credentials_match(
@@ -710,8 +738,45 @@ class TokenManager:
 
     # ========== AT自动刷新逻辑 (核心) ==========
 
+    def _profile_session_fresh(self, token: Token) -> bool:
+        if token.browser_profile_status != "ready" or token.refresh_status in {
+            "config_error",
+            "login_required",
+        }:
+            return False
+        verified = self._as_utc(token.browser_profile_verified_at)
+        if verified is None and token.refresh_status == "ready":
+            verified = self._as_utc(token.last_refresh_at)
+        if verified is None:
+            return False
+        now = datetime.now(timezone.utc)
+        interval = timedelta(
+            minutes=self._normalize_refresh_interval(token.refresh_interval_minutes)
+        )
+        return verified <= now and now - verified < interval
+
+    @staticmethod
+    def _profile_credential_updates(result: Dict[str, Any]) -> Dict[str, Any]:
+        validated = result.get("_validated_session")
+        if not isinstance(validated, dict):
+            raise RefreshFailure(
+                "Cloak Profile did not return verified credentials", "transient_error"
+            )
+        credits = validated.get("credits")
+        tier = validated.get("user_paygate_tier")
+        if (
+            type(credits) is not int
+            or credits < 0
+            or (tier is not None and not isinstance(tier, str))
+        ):
+            raise RefreshFailure("Cloak Profile returned invalid credits", "transient_error")
+        # Google Flow browser sessions do not supply a legacy NextAuth ST/AT.
+        return {"at": None, "at_expires": None, "credits": credits, "user_paygate_tier": tier}
+
     def _should_refresh_at(self, token: Token) -> bool:
         """根据当前 token 快照判断是否需要刷新 AT。"""
+        if token.browser_profile_source == "cloak":
+            return not self._profile_session_fresh(token)
         if not token.at:
             debug_logger.log_info(f"[AT_CHECK] Token {token.id}: AT不存在,需要刷新")
             return True
@@ -752,6 +817,21 @@ class TokenManager:
                 await self.resolve_account_proxy(token)
             except AccountProxyUnavailable:
                 return None
+
+        if token.browser_profile_source == "cloak":
+            token = await self.db.get_token(token.id)
+            if token is None or not token.is_active or token.browser_profile_source != "cloak":
+                return None
+            if self._profile_session_fresh(token):
+                return token
+            if await self._refresh_at(token.id):
+                latest = await self.db.get_token(token.id)
+                return (
+                    latest
+                    if latest and latest.is_active and self._profile_session_fresh(latest)
+                    else None
+                )
+            return None
 
         at_rejected = False
         if not self._should_refresh_at(token):
@@ -851,6 +931,8 @@ class TokenManager:
                 "protocol_mode",
                 "login_account",
                 "email",
+                "browser_profile_source",
+                "browser_profile_epoch",
             )
         }
         expected.update(is_active=latest.is_active, ban_reason=latest.ban_reason)
@@ -869,6 +951,10 @@ class TokenManager:
     async def _validate_refresh_session(
         self, token: Token, st: str, *, session: Dict[str, Any] | None = None
     ) -> Dict[str, Any]:
+        if token.browser_profile_source == "cloak":
+            raise RefreshFailure(
+                "Cloak Profile requires browser session verification", "config_error"
+            )
         if session is None:
             session = await self._st_to_at_for_token(token, st)
         at = str(session.get("access_token") or "").strip()
@@ -915,6 +1001,10 @@ class TokenManager:
     async def _try_protocol_refresh_st(self, token_id: int, token: Token) -> Dict[str, Any]:
         from .protocol_login import protocol_loginer
 
+        if token.browser_profile_source == "cloak":
+            raise RefreshFailure(
+                "Cloak Profile requires browser session verification", "config_error"
+            )
         try:
             proxy = await self.resolve_account_proxy(token)
         except ValueError as exc:
@@ -942,17 +1032,7 @@ class TokenManager:
         # renewal path once its stored AT/ST is stale; otherwise it can only
         # replay the expired Labs session forever.
         if token.google_cookies.strip():
-            try:
-                return await self._try_protocol_refresh_st(token_id, token)
-            except RefreshFailure as exc:
-                if token.browser_profile_source != "cloak" or exc.code not in {
-                    "invalid_cookies",
-                    "login_required",
-                    "session_invalid",
-                }:
-                    raise
-        if token.browser_profile_source == "cloak":
-            return await self._try_profile_refresh(token, force=force)
+            return await self._try_protocol_refresh_st(token_id, token)
         if token.protocol_mode == "protocol":
             if not token.google_cookies.strip():
                 raise RefreshFailure("未配置 Google Cookies", "invalid_cookies")
@@ -965,9 +1045,6 @@ class TokenManager:
         if self.profile_refresher is None:
             raise RefreshFailure("Cloak Profile 未配置", "config_error")
         try:
-            # Keep the regular path compatible with older injected refreshers;
-            # a forced refresh must be explicit so it cannot merely validate
-            # and reuse the current (possibly stale) session.
             if force:
                 result = await asyncio.wait_for(
                     self.profile_refresher.refresh(token, force=True), 90
@@ -981,11 +1058,7 @@ class TokenManager:
         except asyncio.TimeoutError as exc:
             raise RefreshFailure("Cloak Profile 校验超时", "transient_error") from exc
         except ProfileNotReadyError as exc:
-            if exc.reason == "login_required":
-                raise RefreshFailure(
-                    "服务器 Profile 需要重新登录或完成 Google 验证，请在账号列表打开该账号浏览器，登录后刷新凭据",
-                    "login_required",
-                ) from exc
+            network_step = str(getattr(exc, "profile_network_step", "") or "")
             code = (
                 "transient_error"
                 if exc.reason in {"transient_error", "account_probe_error", "timeout"}
@@ -993,7 +1066,20 @@ class TokenManager:
                 if exc.reason in {"login_required", "session_invalid"}
                 else "config_error"
             )
-            raise RefreshFailure(f"Cloak Profile 未通过校验: {exc.reason}", code) from exc
+            message = (
+                "服务器 Profile 需要重新登录或完成 Google 验证，请在账号列表打开该账号浏览器，登录后刷新凭据"
+                if exc.reason == "login_required"
+                else f"Cloak Profile 未通过校验: {exc.reason}"
+            )
+            failure = RefreshFailure(message, code)
+            failure.profile_reason = exc.reason
+            failure.profile_network_step = network_step
+            failure.profile_stage = (
+                "credits_probe"
+                if network_step == "flow_credits" or exc.reason == "credits_invalid"
+                else "session_probe"
+            )
+            raise failure from exc
         except Exception as exc:
             raise RefreshFailure("Cloak Profile 恢复异常", "transient_error") from exc
 
@@ -1002,9 +1088,7 @@ class TokenManager:
     ) -> Dict[str, Any]:
         if token.browser_profile_source == "cloak":
             result = await self._try_profile_refresh(token, force=force)
-            updates = result.get("_validated_session") or await self._validate_refresh_session(
-                token, result["session_token"]
-            )
+            updates = self._profile_credential_updates(result)
             if result.get("google_cookies"):
                 updates["google_cookies"] = result["google_cookies"]
             updates.update(
@@ -1012,8 +1096,6 @@ class TokenManager:
                 browser_profile_error="",
                 browser_profile_verified_at=datetime.now(timezone.utc),
                 browser_profile_failures=0,
-                last_st_refresh_at=datetime.now(timezone.utc),
-                last_st_refresh_result="success",
             )
             return updates
         if not refresh_st:
@@ -1062,19 +1144,9 @@ class TokenManager:
                 token, result["session_token"]
             )
         except RefreshFailure as exc:
-            if (
-                token.browser_profile_source == "cloak"
-                and not result.get("_profile_used")
-                and exc.code in {"session_invalid", "invalid_cookies"}
-            ):
-                result = await self._try_profile_refresh(token, force=force)
-                updates = result.get("_validated_session") or await self._validate_refresh_session(
-                    token, result["session_token"]
-                )
-            else:
-                if getattr(exc, "credential_updates", None) and result.get("google_cookies"):
-                    exc.credential_updates["google_cookies"] = result["google_cookies"]
-                raise
+            if getattr(exc, "credential_updates", None) and result.get("google_cookies"):
+                exc.credential_updates["google_cookies"] = result["google_cookies"]
+            raise
         if result.get("google_cookies"):
             updates["google_cookies"] = result["google_cookies"]
         if result.get("_profile_used"):
@@ -1136,12 +1208,19 @@ class TokenManager:
                         "proxy_pool_id",
                         "protocol_mode",
                         "login_account",
+                        "email",
+                        "browser_profile_source",
+                        "browser_profile_epoch",
                     )
                 ):
                     return False
                 now = datetime.now(timezone.utc)
-                due = updates["at_expires"] - timedelta(hours=1)
-                if token.browser_profile_source != "cloak":
+                if token.browser_profile_source == "cloak":
+                    due = now + timedelta(
+                        minutes=self._normalize_refresh_interval(token.refresh_interval_minutes)
+                    )
+                else:
+                    due = updates["at_expires"] - timedelta(hours=1)
                     interval = self._normalize_refresh_interval(token.refresh_interval_minutes)
                     due = min(
                         due,
@@ -1151,7 +1230,11 @@ class TokenManager:
                         ),
                     )
                 warning = updates.pop("_warning", None)
-                if not force and token.refresh_status in {"config_error", "login_required"}:
+                if (
+                    token.browser_profile_source != "cloak"
+                    and not force
+                    and token.refresh_status in {"config_error", "login_required"}
+                ):
                     warning = RefreshFailure(
                         token.refresh_error,
                         "invalid_cookies"
@@ -1161,10 +1244,15 @@ class TokenManager:
                 updates.update(
                     refresh_status="ready",
                     refresh_error="",
+                    refresh_reason="",
+                    refresh_stage="",
+                    refresh_network_step="",
                     refresh_failures=0,
                     last_refresh_at=now,
                     next_refresh_at=max(now + timedelta(minutes=5), due),
                 )
+                if token.browser_profile_source == "cloak":
+                    updates.update(next_refresh_at=due, browser_profile_next_at=due)
                 if warning:
                     updates.update(
                         refresh_status="config_error"
@@ -1210,6 +1298,9 @@ class TokenManager:
                         "proxy_pool_id",
                         "protocol_mode",
                         "login_account",
+                        "email",
+                        "browser_profile_source",
+                        "browser_profile_epoch",
                     )
                 ):
                     return False
@@ -1220,6 +1311,7 @@ class TokenManager:
                     "invalid_cookies": "config_error",
                     "invalid_proxy": "config_error",
                     "proxy_error": "config_error",
+                    "config_error": "config_error",
                     "login_required": "login_required",
                 }.get(code, "retrying")
                 # Bounded backoff survives restarts; per-account offset spreads retries.
@@ -1228,6 +1320,9 @@ class TokenManager:
                 updates = dict(
                     refresh_status=status,
                     refresh_error=error,
+                    refresh_reason=str(getattr(exc, "profile_reason", "") or code),
+                    refresh_stage=str(getattr(exc, "profile_stage", "") or ""),
+                    refresh_network_step=str(getattr(exc, "profile_network_step", "") or ""),
                     refresh_failures=failures,
                     last_refresh_at=now,
                     next_refresh_at=now + timedelta(seconds=delay)
@@ -1247,9 +1342,19 @@ class TokenManager:
                         browser_profile_next_at=updates["next_refresh_at"],
                     )
                 expires = self._as_utc(latest.at_expires)
-                if (
-                    not latest.at or not expires or expires <= now or self._is_auth_error(exc)
-                ) and latest.is_active:
+                if token.browser_profile_source == "cloak":
+                    # A network failure does not establish that a Google session expired.
+                    unusable = code != "transient_error"
+                    if not unusable and latest.browser_profile_verified_at is None:
+                        # Keep the last successful legacy timestamp from becoming the
+                        # failed attempt time when a ready Profile predates this field.
+                        updates["browser_profile_verified_at"] = token.last_refresh_at
+                    updates["browser_profile_next_at"] = updates["next_refresh_at"]
+                else:
+                    unusable = (
+                        not latest.at or not expires or expires <= now or self._is_auth_error(exc)
+                    )
+                if unusable and latest.is_active:
                     updates.update(is_active=False, ban_reason="refresh_failed", banned_at=now)
                 expected = self._refresh_expected(token, latest)
                 # Only identity-verified rotations are attached to this exception.
@@ -1511,6 +1616,18 @@ class TokenManager:
         token = await self.db.get_token(token_id)
         if not token:
             return 0
+
+        if token.browser_profile_source == "cloak":
+            if not token.is_active and token.ban_reason != "refresh_failed":
+                return 0
+            try:
+                result = await self._get_credits_for_token(token, None)
+                return result["credits"]
+            except Exception as exc:
+                debug_logger.log_error(
+                    f"Failed to refresh Profile credits for token {token_id}: {self._safe_refresh_error(exc)}"
+                )
+                return 0
 
         # 确保AT有效
         token = await self.ensure_valid_token(token)

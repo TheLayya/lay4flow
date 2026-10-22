@@ -41,7 +41,7 @@ class ProfileImportJobsTests(unittest.IsolatedAsyncioTestCase):
 
         async def import_bundle(value, *, on_stage, **kwargs):
             order.append(value["account"]["email"])
-            on_stage("oauth_renewal")
+            on_stage("flow_verification")
             opened.set()
             await release.wait()
             return {"success": True, "token_id": len(order)}
@@ -53,7 +53,7 @@ class ProfileImportJobsTests(unittest.IsolatedAsyncioTestCase):
         await opened.wait()
         self.assertEqual(order, ["first@example.invalid"])
         current = self.jobs.get("owner", first["id"])
-        self.assertEqual(current["items"][0]["stage"], "oauth_renewal")
+        self.assertEqual(current["items"][0]["stage"], "flow_verification")
         self.assertEqual(current["current"], 1)
         self.assertEqual(self.jobs.get("owner", second["id"])["state"], "queued")
         self.assertNotIn("synthetic-private-cookie", json.dumps(current))
