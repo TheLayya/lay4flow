@@ -31,7 +31,22 @@ $marker=Join-Path $InstallDir 'data\update-maintenance'
 $nativeStopped=$false
 
 function Log([string]$Message){Add-Content -LiteralPath $LogPath -Value $Message -Encoding UTF8; Write-Host $Message}
-function Run-Python([string[]]$Arguments){& $python @Arguments; if($LASTEXITCODE -ne 0){throw 'Native installer validation failed.'}}
+function Run-Python([string[]]$Arguments){
+  Log ('Running bundled Python: "' + $python + '" ' + ($Arguments -join ' '))
+  $savedErrorAction = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    $output = @(& $python @Arguments 2>&1 | ForEach-Object { [string]$_ })
+    $exitCode = $LASTEXITCODE
+  } finally { $ErrorActionPreference = $savedErrorAction }
+  foreach($line in $output){ if($line){ Log "Python: $line" } }
+  Log "Bundled Python exit code: $exitCode"
+  if($exitCode -ne 0){
+    $detail = (($output | Where-Object {$_}) -join ' ').Trim()
+    if(-not $detail){$detail='no diagnostic output'}
+    throw "Native installer validation failed (Python exit code $exitCode): $detail"
+  }
+}
 function Copy-Tree([string]$Source,[string]$Target){New-Item -ItemType Directory -Force -Path $Target | Out-Null; Get-ChildItem -LiteralPath $Source -Force | Copy-Item -Destination $Target -Recurse -Force}
 function Start-Native { & (Join-Path $InstallDir '.lay4flow-windows\start.ps1') -InstallDir $InstallDir -Port $Port -NoBrowser }
 function Check-Port([int]$Value){$socket=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,$Value); try{$socket.Start();return $true}catch{return $false}finally{$socket.Stop()}}

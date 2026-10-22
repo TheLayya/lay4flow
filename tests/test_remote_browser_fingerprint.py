@@ -9,8 +9,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from src.core.config import config
+from src.services.flow.remote_captcha import RemoteCaptchaError
 from src.services.flow_client import FlowClient
-
 
 FLOW_URL = "https://aisandbox-pa.googleapis.com/v1/flow/upsampleImage"
 REMOTE_UA = (
@@ -335,7 +335,8 @@ class RemoteBrowserFingerprintTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("synthetic solver failure")
 
         self.client._call_remote_browser_service = AsyncMock(side_effect=fail_response)
-        self.assertEqual(await self.client._get_recaptcha_token("project-3"), (None, None))
+        with self.assertRaises(RemoteCaptchaError):
+            await self.client._get_recaptcha_token("project-3")
         self.assertEqual(observed_context, [None, None])
         self.assertIsNone(self.client.get_request_fingerprint())
 
@@ -526,7 +527,8 @@ class RemoteBrowserFingerprintTests(unittest.IsolatedAsyncioTestCase):
                 },
             }
         )
-        self.assertEqual(await self.client._get_recaptcha_token("project-1"), (None, None))
+        with self.assertRaises(RemoteCaptchaError):
+            await self.client._get_recaptcha_token("project-1")
         self.assertIsNone(self.client.get_request_fingerprint())
         logs = repr(logger.mock_calls)
         self.assertNotIn("private-partial-token", logs)

@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from src.services.flow.browser_request import profile_http_request
+from src.services.flow.browser_request import profile_http_request, snapshot_http_request
 
 ORIGIN = "https://flow.google.com"
 PROXY = "http://fixture-user:fixture-password@proxy.invalid:8080"
@@ -137,6 +137,27 @@ class ProfileHTTPRequestTests(unittest.IsolatedAsyncioTestCase):
         self.proxy_closed.assert_called_once()
         self.context.new_page.assert_not_awaited()
         self.page.close.assert_not_awaited()
+
+    async def test_persisted_snapshot_needs_no_browser_and_reuses_http_connection(self):
+        rows = [browser_cookie("SID", "before"), browser_cookie("HOST", "host", "flow.google.com")]
+        self.session.request.side_effect = [
+            upstream("SID=rotated; Domain=.google.com; Path=/; Secure"),
+            upstream(),
+        ]
+        async with snapshot_http_request(
+            rows, {"user_agent": USER_AGENT, "languages": ["en-US", "en"]}, PROXY
+        ) as context:
+            await context.request.get(ORIGIN + "/")
+            await context.request.post(ORIGIN + "/_/rpc", form={"f.req": "fixture"})
+            self.assertIn(
+                "SID=rotated", self.session.request.await_args.kwargs["headers"]["Cookie"]
+            )
+            self.assertEqual({row["name"] for row in await context.cookies()}, {"SID", "HOST"})
+        self.assertEqual(self.session.request.await_count, 2)
+        self.session_closed.assert_called_once()
+        self.context.cookies.assert_not_awaited()
+        self.context.new_page.assert_not_awaited()
+        self.page.evaluate.assert_not_awaited()
 
     async def test_profile_identity_overrides_request_defaults_without_changing_page(self):
         async with profile_http_request(self.context, PROXY) as transport:

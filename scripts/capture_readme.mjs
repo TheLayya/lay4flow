@@ -238,7 +238,7 @@ try {
     await capture('login', '萌娘 lay 登录页与分层插画场景')
     authenticated = true
     await go('dashboard', '.dashboard-page h1')
-    await page.locator('.dashboard-overview-tabs').getByRole('button', { name: '趋势与额度', exact: true }).click()
+    await page.locator('.energy-panel').waitFor()
     await capture('dashboard', 'Flow 与 Vids 工坊总览、创作统计及可用额度')
     await go('studio', '.studio-view h1')
     await page.locator('.gallery-card').nth(5).waitFor()
@@ -280,8 +280,7 @@ try {
     await capture('accounts', 'Flow AT 自动刷新与 Vids 会话、独立额度一览')
     await page.locator('.account-drawer .el-drawer__close-btn').click()
     await page.locator('.account-drawer').waitFor({ state: 'hidden' })
-    await page.getByRole('button', { name: '更多账号操作', exact: true }).click()
-    await page.getByRole('menuitem', { name: '导入 JSON', exact: true }).click()
+    await page.getByRole('button', { name: '导入 JSON', exact: true }).click()
     await ready('.el-dialog:visible .import-text')
     const bundle = {
         format: 'lay4flow-profile-bundle', version: 1,

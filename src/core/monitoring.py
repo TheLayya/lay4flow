@@ -118,7 +118,7 @@ async def _probe_remote_browser_health(
     if not normalized:
         return False, 0.0
 
-    url = f"{normalized}/api/v1/health"
+    url = f"{normalized}/health"
     started_at = time.perf_counter()
 
     def do_request() -> tuple[int, str]:

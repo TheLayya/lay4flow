@@ -35,6 +35,7 @@ const checks = [],
     errors = [],
     blockedMutations = [],
     apiReads = []
+let tokenReadVersion = 0
 page.on('pageerror', (error) => errors.push(error.message))
 const record = (label) => {
     checks.push(label)
@@ -134,7 +135,10 @@ await context.route('**/*', (route) => {
     apiReads.push(url.pathname + url.search)
     if (url.pathname === '/api/stats')
         return json(route, { total_tokens: 6, active_tokens: 6, today_images: 0, today_videos: 0, today_errors: 0 })
-    if (url.pathname === '/api/tokens') return json(route, accounts)
+    if (url.pathname === '/api/tokens') {
+        tokenReadVersion++
+        return json(route, accounts.map((row) => ({ ...row, remark: `只读刷新 ${tokenReadVersion}` })))
+    }
     if (url.pathname === '/api/admin/vids/accounts/detail') return json(route, { accounts: vidsAccounts })
     if (url.pathname === '/api/admin/vids/onboard/candidates') return json(route, { accounts: [] })
     if (url.pathname === '/api/token-refresh/config')
@@ -206,6 +210,53 @@ try {
     )
     record('Desktop account list displays Flow and Vids health without opening details')
 
+    // A background poll replaces the table data with fresh row objects.  The
+    // current selection must survive that replacement, including Vids-only
+    // rows which are merged into the account list on the client.
+    const selectRow = async (email) => {
+        const row = page.locator('.accounts-table .el-table__body-wrapper tbody tr').filter({ hasText: email }).first()
+        await row.locator('td.el-table-column--selection .el-checkbox').click()
+    }
+    await selectRow('healthy@example.test')
+    await selectRow('vidsonly@example.test')
+    assert.match(await page.locator('.selection-bar').innerText(), /已选择\s*2\s*位成员/)
+    const refreshedAccounts = page.waitForResponse(
+        (response) => response.url() === `${base}/api/tokens` && response.request().method() === 'GET',
+    )
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+    await refreshedAccounts
+    await healthyRow.locator('.account-identity').filter({ hasText: `只读刷新 ${tokenReadVersion}` }).waitFor()
+    await page.locator('.selection-bar').filter({ hasText: '已选择' }).waitFor()
+    assert.match(
+        await page.locator('.selection-bar').innerText(),
+        /已选择\s*2\s*位成员/,
+        'Automatic account refresh must preserve selected Flow and Vids-only rows',
+    )
+    for (const email of ['healthy@example.test', 'vidsonly@example.test']) {
+        const row = page.locator('.accounts-table .el-table__body-wrapper tbody tr').filter({ hasText: email }).first()
+        assert.ok(await row.locator('td.el-table-column--selection input[type="checkbox"]').isChecked())
+    }
+    record('Automatic account refresh preserves selected Flow and Vids-only rows')
+
+    const nextRead = tokenReadVersion + 1
+    await page.locator('.page-heading').getByRole('button', { name: '刷新', exact: true }).click()
+    await healthyRow.locator('.account-identity').filter({ hasText: `只读刷新 ${nextRead}` }).waitFor()
+    assert.match(await page.locator('.selection-bar').innerText(), /已选择\s*2\s*位成员/)
+    const accountSearch = page.locator('.account-toolbar input').first()
+    await accountSearch.fill('healthy@example.test')
+    await page
+        .locator('.accounts-table .el-table__body-wrapper tbody tr')
+        .filter({ hasText: 'healthy@example.test' })
+        .waitFor()
+    assert.match(await page.locator('.selection-bar').innerText(), /已选择\s*2\s*位成员/)
+    await accountSearch.fill('')
+    const selectedVids = page
+        .locator('.accounts-table .el-table__body-wrapper tbody tr')
+        .filter({ hasText: 'vidsonly@example.test' })
+    await selectedVids.waitFor()
+    assert.ok(await selectedVids.locator('td.el-table-column--selection input[type="checkbox"]').isChecked())
+    record('Manual refresh and search filtering preserve the same selected account IDs')
+
     await open('healthy@example.test')
     const balances = drawer.locator('.account-balances')
     assert.match(
@@ -276,6 +327,10 @@ try {
     await close()
     await page.setViewportSize({ width: 390, height: 844 })
     const mobile = page.locator('.mobile-account').filter({ hasText: 'healthy@example.test' })
+    assert.ok(await mobile.getByRole('checkbox', { name: '选择 healthy@example.test', exact: true }).isChecked())
+    const mobileVids = page.locator('.mobile-account').filter({ hasText: 'vidsonly@example.test' })
+    assert.ok(await mobileVids.getByRole('checkbox', { name: '选择 vidsonly@example.test', exact: true }).isChecked())
+    record('Desktop selection remains checked after switching to the mobile account list')
     await mobile.locator('.mobile-account-health').waitFor()
     assert.match(
         await mobile.locator('.mobile-account-health').innerText(),

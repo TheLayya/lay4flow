@@ -7,7 +7,7 @@ const root=path.join(__dirname,'..');
 const viewerCode=fs.readFileSync(path.join(root,'static/js/profile_browser.js'),'utf8');
 const viewerHtml=fs.readFileSync(path.join(root,'static/profile-browser.html'),'utf8');
 
-function harness(){
+function harness(search=''){
     const elements=new Map(),events=new Map(),calls=[],intervals=new Map(),toasts=[],captures=new Map();
     const element=id=>{
         if(!elements.has(id))elements.set(id,{innerHTML:'',textContent:'',value:'',hidden:true,style:{},dataset:{},disabled:false,attributes:{},focusCount:0,
@@ -15,7 +15,7 @@ function harness(){
             classList:{add(){},remove(){},toggle(){}},addEventListener:(type,fn)=>events.set(id+':'+type,fn)});
         return elements.get(id);
     };
-    const location={origin:'https://example.test',protocol:'https:',pathname:'/api/profile-browser/4',href:'/api/profile-browser/4'};
+    const location={origin:'https://example.test',protocol:'https:',pathname:'/api/profile-browser/4',href:'/api/profile-browser/4'+search};
     const popup={closed:false,opener:{},document:{title:'',body:{}},location:{},close(){this.closed=true;}};
     let response={status:200,ok:true,json:async()=>({success:true,viewer_url:'/api/profile-browser/4'})};
     let popupBlocked=false;
@@ -30,7 +30,7 @@ function harness(){
     });
     // The exported viewer actions execute unchanged; RFB connection is covered by the import contract below.
     vm.runInContext(viewerCode.replace(/\nconnect\(\);\s*$/,''),context);
-    const ui=vm.runInContext('({connect,closeBrowser,pollStatus,refreshOpenCredentials,focusNativeBrowser,sendPasteText,pasteFromClipboard,disconnect,setBusy})',context);
+    const ui=vm.runInContext('({connect,closeBrowser,pollStatus,pollLoginStatus,refreshOpenCredentials,focusNativeBrowser,sendPasteText,pasteFromClipboard,disconnect,setBusy})',context);
     return {ui,popup,location,calls,toasts,elements,events,context,intervals,captures,
         respond:value=>response=value,blockPopup:()=>popupBlocked=true,
         clipboard:value=>clipboard=typeof value==='function'?value:async()=>value,clipboardReads:()=>clipboardReads};
@@ -49,6 +49,26 @@ function inputEvent(target,extra={}){
 async function flushPromises(){await Promise.resolve();await Promise.resolve();}
 
 async function main(){
+    const login=harness('?viewer_id=owned&login_session=login%2F1');
+    vm.runInContext('closed=true;',login.context);
+    for(const status of ['waiting','verifying','error']){
+        login.respond({status:200,ok:true,json:async()=>({success:true,status,message:'登录状态'})});
+        await login.ui.pollLoginStatus();
+        assert.ok(!login.calls.includes('window.close'),'login stays open until the account is verified: '+status);
+    }
+    login.respond({status:200,ok:true,json:async()=>({success:true,status:'ready',result:{token_id:4}})});
+    await login.ui.pollLoginStatus();
+    assert.equal(login.calls.filter(call=>call==='window.close').length,1);
+    assert.equal(login.calls[0].url,'/api/profile-login/login%2F1?viewer_id=owned');
+    login.events.get('pagehide')();
+    assert.ok(!login.calls.some(call=>call.options?.method==='DELETE'),'verified login closure never closes a newer browser session');
+    const finishedReads=login.calls.length;await login.ui.pollLoginStatus();
+    assert.equal(login.calls.length,finishedReads);
+    const manual=harness('?viewer_id=debug-viewer');
+    manual.respond({status:200,ok:true,json:async()=>({success:true,status:'closed'})});
+    await manual.ui.pollStatus();await manual.ui.pollLoginStatus();
+    assert.ok(!manual.calls.includes('window.close'),'ordinary debugging window does not inherit login auto-close');
+
     const native=harness();
     native.respond({status:200,ok:true,json:async()=>({success:true,status:'ready',presentation:'native'})});
     await native.ui.connect();

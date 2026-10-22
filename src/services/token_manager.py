@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import re
 import time
+import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -42,6 +43,7 @@ class TokenManager:
         self._refresh_lock_guard = asyncio.Lock()
         self._project_lock_guard = asyncio.Lock()
         self._refresh_locks: dict[int, asyncio.Lock] = {}
+        self._profile_cookie_locks: dict[int, asyncio.Lock] = {}
         self._project_pool = ProjectPool(db, flow_client, lambda: config.personal_project_pool_size)
         # Compatibility alias for callers that used the old private map.
         self._project_locks = self._project_pool._locks
@@ -342,6 +344,7 @@ class TokenManager:
         await self.db.delete_token(token_id)
 
         self._refresh_locks.pop(token_id, None)
+        self._profile_cookie_locks.pop(token_id, None)
         self._clear_at_validation_cache(token_id)
         self._project_pool.clear_token(token_id)
 
@@ -665,6 +668,8 @@ class TokenManager:
                 refresh_failures=0,
                 next_refresh_at=datetime.now(timezone.utc),
             )
+            if token.browser_profile_source == "cloak":
+                update_fields["browser_profile_epoch"] = uuid.uuid4().hex
         if token and token.ban_reason == "429_rate_limit":
             # 检查token是否过期
             is_expired = False
@@ -900,7 +905,11 @@ class TokenManager:
                     await self.resolve_account_proxy(token)
                 except AccountProxyUnavailable:
                     return None
-            if self._profile_session_fresh(token) and self.is_profile_validation_recent(token):
+            if (
+                token.google_cookies.strip()
+                and self._profile_session_fresh(token)
+                and self.is_profile_validation_recent(token)
+            ):
                 return token
             if await self._refresh_at(token.id, validation_only=True):
                 latest = await self.db.get_token(token.id)
@@ -1285,7 +1294,11 @@ class TokenManager:
                     and (not validation_only or token.refresh_status == "retrying")
                 ):
                     return False
-                if validation_only and self.is_profile_validation_recent(token):
+                if (
+                    validation_only
+                    and token.google_cookies.strip()
+                    and self.is_profile_validation_recent(token)
+                ):
                     return True
             if not await self.db.update_token_if_credentials_match(
                 token_id,

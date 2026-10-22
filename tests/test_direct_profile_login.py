@@ -183,6 +183,9 @@ class DirectProfileLoginTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result["success"])
         self.assertEqual(len(self.backend.flow_reads), 2)
+        self.assertIn(
+            "synthetic-google-login", (await self.db.get_token(receipt["token_id"])).google_cookies
+        )
         self.assertEqual(self.backend.opens, 3)
         self.assertEqual(self.backend.closed, 3)
         self.assertFalse(hasattr(self.refresher, "_renew_session"))

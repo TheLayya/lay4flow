@@ -1,6 +1,7 @@
 """Owner-bound direct Google login using the ordinary account Profile viewer."""
 
 import asyncio
+import json
 import re
 import secrets
 import time
@@ -8,6 +9,7 @@ from datetime import datetime, timezone
 
 from ...core.account_identity import same_google_identity
 from ...core.models import Token
+from ..flow.google_cookies import GoogleCookieJar
 from ..proxy_manager import ProxyManager
 from .profile_viewer import ViewerError
 from .token_account_probe import TokenManagerAccountProbe
@@ -347,9 +349,20 @@ class DirectProfileLogin:
                         ),
                     )
                     raise self._probe_failure(token, reason, network_step=probe.network_step)
+                rows = []
+                for cookie in await context.cookies():
+                    row = dict(cookie)
+                    row["hostOnly"] = not str(row.get("domain") or "").startswith(".")
+                    if row.get("expires", -1) > 0:
+                        row["expirationDate"] = row["expires"]
+                    rows.append(row)
+                validated = {
+                    **probe.validated_session,
+                    "google_cookies": json.dumps(GoogleCookieJar(rows).export()),
+                }
             expected = self.tokens._refresh_expected(token, token)
             if not await self.tokens.db.update_token_if_credentials_match(
-                token_id, expected, **probe.validated_session
+                token_id, expected, **validated
             ):
                 raise ViewerError(409, "账号配置已变化，请在账号列表核对")
             await manager.mark_verified(token.email)
@@ -363,6 +376,7 @@ class DirectProfileLogin:
                 at_expires=token.at_expires,
                 browser_profile_source="cloak",
             )
+            expected.pop("google_cookies", None)
             try:
                 await self.tokens._flow_call_for_token(
                     token, lambda: self.tokens.ensure_project_exists(token_id)

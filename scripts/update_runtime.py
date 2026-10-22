@@ -41,6 +41,18 @@ PRIVATE_PARTS = {
 }
 
 
+def filesystem_path(path: Path) -> Path:
+    """Keep nested Profile backups within Windows' extended-length namespace."""
+    if os.name != "nt":
+        return path
+    value = os.path.abspath(path)
+    if value.startswith("\\\\?\\"):
+        return Path(value)
+    if value.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + value[2:])
+    return Path("\\\\?\\" + value)
+
+
 def public_path(name: str) -> bool:
     if "\\" in name or ":" in name or "\x00" in name:
         return False
@@ -161,6 +173,7 @@ def snapshot(
     image_id: str = "",
     health_version: str | None = None,
 ) -> dict:
+    root, backup, candidate = map(filesystem_path, (root, backup, candidate))
     if backup.exists():
         raise ValueError("Backup directory already exists")
     backup.mkdir(parents=True)
@@ -223,6 +236,7 @@ def apply(root: Path, candidate: Path) -> None:
 
 
 def restore(root: Path, backup: Path, *, restore_data: bool = False) -> dict:
+    root, backup = map(filesystem_path, (root, backup))
     metadata = json.loads((backup / "metadata.json").read_text(encoding="utf-8"))
     for name in metadata["added_files"]:
         if public_path(name):

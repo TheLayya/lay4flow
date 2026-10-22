@@ -3,7 +3,7 @@
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from src.services.flow.flow_rpc import (
     CREDITS_RPC,
@@ -51,6 +51,37 @@ def rpc(rpcid, payload, *, framed=True):
 
 
 class FlowRPCTests(unittest.IsolatedAsyncioTestCase):
+    async def test_http_session_reuses_bootstrap_per_path_with_bounded_lifetime(self):
+        context = self.context()
+        context.flow_bootstrap_cache = {}
+        context.request.post.side_effect = None
+        context.request.post.return_value = rpc("jwpduf", ["fixture"])
+        with patch("src.services.flow.flow_rpc.time.monotonic", return_value=100):
+            for _ in range(3):
+                await flow_rpc(context, "jwpduf", [], expected_email=EMAIL)
+        self.assertEqual(context.request.get.await_count, 1)
+        with patch("src.services.flow.flow_rpc.time.monotonic", return_value=161):
+            await flow_rpc(context, "jwpduf", [], expected_email=EMAIL)
+            await flow_rpc(context, "jwpduf", [], expected_email=EMAIL, source_path="/project/p")
+        self.assertEqual(context.request.get.await_count, 3)
+
+    async def test_cached_bootstrap_still_checks_identity_and_error_invalidates_without_replay(
+        self,
+    ):
+        context = self.context()
+        context.flow_bootstrap_cache = {}
+        context.request.post.side_effect = None
+        context.request.post.return_value = rpc("jwpduf", [])
+        await flow_rpc(context, "jwpduf", [], expected_email=EMAIL)
+        with self.assertRaises(FlowRPCError):
+            await flow_rpc(context, "ogiZ0b", [], expected_email="other@gmail.com")
+        self.assertEqual(context.request.post.await_count, 1)
+        context.request.post.return_value = response(status=401, url=RPC_URL)
+        with self.assertRaises(FlowRPCError):
+            await flow_rpc(context, "ogiZ0b", [], expected_email=EMAIL)
+        self.assertEqual(context.request.post.await_count, 2)
+        self.assertEqual(context.flow_bootstrap_cache, {})
+
     async def test_generation_bootstrap_rejects_changed_identity_before_write(self):
         context = SimpleNamespace(
             request=SimpleNamespace(
@@ -413,6 +444,7 @@ class FlowRPCTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.rpc_code, 13)
         self.assertEqual(error.public_error, "PUBLIC_ERROR_UNUSUAL_ACTIVITY")
         self.assertTrue(error.retryable)
+        self.assertTrue(error.submission_rejected)
         self.assertNotIn("private-status-message", str(error))
         self.assertEqual(context.request.post.await_count, 1)
 
@@ -434,6 +466,72 @@ class FlowRPCTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.public_error, "PUBLIC_ERROR_UNSAFE_GENERATION")
         self.assertFalse(caught.exception.retryable)
         self.assertEqual(context.request.post.await_count, 1)
+
+    async def test_permission_denied_uses_typed_public_error_before_login_classification(self):
+        for code, enum, reason, retryable in (
+            (7, 49, "transient_error", True),
+            (7, 50, "transient_error", True),
+            (403, 49, "transient_error", True),
+            (7, 1, "rpc_rejected", False),
+            (7, 11, "rpc_rejected", False),
+            (7, None, "login_required", False),
+            (16, None, "login_required", False),
+            (401, None, "login_required", False),
+            (16, 49, "login_required", False),
+            (401, 49, "login_required", False),
+        ):
+            with self.subTest(code=code, enum=enum):
+                details = (
+                    []
+                    if enum is None
+                    else [
+                        [
+                            "type.googleapis.com/google.internal.labs.aisandbox.proto.common.v1.PublicAitkError",
+                            [enum],
+                        ]
+                    ]
+                )
+                row = [
+                    "wrb.fr",
+                    "ogiZ0b",
+                    None,
+                    None,
+                    None,
+                    [code, "private-status-message", details],
+                ]
+                context = self.context()
+                context.request.post.side_effect = None
+                context.request.post.return_value = response(json.dumps([row]), url=RPC_URL)
+                with self.assertRaises(FlowRPCError) as caught:
+                    await flow_rpc(context, "ogiZ0b", [])
+                self.assertEqual(caught.exception.reason, reason)
+                self.assertEqual(caught.exception.retryable, retryable)
+                self.assertNotIn("private-status-message", str(caught.exception))
+                self.assertEqual(context.request.post.await_count, 1)
+
+    async def test_mixed_or_incomplete_response_does_not_confirm_write_rejection(self):
+        error_row = [
+            "wrb.fr",
+            "ogiZ0b",
+            None,
+            None,
+            None,
+            [7, "private-message", ["PUBLIC_ERROR_UNUSUAL_ACTIVITY"]],
+        ]
+        success_row = ["wrb.fr", "ogiZ0b", "[[]]", None, None, None]
+        combined_row = [*error_row[:2], "[[]]", *error_row[3:]]
+        for text in (
+            json.dumps([error_row, success_row]),
+            json.dumps([combined_row]),
+            json.dumps([error_row]) + "[",
+        ):
+            context = self.context()
+            context.request.post.side_effect = None
+            context.request.post.return_value = response(text, url=RPC_URL)
+            with self.assertRaises(FlowRPCError) as caught:
+                await flow_rpc(context, "ogiZ0b", [])
+            self.assertFalse(caught.exception.submission_rejected)
+            self.assertEqual(context.request.post.await_count, 1)
 
     async def test_unknown_public_error_string_is_not_reflected_and_auth_xsrf_is_not_replayed(self):
         for rows, reason in (

@@ -230,22 +230,16 @@ try {
     record('Sidebar collapse, command palette navigation and status drawer')
 
     await go('accounts')
-    await page.locator('.page-actions').getByRole('button', { name: '添加账号', exact: true }).click()
-    await page.getByRole('dialog').filter({ hasText: 'Cloak 登录账号' }).waitFor()
-    await page.getByRole('button', { name: '打开 Cloak 登录', exact: true }).click()
-    await waitText(page.locator('.el-message'), '请填写要登录的 Google 账号邮箱')
-    await page
-        .getByRole('dialog')
-        .filter({ hasText: 'Cloak 登录账号' })
-        .getByRole('button', { name: '关闭', exact: true })
-        .click()
-    await page.getByRole('button', { name: '更多账号操作', exact: true }).click()
-    await page.getByRole('menuitem', { name: '手动添加 ST / Cookies', exact: true }).click()
-    await page.locator('.el-drawer:visible').waitFor()
-    await page.locator('.el-drawer:visible').getByRole('button', { name: '验证并添加账号', exact: true }).click()
-    await waitText(page.locator('.el-form-item__error'), '请填写 Session Token')
-    await page.locator('.el-drawer:visible .el-drawer__close-btn').click()
-    record('Account creation validates Session Token before any request')
+    assert.ok(await page.locator('.page-actions').getByRole('button', { name: '添加账号', exact: true }).isVisible())
+    assert.ok(await page.getByRole('button', { name: '导入 JSON', exact: true }).isVisible())
+    assert.equal(await page.getByRole('button', { name: '导出全部账号', exact: true }).isEnabled(), false)
+    assert.equal(await page.getByRole('button', { name: '更多账号操作', exact: true }).count(), 0)
+    await page.getByRole('button', { name: '导入 JSON', exact: true }).click()
+    const importDialog = page.getByRole('dialog').filter({ hasText: '导入账号 Profile' })
+    await importDialog.waitFor()
+    assert.equal(await importDialog.getByRole('button', { name: '后台导入', exact: true }).isEnabled(), false)
+    await importDialog.getByRole('button', { name: '关闭', exact: true }).click()
+    record('Account toolbar exposes Profile import/export and empty imports stay disabled')
     await go('settings')
     for (const label of ['基础与访问', '生成与调度', '验证码服务', '媒体缓存', '运行诊断']) {
         await page.locator('.settings-nav button').filter({ hasText: label }).click()
@@ -315,7 +309,7 @@ try {
         'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
         'base64',
     )
-    let createPosts = 0,
+    let accountEdits = 0,
         settingSaves = 0,
         flowPosts = 0,
         vidsPosts = 0,
@@ -347,17 +341,14 @@ try {
             ]),
         )
     await context.route('**/api/tokens', (route) =>
-        route.request().method() === 'GET'
-            ? json(route, failTokens ? { detail: 'Synthetic refresh interruption' } : accounts, failTokens ? 503 : 200)
-            : (createPosts++,
-              accounts.push({
-                  ...accounts[0],
-                  id: 42,
-                  email: 'new-member@example.test',
-                  st: route.request().postDataJSON().st,
-              }),
-              json(route, { success: true, id: 42 })),
+        json(route, failTokens ? { detail: 'Synthetic refresh interruption' } : accounts, failTokens ? 503 : 200),
     )
+    await context.route('**/api/tokens/41', (route) => {
+        assert.equal(route.request().method(), 'PUT')
+        accountEdits++
+        Object.assign(accounts[0], route.request().postDataJSON())
+        return json(route, { success: true })
+    })
     await context.route('**/api/tokens/41/disable', (route) => {
         accounts[0].is_active = false
         return json(route, { success: true })
@@ -535,13 +526,13 @@ try {
     await page.locator('.page-actions').getByRole('button', { name: '刷新', exact: true }).click()
     await waitText(quotaCell, '已自动同步')
     record('Vids quotas auto-refresh, remain directly visible on desktop/mobile and retain values on refresh failure')
-    await page.getByRole('button', { name: '更多账号操作', exact: true }).click()
-    await page.getByRole('menuitem', { name: '手动添加 ST / Cookies', exact: true }).click()
-    await page.getByPlaceholder('输入 Google Flow 的 Session Token').fill('fixture-new-session')
-    await page.locator('.el-drawer:visible').getByRole('button', { name: '验证并添加账号', exact: true }).click()
+    await page.getByRole('button', { name: '操作 koharu@example.test', exact: true }).click()
+    await page.getByRole('menuitem', { name: '编辑配置', exact: true }).click()
+    await page.getByPlaceholder('输入 Google Flow 的 Session Token').fill('fixture-updated-session')
+    await page.locator('.el-drawer:visible').getByRole('button', { name: '保存成员配置', exact: true }).click()
     await page.locator('.el-drawer:visible').waitFor({ state: 'hidden' })
-    assert.equal(createPosts, 1)
-    await waitText(page.locator('.accounts-table'), 'new-member@example.test')
+    assert.equal(accountEdits, 1)
+    assert.equal(accounts[0].st, 'fixture-updated-session')
     await page.getByRole('button', { name: '操作 koharu@example.test', exact: true }).click()
     await page.getByRole('menuitem', { name: '暂停账号', exact: true }).click()
     assert.equal(accounts[0].is_active, false)
@@ -550,7 +541,7 @@ try {
     await waitText(page.locator('.account-alert'), 'Synthetic refresh interruption')
     await waitText(page.locator('.accounts-table'), 'koharu@example.test')
     failTokens = false
-    record('Mocked account create and pause actions update the Vue table')
+    record('Mocked account edit and pause actions update the Vue table')
     await go('settings')
     await page.locator('.settings-nav button').filter({ hasText: '生成与调度' }).click()
     await page.getByRole('button', { name: '保存生成配置', exact: true }).click()

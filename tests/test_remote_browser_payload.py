@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from src.core.config import REMOTE_BROWSER_BASE_URL, Config, config
+from src.services.flow.remote_captcha import RemoteCaptchaError
 from src.services.flow_client import FlowClient
 
 
@@ -62,9 +63,74 @@ class RemoteBrowserPayloadTests(unittest.IsolatedAsyncioTestCase):
             method="POST",
             url=f"{REMOTE_BROWSER_BASE_URL}/api/v1/solve",
             headers={"Authorization": "Bearer synthetic-solver-key"},
-            payload={"project_id": "project-123", "action": "IMAGE_GENERATION", "token_id": 42},
+            payload={
+                "clientKey": "synthetic-solver-key",
+                "type": "RecaptchaV3TaskProxyless",
+                "pageAction": "IMAGE_GENERATION",
+                "project_id": "project-123",
+                "action": "IMAGE_GENERATION",
+                "token_id": 42,
+            },
             timeout=35,
         )
+
+    async def test_callbacks_authenticate_with_same_client_key_in_body(self):
+        self.client._sync_json_http_request = AsyncMock(return_value=(200, {"errorId": 0}, ""))
+        await self.client._notify_browser_captcha_request_finished("synthetic-session")
+        call = self.client._sync_json_http_request.await_args.kwargs
+        self.assertEqual(
+            call["payload"], {"status": "success", "clientKey": "synthetic-solver-key"}
+        )
+
+    async def test_missing_prefill_endpoint_is_probed_once_without_solving(self):
+        self.client._sync_json_http_request = AsyncMock(
+            return_value=(404, {"detail": "Not Found"}, "")
+        )
+        self.assertFalse(await self.client.prefill_remote_browser_pool("first"))
+        self.assertFalse(await self.client.prefill_remote_browser_pool("second"))
+        self.client._sync_json_http_request.assert_awaited_once()
+        self.assertTrue(
+            self.client._sync_json_http_request.await_args.kwargs["url"].endswith("/prefill")
+        )
+
+    async def test_http_200_provider_errors_survive_without_secret_descriptions(self):
+        for code in ("ERROR_IP_NOT_ALLOWED", "ERROR_ZERO_BALANCE", "ERROR_NO_SLOT_AVAILABLE"):
+            self.client._sync_json_http_request = AsyncMock(
+                return_value=(
+                    200,
+                    {
+                        "errorId": 1,
+                        "errorCode": code,
+                        "errorDescription": "synthetic-secret-key token=private-cookie",
+                    },
+                    "",
+                )
+            )
+            with self.assertRaises(RemoteCaptchaError) as caught:
+                await self.client._get_recaptcha_token("project", action="VIDEO_GENERATION")
+            self.assertEqual(caught.exception.code, code)
+            self.assertNotIn("private-cookie", str(caught.exception))
+            self.assertNotIn("synthetic-secret-key", str(caught.exception))
+            self.assertIsNone(self.client.get_request_fingerprint())
+
+    async def test_malformed_result_and_transport_error_are_bounded(self):
+        for result, code in (
+            ((200, {"token": "private-token"}, ""), "MISSING_TOKEN_OR_SESSION"),
+            (
+                (503, {"errorCode": "private-secret", "detail": "private-cookie"}, ""),
+                "SOLVE_REJECTED",
+            ),
+            ((200, [], "private-html"), "INVALID_RESPONSE"),
+        ):
+            self.client._sync_json_http_request = AsyncMock(return_value=result)
+            with self.assertRaises(RemoteCaptchaError) as caught:
+                await self.client._get_recaptcha_token("project")
+            self.assertEqual(caught.exception.code, code)
+            self.assertNotIn("private", str(caught.exception))
+        self.client._sync_json_http_request = AsyncMock(side_effect=TimeoutError("private-key"))
+        with self.assertRaises(RemoteCaptchaError) as caught:
+            await self.client._get_recaptcha_token("project")
+        self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
 
     async def test_nested_valid_values_win_and_empty_values_fall_back_to_top_level(self):
         cookies = [{"name": "NID", "value": "new-cookie", "domain": ".google.com", "path": "/"}]

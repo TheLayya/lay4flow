@@ -152,11 +152,20 @@ test('orphan Vids-only rows can be deleted individually and in a mixed bulk dele
     const fixture = view('Accounts', {
         api: {
             get: accountReads([]),
-            delete: async (path) => { deletes.push(path); return { success: true } },
+            delete: async (path) => {
+                deletes.push(path)
+                return { success: true }
+            },
         },
     })
     const s = fixture.state
-    const orphan = { id: 4, email: '', vidsOnly: true, vids: { token_id: 4, identity_verified: false }, is_active: false }
+    const orphan = {
+        id: 4,
+        email: '',
+        vidsOnly: true,
+        vids: { token_id: 4, identity_verified: false },
+        is_active: false,
+    }
     const flow = { id: 2, email: 'flow@fixture.local', is_active: true }
     s.accounts.value = [flow]
     s.vids.value = [orphan.vids]
@@ -198,12 +207,15 @@ test('settings overview searches field labels without changing drafts and counts
     assert.equal(s.matchingCards.value.length, 10)
     assert.equal(s.dirtyCount.value, 3)
     assert.equal(s.sectionVisible('general'), true)
-    assert.equal(s.sectionVisible('generation'), false)
+    assert.equal(s.sectionVisible('generation'), true)
     s.jumpToSection('generation')
     assert.equal(s.sectionVisible('general'), false)
     assert.equal(s.sectionVisible('generation'), true)
     assert.equal(s.generation.image_timeout, 480)
     assert.equal(s.newKey.value, 'fixture-new-key')
+    s.jumpToSection('all')
+    assert.equal(s.sectionVisible('general'), true)
+    assert.equal(s.sectionVisible('generation'), true)
 })
 
 test('release information is local on load and checks online versions only on request', async () => {
@@ -924,6 +936,102 @@ test('account proxy labels keep credentials and copies intact while quick drafts
     assert.deepEqual(copied, [proxy.proxy_url, 'user@test', 'p%/a:ss'])
 })
 
+test('list capability toggles save only the clicked field, suppress duplicate writes and preserve other drafts', async () => {
+    const response = deferred()
+    const writes = []
+    const fixture = view('Accounts', {
+        api: {
+            put: async (path, body) => {
+                writes.push({ path, body: plain(body) })
+                return response.promise
+            },
+        },
+    })
+    const s = fixture.state
+    const row = { id: 12, is_active: true, image_enabled: true, video_enabled: true, remark: 'original' }
+    s.accounts.value = [row]
+    s.vids.value = [{ token_id: 12, enabled: true, image_enabled: true, video_enabled: true }]
+    s.quickDraft(row).remark = 'keep unsaved note'
+    const operation = s.toggleAccountSetting(row, 'image_enabled', false)
+    await s.toggleAccountSetting(row, 'image_enabled', false)
+    await s.toggleAccountSetting(row, 'video_enabled', false)
+    assert.deepEqual(writes, [{ path: '/api/tokens/12', body: { image_enabled: false } }])
+    assert.equal(s.accountSettingBusy(row), true)
+    assert.equal(s.accounts.value[0].image_enabled, true, 'Pending writes keep the last saved state')
+    response.resolve({ success: true })
+    await operation
+    assert.equal(s.accounts.value[0].image_enabled, false)
+    assert.equal(s.vids.value[0].image_enabled, false)
+    assert.equal(s.quickDraft(row).image_enabled, false)
+    assert.equal(s.quickDraft(row).remark, 'keep unsaved note')
+    assert.equal(s.accounts.value[0].video_enabled, true)
+    assert.equal(s.accountSettingBusy(row), false)
+})
+
+test('list status toggle uses validated enable and disable routes and retains state after rejection', async () => {
+    const writes = []
+    let rejectEnable = true
+    const fixture = view('Accounts', {
+        api: {
+            post: async (path, body) => {
+                writes.push({ path, body: plain(body) })
+                return path.endsWith('/enable') && rejectEnable
+                    ? { success: false, message: '请重新登录后再启用' }
+                    : { success: true }
+            },
+        },
+    })
+    const s = fixture.state
+    const row = { id: 4, is_active: true }
+    s.accounts.value = [row]
+    s.vids.value = [{ token_id: 4, enabled: true }]
+    await s.toggleAccountSetting(row, 'is_active', false)
+    assert.equal(s.accounts.value[0].is_active, false)
+    assert.equal(s.vids.value[0].enabled, false)
+    await s.toggleAccountSetting(s.accounts.value[0], 'is_active', true)
+    assert.equal(s.accounts.value[0].is_active, false)
+    assert.match(fixture.errors.at(-1).message, /重新登录/)
+    assert.equal(s.accountSettingBusy(row), false)
+    rejectEnable = false
+    await s.toggleAccountSetting(s.accounts.value[0], 'is_active', true)
+    assert.equal(s.accounts.value[0].is_active, true)
+    assert.deepEqual(
+        writes.map((write) => write.path),
+        ['/api/tokens/4/disable', '/api/tokens/4/enable', '/api/tokens/4/enable'],
+    )
+    await s.toggleAccountSetting({ ...row, vidsOnly: true }, 'is_active', false)
+    await s.toggleAccountSetting(row, 'proxy_url', false)
+    assert.equal(writes.length, 3, 'Vids-only records and unrelated settings do not write through inline toggles')
+})
+
+test('list toggle waits out old polling and invalidates concurrent stale account reads', async () => {
+    const oldRead = deferred()
+    const write = deferred()
+    const fixture = view('Accounts', {
+        api: { get: accountReads([]), put: async () => write.promise },
+    })
+    const s = fixture.state
+    const row = { id: 19, image_enabled: true }
+    s.accounts.value = [row]
+    fixture.api.get = async (path) =>
+        path === '/api/tokens'
+            ? oldRead.promise
+            : path.includes('/vids/')
+              ? { accounts: [] }
+              : path.includes('/proxy/')
+                ? { entries: [] }
+                : { config: {} }
+    const polling = s.load(true)
+    const operation = s.toggleAccountSetting(row, 'image_enabled', false)
+    oldRead.resolve([row])
+    await polling
+    await nextTick()
+    write.resolve({ success: true })
+    await operation
+    assert.equal(s.accounts.value[0].image_enabled, false)
+    assert.equal(s.accountSettingBusy(row), false)
+})
+
 test('account polling updates untouched quick fields while retaining pending edits', async () => {
     const { state: s } = view('Accounts')
     const account = { id: 17, proxy_pool_id: 1, remark: 'original', video_enabled: true }
@@ -1197,6 +1305,34 @@ test('account quotas distinguish zero, unknown, stale and partial totals while s
     assert.equal(reads, 0)
 })
 
+test('account selection follows IDs across refreshes and uses current rows while pruning removed accounts', async () => {
+    const { state: s } = view('Accounts')
+    s.accounts.value = [{ id: 1, email: 'selected@example.test', image_enabled: true }, { id: 2 }]
+    s.vids.value = [{ token_id: 3, email: 'vids-only@example.test', enabled: true }]
+    s.updateAccountSelection([s.rows.value[0], s.rows.value[2]])
+    await nextTick()
+    const previous = [...s.selected.value]
+    const removed = []
+    s.accountsTable.value = {
+        getSelectionRows: () => previous,
+        toggleRowSelection: (row, checked) => removed.push([row.id, checked]),
+    }
+    s.accounts.value = [{ id: 1, email: 'selected@example.test', image_enabled: false }, { id: 2 }]
+    s.vids.value = [{ token_id: 3, email: 'vids-only@example.test', enabled: false }]
+    await nextTick()
+    assert.deepEqual(plain(s.selected.value.map((row) => row.id)), [1, 3])
+    assert.equal(s.selected.value[0].image_enabled, false)
+    assert.equal(s.selected.value[1].is_active, false)
+    s.accounts.value = [{ id: 2 }]
+    await nextTick()
+    assert.deepEqual(plain(s.selected.value.map((row) => row.id)), [3])
+    assert.deepEqual(removed, [[1, false]])
+    s.updateAccountSelection([])
+    s.vids.value = [{ token_id: 3, enabled: true }]
+    await nextTick()
+    assert.equal(s.selected.value.length, 0)
+})
+
 test('account overview gives priority to paused, identity and Profile failures instead of a cached ready state', () => {
     const { state: s } = view('Accounts')
     assert.equal(s.vidsState(), '未接入')
@@ -1304,7 +1440,10 @@ test('late log details and pre-clear polls never overwrite the current selection
 test('invalid account input stops before API requests and rejected imports do not mutate local accounts', async () => {
     const fixture = view('Accounts')
     const s = fixture.state
-    s.openEditor()
+    // Account creation is handled by Cloak login; the editor only updates an
+    // existing member. Keep the validation check on that supported path.
+    const account = { id: 7, email: 'member@fixture.local', st: 'synthetic-st' }
+    s.openEditor(account)
     s.formRef.value = {
         validate: async () => {
             throw new Error('field required')
@@ -1312,6 +1451,8 @@ test('invalid account input stops before API requests and rejected imports do no
     }
     await s.saveAccount()
     assert.equal(fixture.requests.length, 0)
+    assert.equal(s.editorOpen.value, true)
+    assert.equal(s.saving.value, false)
     s.accounts.value = [{ id: 1, email: 'owner@fixture.local', st: 'synthetic' }]
     s.importText.value = '[{"session_token":"rejected-synthetic"}]'
     await s.importAccounts()
@@ -1325,14 +1466,34 @@ test('invalid account input stops before API requests and rejected imports do no
 test('Cloak login opens without an email and automatically completes from its scoped status', async () => {
     const writes = []
     const reads = []
-    const viewer = { document: { body: {} }, location: {}, close() { this.closed = true } }
-    const receipt = { success: true, session_id: 'fixture-session', token_id: 71, viewer_id: 'fixture-viewer', viewer_url: '/api/profile-browser/71', expires_at: '2099-01-01T00:00:00Z' }
+    const viewer = {
+        document: { body: {} },
+        location: {},
+        close() {
+            this.closed = true
+        },
+    }
+    const receipt = {
+        success: true,
+        session_id: 'fixture-session',
+        token_id: 71,
+        viewer_id: 'fixture-viewer',
+        viewer_url: '/api/profile-browser/71',
+        expires_at: '2099-01-01T00:00:00Z',
+    }
     let status = { success: true, status: 'waiting', message: '等待登录' }
     const fixture = view('Accounts', {
         context: { window: { open: () => viewer } },
         api: {
-            get: async (path) => { reads.push(path); if (path.startsWith('/api/profile-login/')) return status; return accountReads([{ id: 71, email: 'direct@fixture.local', browser_profile_source: 'cloak' }])(path) },
-            post: async (path, body) => { writes.push({ path, body: plain(body) }); return receipt },
+            get: async (path) => {
+                reads.push(path)
+                if (path.startsWith('/api/profile-login/')) return status
+                return accountReads([{ id: 71, email: 'direct@fixture.local', browser_profile_source: 'cloak' }])(path)
+            },
+            post: async (path, body) => {
+                writes.push({ path, body: plain(body) })
+                return receipt
+            },
         },
     })
     const s = fixture.state
@@ -1340,7 +1501,10 @@ test('Cloak login opens without an email and automatically completes from its sc
     await s.startLogin()
     await s.pollLoginStatus()
     assert.deepEqual(writes, [{ path: '/api/profile-login', body: { proxy_pool_id: 17 } }])
-    assert.equal(viewer.location.href, 'http://fixture.local/api/profile-browser/71?viewer_id=fixture-viewer')
+    assert.equal(
+        viewer.location.href,
+        'http://fixture.local/api/profile-browser/71?viewer_id=fixture-viewer&login_session=fixture-session',
+    )
     assert.equal(viewer.opener, null)
     const stored = JSON.parse(fixture.storage.get('lay4flow.profileLogin'))
     assert.equal(stored.session_id, 'fixture-session')
@@ -1348,19 +1512,28 @@ test('Cloak login opens without an email and automatically completes from its sc
     assert.equal('cookies' in stored, false)
     assert.equal('proxy_url' in stored, false)
     assert.equal(s.loginSession.value.session_id, 'fixture-session')
-    status = { success: true, status: 'ready', result: { token_id: 71, email: 'direct@fixture.local', is_active: true } }
+    status = {
+        success: true,
+        status: 'ready',
+        result: { token_id: 71, email: 'direct@fixture.local', is_active: true },
+    }
     await s.pollLoginStatus()
     assert.equal(s.loginSession.value, null)
     assert.equal(s.loginOpen.value, false)
     assert.equal(fixture.storage.has('lay4flow.profileLogin'), false)
     assert.equal(s.accounts.value[0].id, 71)
     assert.ok(reads.includes('/api/profile-login/fixture-session?viewer_id=fixture-viewer'))
-    assert.equal(writes.some(({ path }) => path.includes('/complete')), false)
+    assert.equal(
+        writes.some(({ path }) => path.includes('/complete')),
+        false,
+    )
 })
 
 test('cancelled login ignores a late ready response and clears its automatic poll', async () => {
     const pending = deferred()
-    const fixture = view('Accounts', { api: { get: async () => pending.promise, delete: async () => ({ success: true }) } })
+    const fixture = view('Accounts', {
+        api: { get: async () => pending.promise, delete: async () => ({ success: true }) },
+    })
     const s = fixture.state
     s.loginSession.value = { session_id: 'cancelled-login', viewer_id: 'owned', token_id: 71 }
     const check = s.pollLoginStatus()
@@ -1390,12 +1563,28 @@ test('Cloak login rejects foreign viewers and cancellation preserves receipt unt
 
 test('automatic login errors stay inline and a closed viewer resumes the same scoped session', async () => {
     const writes = []
-    const failure = { success: true, status: 'error', reason: 'transient_error', message: '登录态验证暂时失败，请继续登录', browser_open: false, retryable: true }
+    const failure = {
+        success: true,
+        status: 'error',
+        reason: 'transient_error',
+        message: '登录态验证暂时失败，请继续登录',
+        browser_open: false,
+        retryable: true,
+    }
     const fixture = view('Accounts', {
         context: { window: { lay4flowDesktop: { runtime: 'native' } } },
         api: {
-            get: async (path) => path.startsWith('/api/profile-login/') ? failure : accountReads([])(path),
-            post: async (path, body) => { writes.push({ path, body: plain(body) }); return { success: true, session_id: 'retry-login', viewer_id: 'new-owner', token_id: 71, presentation: 'native' } },
+            get: async (path) => (path.startsWith('/api/profile-login/') ? failure : accountReads([])(path)),
+            post: async (path, body) => {
+                writes.push({ path, body: plain(body) })
+                return {
+                    success: true,
+                    session_id: 'retry-login',
+                    viewer_id: 'new-owner',
+                    token_id: 71,
+                    presentation: 'native',
+                }
+            },
         },
     })
     const s = fixture.state
@@ -1410,7 +1599,10 @@ test('automatic login errors stay inline and a closed viewer resumes the same sc
     assert.deepEqual(writes[0], { path: '/api/profile-login/retry-login/retry', body: { viewer_id: 'old-owner' } })
     assert.equal(s.loginSession.value.session_id, 'retry-login')
     assert.equal(s.loginSession.value.viewer_id, 'new-owner')
-    assert.equal(writes.some(({ path }) => path === '/api/profile-login'), false)
+    assert.equal(
+        writes.some(({ path }) => path === '/api/profile-login'),
+        false,
+    )
 })
 
 test('native Cloak login opens no web popup and resumes the owner-bound local window', async () => {

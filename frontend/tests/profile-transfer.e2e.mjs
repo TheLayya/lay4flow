@@ -140,7 +140,7 @@ try {
     const popupPromise = context.waitForEvent('page')
     await page.locator('.page-actions').getByRole('button', { name: '添加账号', exact: true }).click()
     const popup = await popupPromise
-    await popup.waitForURL(`${base}/api/profile-browser/71?viewer_id=synthetic-viewer`)
+    await popup.waitForURL(`${base}/api/profile-browser/71?viewer_id=synthetic-viewer&login_session=synthetic-session`)
     await loginDialog().getByText('等待登录', { exact: true }).waitFor()
     assert.equal(await loginDialog().getByPlaceholder('name@gmail.com').count(), 0)
     assert.equal(await loginDialog().getByRole('button', { name: '完成登录并添加', exact: true }).count(), 0)
@@ -158,14 +158,12 @@ try {
     assert.equal(requests.some((request) => request.path.endsWith('/complete')), false)
     record('Reload resumes status polling and automatically adds the detected Google account')
 
-    await page.getByRole('button', { name: '更多账号操作', exact: true }).click()
     const downloadPromise = page.waitForEvent('download')
-    await page.getByRole('menuitem', { name: '导出全部账号', exact: true }).click()
+    await page.getByRole('button', { name: '导出全部账号', exact: true }).click()
     const download = await downloadPromise
     const exported = await readFile(await download.path(), 'utf8')
     assert.deepEqual(JSON.parse(exported), { format: 'lay4flow-profile-bundle', version: 1, accounts: [bundle] })
-    await page.getByRole('button', { name: '更多账号操作', exact: true }).click()
-    await page.getByRole('menuitem', { name: '导入 JSON', exact: true }).click()
+    await page.getByRole('button', { name: '导入 JSON', exact: true }).click()
     const importDialog = page.getByRole('dialog').filter({ hasText: '导入账号 Profile' })
     await importDialog.getByPlaceholder('粘贴导出的 Profile JSON').fill(exported)
     await importDialog.locator('.el-select').click()

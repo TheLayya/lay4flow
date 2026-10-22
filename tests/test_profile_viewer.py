@@ -97,7 +97,9 @@ class ProfileViewerTests(unittest.IsolatedAsyncioTestCase):
         self.manager.credential_session.assert_not_called()
         self.backend.open.assert_awaited_once()
 
-    async def test_login_refresh_passes_existing_session_intent_without_changing_manual_default(self):
+    async def test_login_refresh_passes_existing_session_intent_without_changing_manual_default(
+        self,
+    ):
         async def refresh(token_id, **kwargs):
             active = self.refresher._active_context.get()
             self.assertTrue(active[2])
@@ -111,7 +113,6 @@ class ProfileViewerTests(unittest.IsolatedAsyncioTestCase):
         self.token_manager._refresh_at.assert_awaited_once_with(1, force=True, refresh_st=True)
         self.backend.open.assert_awaited_once()
         self.backend.close.assert_not_awaited()
-
 
     async def test_background_context_lease_waits_before_close_and_ttl(self):
         for end in ("close", "ttl"):
@@ -483,7 +484,8 @@ class ProfileViewerTests(unittest.IsolatedAsyncioTestCase):
             await backend.open_interactive(spec.profile_dir)
         self.assertEqual(captured[0]["env"]["DISPLAY"], ":98")
         self.assertNotIn("env", captured[1])
-        self.assertFalse(captured[0]["headless"])
+        self.assertTrue(captured[0]["headless"])
+        self.assertFalse(captured[1]["headless"])
         self.assertEqual(captured[0]["args"], captured[1]["args"])
 
     async def test_absent_profile_is_not_created(self):
@@ -521,7 +523,7 @@ class ProfileViewerTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"LAY4FLOW_PROFILE_BACKGROUND_DISPLAY": ":97"}):
             await backend.open_background(Path("synthetic-profile"))
             backend._open.assert_awaited_with(
-                Path("synthetic-profile"), proxy_url=None, display=":97"
+                Path("synthetic-profile"), proxy_url=None, display=":97", headless=True
             )
 
     async def test_startup_failure_is_safe_and_releases_lock(self):

@@ -37,6 +37,32 @@ class _Response:
         return json.loads(self._text)
 
 
+def _identity(values):
+    ua = values.get("user_agent") if isinstance(values, dict) else None
+    if (
+        not isinstance(ua, str)
+        or not ua.strip()
+        or len(ua) > 2048
+        or any(ord(char) < 32 or ord(char) == 127 for char in ua)
+    ):
+        raise FlowRPCError("account_probe_error", "flow_http_identity")
+    raw_languages = values.get("languages") or [values.get("language")]
+    languages = []
+    for value in raw_languages[:10] if isinstance(raw_languages, (list, tuple)) else []:
+        if isinstance(value, str) and re.fullmatch(r"[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*", value):
+            if value.casefold() not in {language.casefold() for language in languages}:
+                languages.append(value)
+    if not languages:
+        raise FlowRPCError("account_probe_error", "flow_http_identity")
+    return {
+        "User-Agent": ua.strip(),
+        "Accept-Language": ",".join(
+            value if index == 0 else f"{value};q={1 - index / 10:.1f}"
+            for index, value in enumerate(languages)
+        ),
+    }, resolve_browser_impersonate(ua)
+
+
 async def _profile_identity(context):
     """Read navigator identity without navigating or touching a manual-login page."""
     page = next((item for item in getattr(context, "pages", []) if not item.is_closed()), None)
@@ -51,32 +77,7 @@ async def _profile_identity(context):
             ),
             10,
         )
-        ua = values.get("user_agent") if isinstance(values, dict) else None
-        if (
-            not isinstance(ua, str)
-            or not ua.strip()
-            or len(ua) > 2048
-            or any(ord(char) < 32 or ord(char) == 127 for char in ua)
-        ):
-            raise ValueError("Profile User-Agent is missing")
-        raw_languages = values.get("languages") or [values.get("language")]
-        languages = []
-        for value in raw_languages[:10] if isinstance(raw_languages, list) else []:
-            if isinstance(value, str) and re.fullmatch(
-                r"[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*", value
-            ):
-                if value.casefold() not in {language.casefold() for language in languages}:
-                    languages.append(value)
-        if not languages:
-            raise ValueError("Profile language is missing")
-        accept_language = ",".join(
-            value if index == 0 else f"{value};q={1 - index / 10:.1f}"
-            for index, value in enumerate(languages)
-        )
-        return {
-            "User-Agent": ua.strip(),
-            "Accept-Language": accept_language,
-        }, resolve_browser_impersonate(ua)
+        return _identity(values)
     except Exception:
         raise FlowRPCError("account_probe_error", "flow_http_identity") from None
     finally:
@@ -95,9 +96,46 @@ async def profile_http_request(context, proxy):
         if row.get("expires", -1) > 0:
             row["expirationDate"] = row["expires"]
         rows.append(row)
-    jar = GoogleCookieJar(rows)
-    before = {_key(row): row for row in jar.export()}
     identity_headers, impersonate = await _profile_identity(context)
+    async with _http_request(rows, identity_headers, impersonate, proxy) as transport:
+        before = {_key(row): row for row in GoogleCookieJar(rows).export()}
+        try:
+            yield transport
+        finally:
+            after = {_key(row): row for row in await transport.cookies()}
+            current_rows = []
+            for cookie in await context.cookies():
+                row = dict(cookie)
+                row["hostOnly"] = not str(row.get("domain") or "").startswith(".")
+                if row.get("expires", -1) > 0:
+                    row["expirationDate"] = row["expires"]
+                current_rows.append(row)
+            current = {_key(row): row for row in GoogleCookieJar(current_rows).export()}
+            for key in before.keys() - after.keys():
+                if current.get(key) == before[key]:
+                    await context.clear_cookies(name=key[0], domain=key[1], path=key[2])
+            changed = [
+                row
+                for key, row in after.items()
+                if before.get(key) != row and current.get(key) == before.get(key)
+            ]
+            if changed:
+                from ..browser.profile_session_refresher import _browser_cookie_rows
+
+                await context.add_cookies(_browser_cookie_rows(changed))
+
+
+@asynccontextmanager
+async def snapshot_http_request(google_cookies, identity, proxy):
+    """Use persisted login state and navigator identity without starting Chromium."""
+    headers, impersonate = _identity(identity)
+    async with _http_request(google_cookies, headers, impersonate, proxy) as transport:
+        yield transport
+
+
+@asynccontextmanager
+async def _http_request(rows, identity_headers, impersonate, proxy):
+    jar = GoogleCookieJar(rows)
     async with transport_proxy(proxy) as network_proxy, AsyncSession(trust_env=False) as session:
 
         class Request:
@@ -186,30 +224,4 @@ async def profile_http_request(context, proxy):
                 in selected
             ]
 
-        try:
-            yield SimpleNamespace(request=Request(), cookies=cookies)
-        finally:
-            after = {_key(row): row for row in jar.export()}
-            current_rows = []
-            for cookie in await context.cookies():
-                row = dict(cookie)
-                row["hostOnly"] = not str(row.get("domain") or "").startswith(".")
-                if row.get("expires", -1) > 0:
-                    row["expirationDate"] = row["expires"]
-                current_rows.append(row)
-            current = {_key(row): row for row in GoogleCookieJar(current_rows).export()}
-            # GUI/manual login may rotate the same Cookie while Curl is in
-            # flight. Only merge entries whose original Profile state still
-            # matches the snapshot; retain concurrent browser updates.
-            for key in before.keys() - after.keys():
-                if current.get(key) == before[key]:
-                    await context.clear_cookies(name=key[0], domain=key[1], path=key[2])
-            changed = [
-                row
-                for key, row in after.items()
-                if before.get(key) != row and current.get(key) == before.get(key)
-            ]
-            if changed:
-                from ..browser.profile_session_refresher import _browser_cookie_rows
-
-                await context.add_cookies(_browser_cookie_rows(changed))
+        yield SimpleNamespace(request=Request(), cookies=cookies, flow_bootstrap_cache={})

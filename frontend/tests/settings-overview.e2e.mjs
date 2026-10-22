@@ -10,7 +10,7 @@ import { chromium } from 'playwright'
 const base = process.env.FRONTEND_PREVIEW_URL || 'http://127.0.0.1:38126'
 assert.match(base, /^http:\/\/(127\.0\.0\.1|localhost):\d+$/)
 const root = fileURLToPath(new URL('../..', import.meta.url))
-const output = resolve(root, '../../output/settings-overview')
+const output = resolve(root, 'tmp/settings-overview')
 const executablePath = [
     process.env.PLAYWRIGHT_BROWSER_PATH,
     'C:/Program Files/Google/Chrome/Application/chrome.exe',
@@ -51,6 +51,7 @@ const fixtures = {
     '/health': { status: 'ok', backend_running: true, has_active_tokens: true },
     '/api/stats': { total_tokens: 3, active_tokens: 3, today_images: 0, today_videos: 0, today_errors: 0 },
     '/api/profile-transfer/jobs': { jobs: [] },
+    '/api/admin/network': { mode: 'direct', message: 'Synthetic settings network status', upstream: null },
     '/api/admin/config': {
         admin_username: 'fixture-admin',
         api_key: fixtureKey,
@@ -156,10 +157,15 @@ async function assertActiveSection(id = 'general') {
         }
     }
 }
+async function assertAllSections() {
+    assert.equal(await page.locator('.settings-section:visible').count(), ids.length)
+    assert.equal(await page.locator('.settings-card:visible').count(), 10)
+    assert.equal(await page.getByRole('tab', { name: '全部设置', exact: true }).getAttribute('aria-selected'), 'true')
+}
 async function measureColumns(width, minimum) {
     await page.setViewportSize({ width, height: 1080 })
-    const cards = await section('general')
-        .locator('.settings-grid > .settings-card')
+    const cards = await page
+        .locator('.settings-card:visible')
         .evaluateAll((elements) =>
             elements.map((element) => {
                 const r = element.getBoundingClientRect()
@@ -172,10 +178,10 @@ async function measureColumns(width, minimum) {
             }),
         )
     layout.push({ width, cards })
-    assert.equal(cards.length, 3)
+    assert.equal(cards.length, 10)
     assert.ok(
         new Set(cards.map((item) => item.x)).size >= minimum,
-        `General cards must use at least ${minimum} columns at ${width}px: ${JSON.stringify(cards)}`,
+        `Settings must use at least ${minimum} columns at ${width}px: ${JSON.stringify(cards)}`,
     )
     await noOverflow()
 }
@@ -185,7 +191,7 @@ try {
     await page.locator('.settings-view h1').waitFor()
     await page.locator('.settings-skeleton').waitFor({ state: 'hidden' })
     await page.evaluate(() => document.fonts.ready)
-    await assertActiveSection()
+    await assertAllSections()
     assert.equal(await page.locator('.settings-alert').count(), 0)
     assert.equal(await section('captcha').locator('.settings-grid > .settings-card').count(), 1)
     assert.equal(await page.locator('[data-setting-card="score"]').count(), 0)
@@ -193,24 +199,17 @@ try {
     assert.equal(await page.getByText('给服务做一次小体检', { exact: true }).count(), 0)
     assert.equal(await page.getByRole('dialog', { name: '验证码服务体检' }).count(), 0)
     record('Captcha settings retain their configuration and remove the score test card, action and dialog')
-    record('Settings opens one active section with its controls visible')
+    record('Settings opens all ten configuration cards without a separate summary strip')
 
-    await measureColumns(1920, 3)
+    await measureColumns(1920, 4)
     await screenshot('settings-1920-top')
-    await measureColumns(1440, 2)
+    await measureColumns(1440, 3)
     await screenshot('settings-1440-top')
-    record('Wide screens use three columns and ordinary desktop screens use at least two columns')
+    record('Wide screens use four columns and ordinary desktop screens use three columns')
 
-    const summary = page.locator('.settings-summary')
-    const summaryText = await summary.innerText()
-    assert.match(summaryText, /API|密钥/)
-    assert.match(summaryText, /验证码|打码/)
-    assert.match(summaryText, /缓存/)
-    assert.match(summaryText, /API 访问\s*已配置/)
-    assert.match(summaryText, /验证码\s*已填写密钥/)
-    assert.match(summaryText, /媒体缓存\s*120 分钟/)
-    assert.match(summaryText, /待保存\s*0 组修改/)
-    assert.doesNotMatch(summaryText, new RegExp(fixtureKey))
+    assert.equal(await page.locator('.settings-summary').count(), 0)
+    assert.equal(await page.locator('.settings-view > .page-heading p').count(), 0)
+    assert.doesNotMatch(await page.locator('.settings-view').innerText(), new RegExp(fixtureKey))
     const currentKey = field(section('general'), '当前 API 密钥')
     assert.equal(await currentKey.getAttribute('type'), 'password')
     assert.equal(await currentKey.inputValue(), fixtureKey)
@@ -218,7 +217,7 @@ try {
     assert.equal(await section('integration').getByText('浏览器扩展连接', { exact: true }).count(), 0)
     for (const label of ['当前密码', '新密码', '确认新密码'])
         assert.equal(await field(card('general', '控制台登录'), label).getAttribute('type'), 'password')
-    record('Status overview exposes configured services while API keys and passwords stay masked')
+    record('Configuration controls stay directly available while API keys and passwords stay masked')
 
     const generation = card('generation', '任务等待时间')
     const timeout = field(generation, '图片生成超时')
@@ -228,8 +227,7 @@ try {
     const newKey = field(section('general'), '新 API 密钥')
     await page.locator('.settings-nav button').filter({ hasText: '基础与访问' }).click()
     await newKey.fill('fixture-new-draft-key')
-    assert.match(await summary.innerText(), /未保存|待保存|待处理/)
-    assert.match(await summary.innerText(), /待保存\s*2 组修改/)
+    assert.match(await page.locator('.settings-view > .page-heading').innerText(), /2 组待保存/)
 
     await search.fill('图片生成超时')
     await page.waitForFunction(
@@ -294,7 +292,7 @@ try {
     await page.evaluate(() => window.scrollTo(0, 0))
     await screenshot('settings-390-top')
     for (const id of ids) {
-        await page.locator('.settings-nav button').nth(ids.indexOf(id)).click()
+        await page.locator(`.settings-nav button[aria-controls="settings-${id}"]`).click()
         await section(id).scrollIntoViewIfNeeded()
         await noOverflow()
         assert.ok(await section(id).locator('.settings-card').first().isVisible())

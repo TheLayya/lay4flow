@@ -3,7 +3,6 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-    Setting,
     Key,
     MagicStick,
     FolderOpened,
@@ -18,7 +17,7 @@ import { api, notifyError, parseDate } from '../lib/api'
 import { CAPTCHA_SERVICE_URL } from '../lib/captcha-service'
 import Mascot from '../components/Mascot.vue'
 
-const group = ref('general')
+const group = ref('all')
 const route = useRoute()
 const captchaKeyInput = ref(null)
 const settingsQuery = ref('')
@@ -60,7 +59,7 @@ const matchingCards = computed(() =>
 )
 const cardVisible = (id) => matchingCards.value.some((card) => card.id === id)
 const sectionVisible = (id) =>
-    (settingsQuery.value.trim() || group.value === id) && matchingCards.value.some((card) => card.section === id)
+    (settingsQuery.value.trim() || group.value === 'all' || group.value === id) && matchingCards.value.some((card) => card.section === id)
 function jumpToSection(id) {
     settingsQuery.value = ''
     group.value = id
@@ -139,31 +138,6 @@ const dirtyCount = computed(
             ),
         ),
 )
-const settingsSummary = computed(() => [
-    { label: 'API 访问', value: loaded.has('admin') ? (admin.api_key ? '已配置' : '待设置') : '未读取', icon: Key },
-    {
-        label: '账号调度',
-        value: loaded.has('callLogic') ? (callLogic.call_mode === 'polling' ? '轮询调度' : '默认调度') : '未读取',
-        icon: MagicStick,
-    },
-    {
-        label: '验证码',
-        value: loaded.has('captcha') ? (captcha.remote_browser_api_key.trim() ? '已填写密钥' : '待填写密钥') : '未读取',
-        icon: Monitor,
-    },
-    {
-        label: '媒体缓存',
-        value: loaded.has('cache')
-            ? cache.enabled
-                ? cache.timeout
-                    ? `${cache.timeout / 60} 分钟`
-                    : '持续保留'
-                : '已关闭'
-            : '未读取',
-        icon: FolderOpened,
-    },
-    { label: '待保存', value: `${dirtyCount.value} 组修改`, icon: Setting },
-])
 async function reloadSettings() {
     if (dirtyCount.value) {
         try {
@@ -365,11 +339,10 @@ onMounted(load)
 </script>
 
 <template>
-    <div class="settings-view">
+    <div class="settings-view" :class="{ 'settings-all': group === 'all' && !settingsQuery.trim() }">
         <header class="page-heading">
             <div>
                 <h1>工作室设置</h1>
-                <p>选择设置分区，修改后在对应卡片保存。</p>
             </div>
             <div class="page-actions">
                 <el-tag v-if="dirtyCount" type="warning" effect="light">{{ dirtyCount }} 组待保存</el-tag>
@@ -385,13 +358,6 @@ onMounted(load)
             :closable="false"
             class="settings-alert"
         />
-        <div class="settings-summary" aria-label="设置状态总览">
-            <div v-for="item in settingsSummary" :key="item.label">
-                <el-icon><component :is="item.icon" /></el-icon>
-                <span>{{ item.label }}</span>
-                <strong>{{ item.value }}</strong>
-            </div>
-        </div>
         <div class="settings-toolbar">
             <el-input
                 v-model="settingsQuery"
@@ -402,6 +368,7 @@ onMounted(load)
                 aria-label="搜索设置"
             />
             <nav class="settings-nav" aria-label="设置分区" role="tablist">
+                <button role="tab" :aria-selected="group === 'all' && !settingsQuery.trim()" :class="{ active: group === 'all' }" @click="jumpToSection('all')">全部设置</button>
                 <button
                     v-for="item in groups"
                     :key="item.id"
@@ -416,7 +383,7 @@ onMounted(load)
                 </button>
             </nav>
             <span class="settings-match-count">
-                {{ settingsQuery.trim() ? `${matchingCards.length} 项匹配` : '切换分区查看' }}
+                {{ settingsQuery.trim() ? `${matchingCards.length} 项匹配` : '' }}
             </span>
         </div>
         <div class="settings-layout">
@@ -1079,39 +1046,6 @@ onMounted(load)
     color: var(--accent);
     background: var(--pink-soft);
 }
-.settings-summary {
-    display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 1px;
-    border-radius: 13px;
-    overflow: hidden;
-    margin-bottom: 16px;
-    background: var(--line);
-}
-.settings-summary > div {
-    min-width: 0;
-    padding: 14px 16px;
-    display: grid;
-    grid-template-columns: 18px 1fr;
-    gap: 5px 8px;
-    background: var(--surface);
-}
-.settings-summary .el-icon {
-    grid-row: 1 / 3;
-    color: var(--accent);
-    margin-top: 3px;
-    font-size: 16px;
-}
-.settings-summary span {
-    font-size: 11px;
-    color: var(--muted);
-}
-.settings-summary strong {
-    font-size: 13px;
-    color: var(--ink);
-    font-weight: 650;
-    overflow-wrap: anywhere;
-}
 .settings-toolbar {
     display: flex;
     gap: 12px;
@@ -1121,7 +1055,7 @@ onMounted(load)
     border: 1px solid var(--line);
     background: var(--surface);
     border-radius: 12px;
-    margin-bottom: 22px;
+    margin-bottom: 14px;
     position: sticky;
     top: 76px;
     z-index: 10;
@@ -1136,15 +1070,14 @@ onMounted(load)
     white-space: nowrap;
 }
 .settings-main {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 24px 20px;
+    display: block;
+    min-width: 0;
     align-items: start;
 }
 .settings-section {
     min-width: 0;
     scroll-margin-top: 164px;
-    grid-column: 1 / -1;
+    margin-bottom: 18px;
 }
 .settings-section[data-section='cache'],
 .settings-section[data-section='integration'] {
@@ -1154,7 +1087,7 @@ onMounted(load)
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 16px;
-    align-items: stretch;
+    align-items: start;
 }
 .settings-section[data-section='cache'] .settings-grid,
 .settings-section[data-section='integration'] .settings-grid {
@@ -1205,10 +1138,7 @@ onMounted(load)
 .settings-grid > .settings-card {
     display: flex;
     flex-direction: column;
-    height: 100%;
-}
-.settings-grid > .settings-card > .save-row {
-    margin-top: auto;
+    height: auto;
 }
 .settings-grid > .release-card {
     grid-column: 1 / -1;
@@ -1451,9 +1381,6 @@ onMounted(load)
     .settings-search {
         width: 100%;
     }
-    .settings-summary {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
     .settings-toolbar {
         top: 72px;
     }
@@ -1511,13 +1438,6 @@ onMounted(load)
     }
     .settings-card {
         padding: 17px 16px;
-    }
-    .settings-summary > div {
-        padding: 12px 10px;
-        grid-template-columns: minmax(0, 1fr);
-    }
-    .settings-summary .el-icon {
-        display: none;
     }
     .settings-search {
         width: 100%;
@@ -1609,13 +1529,6 @@ html.dark .settings-nav > button.active {
     .settings-view .page-heading {
         margin-bottom: 14px;
     }
-    .settings-summary {
-        margin-bottom: 12px;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
-    }
-    .settings-summary > div {
-        padding: 8px 12px;
-    }
     .settings-toolbar {
         position: static;
         margin-bottom: 14px;
@@ -1636,9 +1549,7 @@ html.dark .settings-nav > button.active {
     .settings-match-count {
         display: none;
     }
-    .settings-main {
-        display: block;
-    }
+    .settings-main { display: block; }
     .settings-section-title {
         margin-bottom: 10px;
     }
@@ -1691,9 +1602,6 @@ html.dark .settings-nav > button.active {
     }
     .settings-view > .page-heading p,
     .settings-section-title {
-        display: none;
-    }
-    .settings-summary {
         display: none;
     }
     .settings-nav > button .el-icon {
@@ -1765,5 +1673,100 @@ html.dark .settings-nav > button.active {
     .page-actions {
         justify-content: flex-start;
     }
+}
+
+/* Wide workspaces show the available settings instead of an empty tab canvas. */
+@media (min-width: 1051px) {
+    .settings-toolbar {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        gap: 12px;
+    }
+    .settings-search { width: 250px; }
+    .settings-main {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+        align-items: start;
+    }
+    .settings-section { margin: 0; }
+    .settings-main > .settings-section + .settings-section { margin-top: 0; }
+    .settings-section-title { display: none; }
+    .settings-grid,
+    .settings-section[data-section='general'] .settings-grid,
+    .settings-section[data-section='generation'] .settings-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        align-items: start;
+    }
+    .settings-grid > [data-setting-card='health'],
+    .settings-grid > [data-setting-card='refresh'] {
+        grid-column: 1 / -1;
+    }
+    .settings-grid > [data-setting-card='health'] {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+        gap: 12px;
+        align-items: center;
+    }
+    [data-setting-card='health'] .card-heading,
+    [data-setting-card='health'] :deep(.el-form-item),
+    [data-setting-card='health'] .save-row { margin: 0; padding: 0; }
+    [data-setting-card='health'] .field-note,
+    [data-setting-card='health'] .save-row > span { display: none; }
+    .settings-grid > .settings-card { height: auto; }
+    .settings-main > .settings-skeleton,
+    .settings-main > .el-empty { grid-column: 1 / -1; }
+}
+@media (min-width: 1051px) and (max-width: 1399px) {
+    .settings-main { grid-template-columns: minmax(0, 1fr); }
+    .settings-grid,
+    .settings-section[data-section='general'] .settings-grid,
+    .settings-section[data-section='generation'] .settings-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .settings-grid > [data-setting-card='health'],
+    .settings-grid > [data-setting-card='refresh'] { grid-column: auto; }
+    .settings-grid > [data-setting-card='health'] { display: flex; align-items: stretch; gap: 0; }
+}
+@media (max-width: 1050px) {
+    .settings-section + .settings-section { margin-top: 18px; }
+    .settings-toolbar { position: static; }
+}
+@media (min-width: 1051px) {
+    .settings-main { grid-template-columns: minmax(0, 1fr); }
+    .settings-grid,
+    .settings-section[data-section='general'] .settings-grid,
+    .settings-section[data-section='generation'] .settings-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .settings-grid > [data-setting-card='health'],
+    .settings-grid > [data-setting-card='refresh'] { grid-column: auto; }
+    .settings-grid > [data-setting-card='health'] { display: flex; align-items: stretch; gap: 0; }
+    .settings-all .settings-main {
+        display: block;
+        columns: 3;
+        column-gap: 16px;
+    }
+    .settings-all .settings-section,
+    .settings-all .settings-grid { display: contents; }
+    .settings-all .settings-card {
+        display: inline-flex;
+        width: 100%;
+        margin-bottom: 16px;
+        break-inside: avoid;
+        vertical-align: top;
+    }
+    .settings-all .settings-card .settings-form-grid,
+    .settings-all .settings-card > .el-form {
+        display: block;
+    }
+    .settings-all .settings-card .settings-form-grid { gap: 0; }
+    .settings-all [data-setting-card='health'] .save-row { padding-top: 10px; }
+}
+@media (min-width: 1800px) {
+    .settings-all .settings-main { columns: 4; }
+}
+@media (min-width: 1051px) and (max-width: 1399px) {
+    .settings-all .settings-main { columns: 2; }
 }
 </style>

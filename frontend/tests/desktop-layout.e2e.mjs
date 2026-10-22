@@ -196,9 +196,13 @@ try {
         await page.getByLabel('登录密码', { exact: true }).fill('fixture-password')
         await page.getByRole('button', { name: '进入灵感工坊', exact: true }).click()
         await page.locator('.dashboard-page h1').waitFor()
-        await verify('dashboard-recent', ['.dashboard-overview-tabs', '.recent-activity', '.version-trigger'])
-        await page.locator('.dashboard-overview-tabs').getByRole('button', { name: '趋势与额度', exact: true }).click()
-        await verify('dashboard-overview', ['.dashboard-middle', '.version-trigger'])
+        await verify('dashboard', [
+            '.recent-activity',
+            '.activity-chart',
+            '.energy-panel',
+            '.page-actions > .el-button--primary',
+            '.version-trigger',
+        ])
         for (const path of ['accounts', 'proxies']) {
             await page.goto(`${base}/manage#/${path}`)
             await page.locator(`.${path === 'accounts' ? 'accounts-view' : 'proxy-pool-view'} h1`).waitFor()

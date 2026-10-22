@@ -14,6 +14,69 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class NativeRuntimeTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows bundled Python diagnostics")
+    def test_installer_keeps_python_traceback_and_accepts_successful_stderr(self):
+        with tempfile.TemporaryDirectory(prefix="lay4flow-native-diagnostics-") as directory:
+            fixture = Path(directory)
+            diagnostic = fixture / "python diagnostic.py"
+            diagnostic.write_text(
+                "import sys\n"
+                "print('ordinary Python progress', file=sys.stderr)\n"
+                "if sys.argv[1] == 'fail':\n"
+                "    raise RuntimeError('synthetic installer validation detail')\n",
+                encoding="utf-8",
+            )
+            script = fixture / "check.ps1"
+            script.write_text(
+                r"""param([string]$RepoRoot, [string]$Fixture, [string]$Interpreter)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$LogPath = Join-Path $Fixture 'install.log'
+$python = $Interpreter
+$tokens = $null; $parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'scripts/windows/native-install.ps1'), [ref]$tokens, [ref]$parseErrors)
+foreach ($name in @('Log', 'Run-Python')) {
+  $definition = $ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}, $false)
+  if (-not $definition) { throw "Missing installer function: $name" }
+  Invoke-Expression $definition.Extent.Text
+}
+$diagnostic = Join-Path $Fixture 'python diagnostic.py'
+Run-Python @($diagnostic, 'success')
+$failure = ''
+try { Run-Python @($diagnostic, 'fail') } catch { $failure = $_.Exception.Message }
+if ($failure -notmatch 'Python exit code 1' -or $failure -notmatch 'Traceback' -or $failure -notmatch 'synthetic installer validation detail') {
+  throw "Python failure lost its diagnostic: $failure"
+}
+$log = Get-Content -LiteralPath $LogPath -Raw -Encoding UTF8
+foreach ($expected in @('ordinary Python progress', 'Bundled Python exit code: 0', 'Bundled Python exit code: 1', 'Traceback', 'synthetic installer validation detail')) {
+  if ($log -notmatch [regex]::Escape($expected)) { throw "Python install log is missing: $expected" }
+}
+""",
+                encoding="utf-8-sig",
+            )
+            result = subprocess.run(
+                [
+                    shutil.which("powershell.exe"),
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script),
+                    "-RepoRoot",
+                    str(ROOT),
+                    "-Fixture",
+                    str(fixture),
+                    "-Interpreter",
+                    sys.executable,
+                ],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_environment_from_installation_overrides_stale_host_transport(self):
         path = ROOT / "scripts/windows/native-service.py"
         spec = importlib.util.spec_from_file_location("native_service_fixture", path)

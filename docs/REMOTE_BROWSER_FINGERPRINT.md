@@ -11,10 +11,10 @@ POST /api/v1/solve
 Authorization: Bearer YOUR_REMOTE_SERVICE_KEY
 Content-Type: application/json
 
-{"project_id":"PROJECT_ID","action":"IMAGE_GENERATION","token_id":1}
+{"clientKey":"YOUR_REMOTE_SERVICE_KEY","type":"RecaptchaV3TaskProxyless","pageAction":"IMAGE_GENERATION","project_id":"PROJECT_ID","action":"IMAGE_GENERATION","token_id":1}
 ```
 
-`action` 支持当前请求使用的 `IMAGE_GENERATION` 或 `VIDEO_GENERATION`。`token_id` 为本服务内部账号 ID，可能为空。请求体仅携带上述上下文；远程浏览器及其代理由远程服务配置。
+`pageAction` 支持 `IMAGE_GENERATION` 或 `VIDEO_GENERATION`；`action` 同步传递相同值以兼容旧网关。`token_id` 为本服务内部账号 ID，可能为空。远程浏览器及其代理由远程服务配置。首帧与参考图上传直接使用账号 HTTP 会话，上传阶段不申请验证码。
 
 ```json
 {
@@ -32,23 +32,25 @@ Content-Type: application/json
 }
 ```
 
-成功响应必须有非空 `token` 与 `session_id`；显式 `success=false` 为失败。`fingerprint` 可为空，嵌套有效字段优先，缺失字段可由同名顶层字段补齐，以兼容已有服务。应返回真实浏览器生成该验证码时的完整 UA、语言及 Client Hints。
+成功响应必须有非空 `token` 与 `session_id`；显式 `success=false` 或非零 `errorId` 为失败。客户端只保留允许的 `errorCode`，不回显服务响应正文、Key、Cookie 或验证码。`fingerprint` 可为空，嵌套有效字段优先，缺失字段可由同名顶层字段补齐，以兼容已有服务。应返回真实浏览器生成该验证码时的完整 UA、语言及 Client Hints。
 
 Cookie 为含 `name/value/domain/path` 的对象列表，可附 `secure/expires`。客户端按域、路径、Secure 和有效期匹配；缺少域或路径的旧式 Cookie 字典会忽略。账号显式同名 Cookie 与 Authorization 优先，传输不自动跟随重定向。
 
 ## 请求环境与回调
 
-有效远端 UA 用于本次生成请求，HTTP 头与 `curl-cffi` 传输指纹按同一浏览器版本选择。语言与 UA-CH 沿用远端有效值；缺失值回退既有配置，不臆造远端 Client Hints。每次 solve、失败和重试均清理旧请求指纹。
+当前 Cloak 账号的 Flow RPC 复用本任务的 HTTP 会话，UA、语言、Cookie 和 `curl-cffi` 传输身份来自已验证的账号 Profile 快照；远程打码返回的 UA、语言和 Cookie 不覆盖该账号会话。远端指纹仍用于旧 REST 路径及媒体下载。每次 solve、失败和重试均清理旧请求指纹。验证码成功返回仅表示取码成功，真实提交是否通过需单独验收。
 
 远端响应中的 `proxy_url/proxyUrl/proxy` 不改变本服务的账号固定出口或媒体池选择。若远程服务要求验证码与提交共用出口，应在远程服务侧协调配置并实测确认。
 
 | 方法与路径 | 请求体 | 用途 |
 |---|---|---|
-| `POST /api/v1/prefill` | 与 solve 相同上下文 | 可选预热；失败不阻断生成 |
-| `POST /api/v1/sessions/{session_id}/finish` | `{"status":"success"}` | 上游生成请求完成，释放远端会话 |
-| `POST /api/v1/sessions/{session_id}/error` | `{"error_reason":"upstream_error"}` | 报告失败与释放会话 |
+| `POST /api/v1/prefill` | 与 solve 相同上下文及 `clientKey` | 可选预热；404/405 后本进程跳过后续预热 |
+| `POST /api/v1/sessions/{session_id}/finish` | `{"clientKey":"YOUR_REMOTE_SERVICE_KEY","status":"success"}` | 上游生成请求完成，释放远端会话 |
+| `POST /api/v1/sessions/{session_id}/error` | `{"clientKey":"YOUR_REMOTE_SERVICE_KEY","error_reason":"upstream_error"}` | 报告失败与释放会话 |
 
-所有请求使用同一 Bearer 鉴权。`session_id` 放入路径前编码。回调失败记录错误分类，不改变已取得的生成结果。控制面 JSON 传输直接连接配置服务，不继承环境代理。
+健康检查使用 `GET /health`。验证码获取的临时网络/资源错误按本地重试次数退避；鉴权、余额和参数错误直接显示错误码。重试发生在生成提交前，结果未知的上传或生成请求不自动重发。
+
+所有请求使用同一 Key：Bearer 头用于兼容旧网关，JSON body 的 `clientKey` 是当前服务的 owner 绑定字段。`session_id` 放入路径前编码。回调失败记录错误分类，不改变已取得的生成结果。控制面 JSON 传输直接连接配置服务，不继承环境代理。
 
 ## 验收
 

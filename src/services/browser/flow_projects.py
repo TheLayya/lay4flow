@@ -1,10 +1,11 @@
-"""Prepare account projects through the current Flow browser session."""
+"""Prepare account projects through the persisted Flow HTTP session."""
 
 from typing import Any
 
 from ...core.models import Project
 from ..flow.flow_rpc import FlowRPCError, flow_rpc
-from ..project_pool import profile_project_binding
+from ..project_pool import flow_session_binding
+from .flow_session import account_http_session
 from .token_account_probe import TokenManagerAccountProbe
 
 
@@ -12,7 +13,7 @@ async def create_profile_project(tokens: Any, token: Any, title: str) -> Project
     refresher = tokens.profile_refresher
     if refresher is None:
         raise FlowRPCError("account_probe_error", "flow_projects")
-    expected = profile_project_binding(token)
+    expected = flow_session_binding(token)
     proxy = await refresher._proxy_url(token)
 
     async def check_binding():
@@ -20,7 +21,7 @@ async def create_profile_project(tokens: Any, token: Any, title: str) -> Project
         if (
             current is None
             or current.browser_profile_source != "cloak"
-            or profile_project_binding(current) != expected
+            or flow_session_binding(current) != expected
             or await refresher._proxy_url(current) != proxy
         ):
             raise FlowRPCError("account_probe_error", "flow_projects")
@@ -29,9 +30,7 @@ async def create_profile_project(tokens: Any, token: Any, title: str) -> Project
     expected_proxy_binding = (
         (token.proxy_pool_id, token.proxy_url) if token.proxy_pool_id is not None else None
     )
-    async with refresher.manager.credential_session(
-        token.email, refresher.verifier, proxy_url=proxy, existing_only=True
-    ) as context:
+    async with account_http_session(tokens, token, proxy) as context:
         # Verify identity in the same context before the write, including for
         # a disabled account that is still completing its initial login.
         probe = TokenManagerAccountProbe(tokens, token)

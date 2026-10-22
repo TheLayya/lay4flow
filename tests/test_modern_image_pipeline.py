@@ -21,6 +21,7 @@ class ModernImagePipelineTests(unittest.IsolatedAsyncioTestCase):
             email="fixture@example.invalid",
             browser_profile_source="cloak",
             browser_profile_status="ready",
+            google_cookies='{"SID":"synthetic"}',
             user_paygate_tier="PAYGATE_TIER_ONE",
             image_concurrency=1,
             proxy_url="http://fixed.invalid:8080",
@@ -29,8 +30,9 @@ class ModernImagePipelineTests(unittest.IsolatedAsyncioTestCase):
         context = object()
 
         @asynccontextmanager
-        async def request_context(current, proxy):
-            yield current
+        async def request_context(tokens, current, proxy):
+            self.assertEqual(proxy, token.proxy_url)
+            yield context
 
         @asynccontextmanager
         async def provider(current):
@@ -86,7 +88,7 @@ class ModernImagePipelineTests(unittest.IsolatedAsyncioTestCase):
             return [[["media-id", None, "workflow-id", None, None, None, [generated]]]]
 
         with (
-            patch("src.services.browser.flow_generation.profile_http_request", request_context),
+            patch("src.services.browser.flow_generation.account_http_session", request_context),
             patch("src.services.browser.flow_generation.flow_rpc", side_effect=rpc),
             patch(
                 "src.services.browser.flow_generation.resolve_image_usage", return_value="BELUGA"

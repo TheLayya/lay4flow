@@ -5,8 +5,10 @@ import json
 from contextlib import asynccontextmanager
 from typing import Any, Protocol
 
+from ..flow.flow_rpc import FlowRPCError
 from ..flow.google_cookies import GoogleCookieJar
 from ..proxy_manager import ProxyManager
+from .flow_session import account_http_session
 from .profile_verifier import ProfileVerifier
 from .profiles import ProfileManager, ProfileNotReadyError
 
@@ -118,7 +120,7 @@ class ProfileSessionRefresher:
         google_rows = []
         for cookie in await context.cookies():
             row = dict(cookie)
-            row["hostOnly"] = not str(row.get("domain") or "").startswith(".")
+            row.setdefault("hostOnly", not str(row.get("domain") or "").startswith("."))
             if row.get("expires", -1) > 0:
                 row["expirationDate"] = row["expires"]
             google_rows.append(row)
@@ -143,6 +145,21 @@ class ProfileSessionRefresher:
                             return await self.refresh_active(token, force=True)
                         return await self.refresh_active(token)
         proxy_url = await self._proxy_url(token)
+        if getattr(token, "google_cookies", ""):
+            try:
+                async with account_http_session(
+                    self.token_manager, token, proxy_url, persist=False
+                ) as context:
+                    return await self.refresh_in_context(token, context, force=force)
+            except (FlowRPCError, ProfileNotReadyError) as error:
+                # Network/proxy failures and identity changes keep their normal
+                # backoff. Only expired/missing authentication needs Chromium.
+                if error.reason not in {"login_required", "session_invalid"}:
+                    if isinstance(error, FlowRPCError):
+                        failure = ProfileNotReadyError(str(token.email), error.reason)
+                        failure.profile_network_step = error.network_step
+                        raise failure from None
+                    raise
         session_factory = getattr(self.manager, "warm_session", None)
         warm = getattr(self.manager, "warm_slots", 0) > 0 and callable(session_factory)
         if warm:

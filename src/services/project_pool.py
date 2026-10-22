@@ -26,6 +26,18 @@ def profile_project_binding(token: Token) -> dict[str, Any]:
     }
 
 
+def flow_session_binding(token: Token, *, read_only: bool = False) -> dict[str, Any]:
+    """HTTP cookie rotation keeps identity; explicit credential edits advance the epoch."""
+    binding = profile_project_binding(token)
+    binding.pop("google_cookies")
+    if read_only:
+        # Disabling new work does not change ownership of an already-submitted
+        # operation. Its status and media can still be collected on the same exit.
+        binding.pop("is_active")
+        binding.pop("ban_reason")
+    return binding
+
+
 class ProjectPool:
     """Maintain a bounded, round-robin project pool for each account."""
 
@@ -191,7 +203,7 @@ class ProjectPool:
                     )
                     if not await self.db.update_token_if_credentials_match(
                         token_id,
-                        profile_project_binding(token),
+                        flow_session_binding(token),
                         expected_proxy_binding=proxy_binding,
                         **updates,
                     ):

@@ -13,7 +13,6 @@ import {
     VideoCamera,
     Connection,
     ArrowRight,
-    Key,
     Monitor,
     MagicStick,
 } from '@element-plus/icons-vue'
@@ -33,6 +32,7 @@ const route = useRoute()
 const platform = ref(route.query.platform === 'vids' ? 'vids' : 'all')
 const state = ref('all')
 const selected = ref([])
+const accountsTable = ref(null)
 const page = ref(1)
 const pageSize = ref(10)
 const busy = reactive(new Set())
@@ -249,7 +249,13 @@ async function reloadQuickProxies() {
     }
 }
 async function saveQuickAccount(row, kind = 'proxy') {
-    if (quickSavingId.value !== null || row.vidsOnly || (saving.value && editing.value?.id === row.id)) return
+    if (
+        quickSavingId.value !== null ||
+        row.vidsOnly ||
+        accountSettingBusy(row) ||
+        (saving.value && editing.value?.id === row.id)
+    )
+        return
     const draft = quickDraft(row)
     let body
     let selectedProxy
@@ -328,13 +334,10 @@ async function saveQuickAccount(row, kind = 'proxy') {
     }
 }
 const exporting = ref(false)
-const convertOpen = ref(false)
-const convertST = ref('')
-const convertResult = ref(null)
-const converting = ref(false)
 const protocolRefresh = ref(false)
 const refreshSaving = ref(false)
 const onboarding = ref(false)
+const pendingVidsCount = computed(() => candidates.value.filter((row) => !row.bound).length)
 const loginOpen = ref(false)
 const loginStarting = ref(false)
 const loginFinishing = ref(false)
@@ -433,13 +436,6 @@ const defaults = () => ({
     browser_profile_source: 'cookies',
 })
 const rules = {
-    st: [
-        {
-            validator: (_, value, done) =>
-                !editing.value && !value.trim() ? done(new Error('请填写 Session Token')) : done(),
-            trigger: ['blur', 'change'],
-        },
-    ],
     refresh_interval_minutes: [{ type: 'number', min: 1, message: '刷新间隔至少 1 分钟', trigger: 'change' }],
 }
 const rows = computed(() => {
@@ -447,8 +443,25 @@ const rows = computed(() => {
     const merged = accounts.value.map((row) => ({ ...row, vids: bound.get(row.id) }))
     for (const item of vids.value)
         if (!merged.some((row) => row.id === item.token_id))
-            merged.push({ id: item.token_id, email: item.email, is_active: item.enabled, vids: item, vidsOnly: true })
+            merged.push({
+                id: item.token_id,
+                email: item.email,
+                is_active: item.enabled,
+                image_enabled: item.image_enabled,
+                video_enabled: item.video_enabled,
+                vids: item,
+                vidsOnly: true,
+            })
     return merged
+})
+watch(rows, (current) => {
+    const byId = new Map(current.map((row) => [row.id, row]))
+    selected.value = selected.value.flatMap((row) => (byId.has(row.id) ? [byId.get(row.id)] : []))
+    // Reserved rows may be on another page. Prune only accounts removed from
+    // the complete list, and keep selection tied to the latest account state.
+    for (const row of accountsTable.value?.getSelectionRows() || []) {
+        if (!byId.has(row.id)) accountsTable.value.toggleRowSelection(row, false)
+    }
 })
 const sortedRows = computed(() =>
     [...filtered.value].sort((a, b) =>
@@ -678,6 +691,11 @@ async function load(silent = false, fresh = false) {
     })
     return loadingPromise
 }
+
+function updateAccountSelection(value) {
+    const selectedIds = new Set(value.map((row) => row.id))
+    selected.value = rows.value.filter((row) => selectedIds.has(row.id))
+}
 async function refreshVidsQuota() {
     if (disposed || quotaPromise || document.hidden || editorOpen.value) return quotaPromise
     quotaRefreshing.value = true
@@ -705,19 +723,14 @@ function refreshVisible() {
     if (!document.hidden && !editorOpen.value && quickSavingId.value === null) return load(true)
 }
 function openEditor(row) {
-    editing.value = row || null
-    Object.assign(
-        form,
-        defaults(),
-        row
-            ? {
-                  ...row,
-                  project_id: row.current_project_id || '',
-                  project_name: row.current_project_name || '',
-                  login_password: '',
-              }
-            : {},
-    )
+    if (!row) return
+    editing.value = row
+    Object.assign(form, defaults(), {
+        ...row,
+        project_id: row.current_project_id || '',
+        project_name: row.current_project_name || '',
+        login_password: '',
+    })
     editorTab.value = 'identity'
     editorOpen.value = true
 }
@@ -734,35 +747,73 @@ function editDetail() {
 function clearFormValidation() {
     formRef.value?.clearValidate()
 }
-function tableCommand(command) {
-    if (command === 'import') importOpen.value = true
-    else if (command === 'export') exportAccounts()
-    else if (command === 'manual') openEditor()
-    else if (command === 'convert') convertOpen.value = true
-    else if (command === 'vids') onboardAll()
-}
 function accountCommand(row, command) {
     if (command === 'edit') openEditor(row)
     else if (command === 'browser') openBrowser(row)
     else action(row, command)
 }
+function accountSettingBusy(row) {
+    return busy.has(`${row.id}:settings`)
+}
+function accountSettingLocked(row) {
+    return (
+        row.vidsOnly ||
+        accountSettingBusy(row) ||
+        quickSavingId.value === row.id ||
+        (saving.value && editing.value?.id === row.id)
+    )
+}
+async function toggleAccountSetting(row, field, value) {
+    if (accountSettingLocked(row) || !['is_active', 'image_enabled', 'video_enabled'].includes(field)) return
+    const key = `${row.id}:settings`
+    busy.add(key)
+    try {
+        // Finish older reads first; subsequent polls are invalidated after the write.
+        await loadingPromise
+        const current = accounts.value.find((item) => item.id === row.id)
+        if (!current || (current[field] !== false) === value) return
+        if (field === 'is_active') ensure(await api.post(`/api/tokens/${row.id}/${value ? 'enable' : 'disable'}`, {}))
+        else ensure(await api.put(`/api/tokens/${row.id}`, { [field]: value }))
+        accountMutationVersion++
+        quotaVersion++
+        accounts.value = accounts.value.map((item) => (item.id === row.id ? { ...item, [field]: value } : item))
+        vids.value = vids.value.map((item) =>
+            item.token_id === row.id ? { ...item, [field === 'is_active' ? 'enabled' : field]: value } : item,
+        )
+        if (quickDrafts[row.id] && field !== 'is_active') {
+            quickDrafts[row.id][field] = value
+            quickBaselines[row.id][field] = value
+        }
+        ElMessage.success(
+            `${field === 'is_active' ? '账号' : field === 'image_enabled' ? '图片生成' : '视频生成'}已${value ? '开启' : '暂停'}`,
+        )
+    } catch (error) {
+        notifyError(error)
+    } finally {
+        busy.delete(key)
+    }
+}
 function selectMobile(row, checked) {
     selected.value = selected.value.filter((item) => item.id !== row.id)
     if (checked) selected.value.push(row)
+    accountsTable.value?.toggleRowSelection(
+        rows.value.find((item) => item.id === row.id) || row,
+        checked,
+        false,
+    )
 }
 async function saveAccount() {
-    if (saving.value || quickSavingId.value === editing.value?.id) return
+    if (!editing.value || saving.value || accountSettingBusy(editing.value) || quickSavingId.value === editing.value.id)
+        return
     if (!(await formRef.value.validate().catch(() => false))) return
     saving.value = true
     try {
         const body = Object.fromEntries(Object.keys(defaults()).map((key) => [key, form[key]]))
-        if (editing.value) {
-            if (body.st === editing.value.st) delete body.st
-            if (!body.login_password) delete body.login_password
-            if (body.proxy_pool_id === (editing.value.proxy_pool_id ?? null)) delete body.proxy_pool_id
-            ensure(await api.put(`/api/tokens/${editing.value.id}`, body))
-        } else ensure(await api.post('/api/tokens', body))
-        ElMessage.success(editing.value ? '账号配置已保存' : '新成员已加入')
+        if (body.st === editing.value.st) delete body.st
+        if (!body.login_password) delete body.login_password
+        if (body.proxy_pool_id === (editing.value.proxy_pool_id ?? null)) delete body.proxy_pool_id
+        ensure(await api.put(`/api/tokens/${editing.value.id}`, body))
+        ElMessage.success('账号配置已保存')
         editorOpen.value = false
         await load(true, true)
     } catch (error) {
@@ -976,17 +1027,6 @@ async function importAccounts() {
         importing.value = false
     }
 }
-async function convert() {
-    if (!convertST.value.trim()) return ElMessage.warning('请填写 Session Token')
-    converting.value = true
-    try {
-        convertResult.value = ensure(await api.post('/api/tokens/st2at', { st: convertST.value.trim() }))
-    } catch (error) {
-        notifyError(error)
-    } finally {
-        converting.value = false
-    }
-}
 async function copy(value) {
     try {
         await navigator.clipboard.writeText(value)
@@ -1146,10 +1186,12 @@ function loginViewerUrl(receipt) {
         url.pathname !== `/api/profile-browser/${receipt.token_id}` ||
         url.search ||
         url.hash ||
-        !receipt.viewer_id
+        !receipt.viewer_id ||
+        !receipt.session_id
     )
         throw new Error('账号浏览器地址校验失败')
     url.searchParams.set('viewer_id', receipt.viewer_id)
+    url.searchParams.set('login_session', receipt.session_id)
     return url.href
 }
 function openLoginWindow() {
@@ -1161,7 +1203,13 @@ function openLoginWindow() {
     return viewer
 }
 async function startLogin() {
-    if (loginStarting.value || loginFinishing.value || loginCanceling.value || (loginSession.value && loginFailure.value?.browser_open !== false)) return
+    if (
+        loginStarting.value ||
+        loginFinishing.value ||
+        loginCanceling.value ||
+        (loginSession.value && loginFailure.value?.browser_open !== false)
+    )
+        return
     const native = nativePresentation.value
     let viewer
     let receipt
@@ -1169,57 +1217,114 @@ async function startLogin() {
     try {
         if (!native) viewer = openLoginWindow()
         loginStarting.value = true
-        receipt = ensure(await api.post('/api/profile-login', { ...(loginForm.proxy_pool_id ? { proxy_pool_id: loginForm.proxy_pool_id } : {}) }))
+        receipt = ensure(
+            await api.post('/api/profile-login', {
+                ...(loginForm.proxy_pool_id ? { proxy_pool_id: loginForm.proxy_pool_id } : {}),
+            }),
+        )
         const presentation = receipt.presentation || (native ? 'native' : 'web')
         if (native && presentation !== 'native') throw new Error('本地账号浏览器服务未返回原生窗口状态')
-        if (presentation === 'native' && (!receipt.viewer_id || !receipt.session_id || !receipt.token_id)) throw new Error('本地账号浏览器凭据校验失败')
+        if (presentation === 'native' && (!receipt.viewer_id || !receipt.session_id || !receipt.token_id))
+            throw new Error('本地账号浏览器凭据校验失败')
         const url = presentation === 'native' ? null : loginViewerUrl(receipt)
-        loginSession.value = { session_id: receipt.session_id, token_id: receipt.token_id, viewer_id: receipt.viewer_id, viewer_url: receipt.viewer_url, presentation, expires_at: receipt.expires_at, email: receipt.email || '', browser_open: true }
+        loginSession.value = {
+            session_id: receipt.session_id,
+            token_id: receipt.token_id,
+            viewer_id: receipt.viewer_id,
+            viewer_url: receipt.viewer_url,
+            presentation,
+            expires_at: receipt.expires_at,
+            email: receipt.email || '',
+            browser_open: true,
+        }
         loginFailure.value = null
         accepted = true
         sessionStorage.setItem(loginStorage, JSON.stringify(loginSession.value))
-        loginStatus.value = native ? '本地 Cloak 窗口已打开，请完成 Google 登录，页面会自动验证并加入账号。' : '请在 Cloak 窗口完成 Google 登录，页面会自动验证并加入账号。'
+        loginStatus.value = native
+            ? '本地 Cloak 窗口已打开，请完成 Google 登录，页面会自动验证并加入账号。'
+            : '请在 Cloak 窗口完成 Google 登录，页面会自动验证并加入账号。'
         if (presentation === 'native') viewer?.close()
-        else { if (!viewer) viewer = openLoginWindow(); if (viewer.closed) loginStatus.value = '登录浏览器已就绪，点击“继续登录”重新打开窗口。'; else viewer.location.href = url }
+        else {
+            if (!viewer) viewer = openLoginWindow()
+            if (viewer.closed) loginStatus.value = '登录浏览器已就绪，点击“继续登录”重新打开窗口。'
+            else viewer.location.href = url
+        }
         scheduleLoginStatusPoll()
     } catch (error) {
         viewer?.close()
-        if (receipt?.session_id && !accepted) await api.delete(`/api/profile-login/${encodeURIComponent(receipt.session_id)}?viewer_id=${encodeURIComponent(receipt.viewer_id || '')}`).catch(() => {})
+        if (receipt?.session_id && !accepted)
+            await api
+                .delete(
+                    `/api/profile-login/${encodeURIComponent(receipt.session_id)}?viewer_id=${encodeURIComponent(receipt.viewer_id || '')}`,
+                )
+                .catch(() => {})
         notifyError(error)
-    } finally { loginStarting.value = false }
+    } finally {
+        loginStarting.value = false
+    }
 }
 function loginStatusMessage(status, payload) {
     if (payload?.message) return payload.message
-    return ({ waiting: '等待你在 Cloak 窗口完成 Google 登录…', verifying: '已检测到登录，正在验证会话并保存账号…', ready: '登录完成，正在刷新账号列表…', error: '登录验证失败，请继续登录或取消本次登录。' })[status] || '正在检查 Cloak 登录状态…'
+    return (
+        {
+            waiting: '等待你在 Cloak 窗口完成 Google 登录…',
+            verifying: '已检测到登录，正在验证会话并保存账号…',
+            ready: '登录完成，正在刷新账号列表…',
+            error: '登录验证失败，请继续登录或取消本次登录。',
+        }[status] || '正在检查 Cloak 登录状态…'
+    )
 }
 async function pollLoginStatus() {
     if (disposed || !loginSession.value || loginStatusRequest) return loginStatusRequest
     const session = loginSession.value
     const request = (async () => {
         try {
-            const payload = ensure(await api.get(`/api/profile-login/${encodeURIComponent(session.session_id)}?viewer_id=${encodeURIComponent(session.viewer_id || '')}`))
-            if (disposed || (loginSession.value?.session_id !== session.session_id || loginSession.value?.viewer_id !== session.viewer_id)) return
+            const payload = ensure(
+                await api.get(
+                    `/api/profile-login/${encodeURIComponent(session.session_id)}?viewer_id=${encodeURIComponent(session.viewer_id || '')}`,
+                ),
+            )
+            if (
+                disposed ||
+                loginSession.value?.session_id !== session.session_id ||
+                loginSession.value?.viewer_id !== session.viewer_id
+            )
+                return
             const status = payload.status || (payload.result ? 'ready' : 'waiting')
             loginStatus.value = loginStatusMessage(status, payload)
-            if (payload.email) { loginSession.value.email = payload.email; sessionStorage.setItem(loginStorage, JSON.stringify(loginSession.value)) }
+            if (payload.email) {
+                loginSession.value.email = payload.email
+                sessionStorage.setItem(loginStorage, JSON.stringify(loginSession.value))
+            }
             loginFailure.value = status === 'error' ? payload : null
             if (status === 'error') rememberLoginFailure(payload)
             if (status === 'ready') {
                 const result = payload.result || payload
-                clearLogin(); loginOpen.value = false
+                clearLogin()
+                loginOpen.value = false
                 loginStatus.value = `账号已验证并加入：${result.email || 'Google 账号'}`
-                ElMessage.success(result.is_active === false ? 'Cloak 登录完成，账号已保存为暂停状态' : 'Cloak 登录完成，账号已加入调度')
+                ElMessage.success(
+                    result.is_active === false
+                        ? 'Cloak 登录完成，账号已保存为暂停状态'
+                        : 'Cloak 登录完成，账号已加入调度',
+                )
                 await load(true, true)
             }
         } catch (error) {
-            if (!disposed && loginSession.value?.session_id === session.session_id && loginSession.value?.viewer_id === session.viewer_id) {
+            if (
+                !disposed &&
+                loginSession.value?.session_id === session.session_id &&
+                loginSession.value?.viewer_id === session.viewer_id
+            ) {
                 if (error?.status === 404 || error?.status === 410) {
-                    clearLogin(); loginOpen.value = false
+                    clearLogin()
+                    loginOpen.value = false
                     loginStatus.value = '登录窗口已结束，可直接重新打开 Cloak 登录'
                 } else loginStatus.value = error?.message || '正在等待 Cloak 登录状态…'
             }
+        } finally {
+            if (loginStatusRequest === request) loginStatusRequest = undefined
         }
-        finally { if (loginStatusRequest === request) loginStatusRequest = undefined }
     })()
     loginStatusRequest = request
     return request
@@ -1231,7 +1336,9 @@ function openCloakLogin() {
 }
 function scheduleLoginStatusPoll() {
     clearInterval(loginStatusTimer)
-    loginStatusTimer = setInterval(() => { if (!document.hidden) pollLoginStatus() }, 3000)
+    loginStatusTimer = setInterval(() => {
+        if (!document.hidden) pollLoginStatus()
+    }, 3000)
     pollLoginStatus()
 }
 async function retryLogin() {
@@ -1239,15 +1346,28 @@ async function retryLogin() {
     if (!previous || loginStarting.value || loginFinishing.value || loginCanceling.value) return
     loginStarting.value = true
     try {
-        const receipt = ensure(await api.post(`/api/profile-login/${encodeURIComponent(previous.session_id)}/retry`, {
-            viewer_id: previous.viewer_id,
-        }))
-        loginSession.value = { ...previous, ...receipt, email: receipt.email || previous.email || '', browser_open: true }
+        const receipt = ensure(
+            await api.post(`/api/profile-login/${encodeURIComponent(previous.session_id)}/retry`, {
+                viewer_id: previous.viewer_id,
+            }),
+        )
+        loginSession.value = {
+            ...previous,
+            ...receipt,
+            email: receipt.email || previous.email || '',
+            browser_open: true,
+        }
         loginFailure.value = null
         sessionStorage.setItem(loginStorage, JSON.stringify(loginSession.value))
         if (receipt.presentation === 'native' || previous.presentation === 'native' || nativePresentation.value) {
             loginStatus.value = '本地 Cloak 窗口已重新打开，完成 Google 登录后页面会自动验证。'
-            if (receipt.token_id) await api.post(`/api/tokens/${receipt.token_id}/browser/focus${receipt.viewer_id ? `?viewer_id=${encodeURIComponent(receipt.viewer_id)}` : ''}`, {}).catch(() => {})
+            if (receipt.token_id)
+                await api
+                    .post(
+                        `/api/tokens/${receipt.token_id}/browser/focus${receipt.viewer_id ? `?viewer_id=${encodeURIComponent(receipt.viewer_id)}` : ''}`,
+                        {},
+                    )
+                    .catch(() => {})
         } else {
             const viewer = openLoginWindow()
             viewer.location.href = loginViewerUrl(loginSession.value)
@@ -1258,7 +1378,9 @@ async function retryLogin() {
         loginFailure.value = { browser_open: false, retryable: true, message: error?.message || '登录窗口暂时不可用。' }
         loginStatus.value = loginFailure.value.message
         rememberLoginFailure(loginFailure.value)
-    } finally { loginStarting.value = false }
+    } finally {
+        loginStarting.value = false
+    }
 }
 function resumeLogin() {
     if (loginFailure.value?.browser_open === false) {
@@ -1503,37 +1625,18 @@ onUnmounted(() => {
                     </el-select>
                 </div>
                 <div class="table-tools">
-                    <el-tooltip
-                        :content="
-                            nativePresentation
-                                ? '直接打开本机 Cloak 窗口登录 Google，保存持久化 Profile'
-                                : '直接在服务器 Cloak 浏览器登录 Google，保存持久化 Profile'
-                        "
+                    <el-button :icon="Upload" @click="importOpen = true">导入 JSON</el-button>
+                    <el-button
+                        :icon="Download"
+                        :loading="exporting"
+                        :disabled="!accounts.length || (selected.length > 0 && selected.every((row) => row.vidsOnly))"
+                        @click="exportAccounts"
                     >
-                        <el-button :icon="Connection" @click="openCloakLogin">
-                            {{ loginSession ? '继续登录' : 'Cloak 登录' }}
-                        </el-button>
-                    </el-tooltip>
-                    <el-dropdown @command="tableCommand">
-                        <el-button :icon="MoreFilled" aria-label="更多账号操作" />
-                        <template #dropdown>
-                            <el-dropdown-menu>
-                                <el-dropdown-item command="import" :icon="Upload">导入 JSON</el-dropdown-item>
-                                <el-dropdown-item
-                                    command="export"
-                                    :icon="Download"
-                                    :disabled="!accounts.length || exporting"
-                                >
-                                    {{ selected.length ? '导出所选账号' : '导出全部账号' }}
-                                </el-dropdown-item>
-                                <el-dropdown-item command="manual" :icon="Key">手动添加 ST / Cookies</el-dropdown-item>
-                                <el-dropdown-item command="convert" :icon="Key">ST 转换为 AT</el-dropdown-item>
-                                <el-dropdown-item command="vids" :icon="VideoCamera" :disabled="onboarding" divided>
-                                    接入未绑定的 Vids 账号
-                                </el-dropdown-item>
-                            </el-dropdown-menu>
-                        </template>
-                    </el-dropdown>
+                        {{ selected.length ? '导出所选账号' : '导出全部账号' }}
+                    </el-button>
+                    <el-button v-if="pendingVidsCount" :icon="VideoCamera" :loading="onboarding" @click="onboardAll">
+                        接入 Vids（{{ pendingVidsCount }}）
+                    </el-button>
                 </div>
             </div>
             <div v-if="loginStatus || exporting" class="import-status" aria-live="polite">
@@ -1584,25 +1687,47 @@ onUnmounted(() => {
                     <strong>{{ selected.length }}</strong>
                     位成员
                 </span>
-                <el-button v-if="selected.some((row) => !row.vidsOnly)" size="small" :loading="busy.has('bulk')" @click="bulk('enable')">启用</el-button>
-                <el-button v-if="selected.some((row) => !row.vidsOnly)" size="small" :loading="busy.has('bulk')" @click="bulk('disable')">暂停</el-button>
-                <el-button v-if="selected.some((row) => !row.vidsOnly)" size="small" :loading="busy.has('bulk')" @click="bulk('refresh-at')">刷新会话</el-button>
+                <el-button
+                    v-if="selected.some((row) => !row.vidsOnly)"
+                    size="small"
+                    :loading="busy.has('bulk')"
+                    @click="bulk('enable')"
+                >
+                    启用
+                </el-button>
+                <el-button
+                    v-if="selected.some((row) => !row.vidsOnly)"
+                    size="small"
+                    :loading="busy.has('bulk')"
+                    @click="bulk('disable')"
+                >
+                    暂停
+                </el-button>
+                <el-button
+                    v-if="selected.some((row) => !row.vidsOnly)"
+                    size="small"
+                    :loading="busy.has('bulk')"
+                    @click="bulk('refresh-at')"
+                >
+                    刷新会话
+                </el-button>
                 <el-button size="small" type="danger" plain :loading="busy.has('bulk')" @click="bulk('delete')">
                     删除
                 </el-button>
             </div>
             <div v-if="loading && !rows.length" class="table-skeleton"><el-skeleton :rows="6" animated /></div>
             <el-table
+                ref="accountsTable"
                 v-else
                 :data="paginated"
                 row-key="id"
                 :expand-row-keys="expandedAccountIds"
                 @expand-change="expandQuickAccount"
-                @selection-change="selected = $event"
+                @selection-change="updateAccountSelection"
                 @sort-change="Object.assign(tableSort, $event)"
                 class="accounts-table"
             >
-                <el-table-column type="selection" width="46" :selectable="() => true" />
+                <el-table-column type="selection" width="46" reserve-selection />
                 <el-table-column type="expand" width="34">
                     <template #default="{ row }">
                         <AccountProxyBinding
@@ -1612,7 +1737,9 @@ onUnmounted(() => {
                             :proxies="proxyPool"
                             :saving="quickSavingId === row.id"
                             :saving-kind="quickSavingKind"
-                            :locked="quickSavingId !== null || (saving && editing?.id === row.id)"
+                            :locked="
+                                quickSavingId !== null || accountSettingBusy(row) || (saving && editing?.id === row.id)
+                            "
                             :error="quickErrors[row.id]"
                             :saved="quickSaved[row.id]"
                             :pool-error="proxyPoolError"
@@ -1665,7 +1792,7 @@ onUnmounted(() => {
                         </button>
                     </template>
                 </el-table-column>
-                <el-table-column label="创作额度" min-width="260" sortable="custom" prop="credits">
+                <el-table-column label="创作额度" min-width="240" sortable="custom" prop="credits">
                     <template #default="{ row }">
                         <div v-if="!row.vidsOnly" class="flow-quota-line">
                             <span>Flow 积分</span>
@@ -1737,28 +1864,54 @@ onUnmounted(() => {
                 </el-table-column>
                 <el-table-column label="状态" width="90">
                     <template #default="{ row }">
-                        <el-tag
-                            :type="row.is_active ? 'success' : row.ban_reason === 'refresh_failed' ? 'warning' : 'info'"
-                            effect="light"
-                            round
-                        >
-                            {{ row.is_active ? '已启用' : row.ban_reason === 'refresh_failed' ? '待恢复' : '已暂停' }}
-                        </el-tag>
+                        <el-switch
+                            class="account-status-switch"
+                            :model-value="row.is_active"
+                            :disabled="accountSettingLocked(row)"
+                            :loading="accountSettingBusy(row)"
+                            :aria-label="`${row.email || row.id} 账号状态`"
+                            inline-prompt
+                            active-text="已启用"
+                            :inactive-text="row.ban_reason === 'refresh_failed' ? '待恢复' : '已暂停'"
+                            :width="66"
+                            @change="toggleAccountSetting(row, 'is_active', $event)"
+                        />
                     </template>
                 </el-table-column>
-                <el-table-column label="创作能力" width="90">
+                <el-table-column label="创作能力" width="120">
                     <template #default="{ row }">
                         <div class="capability-icons">
-                            <el-tooltip :content="row.image_enabled ? '图片生成已开启' : '图片生成已暂停'">
-                                <el-icon :class="{ muted: !row.image_enabled }"><Picture /></el-icon>
-                            </el-tooltip>
-                            <el-tooltip :content="row.video_enabled ? '视频生成已开启' : '视频生成已暂停'">
-                                <el-icon :class="{ muted: !row.video_enabled }"><VideoCamera /></el-icon>
+                            <el-tooltip
+                                v-for="kind in ['image', 'video']"
+                                :key="kind"
+                                :content="
+                                    row.vidsOnly
+                                        ? '仅 Vids 记录，请先接入 Flow 账号后配置'
+                                        : `${kind === 'image' ? '图片' : '视频'}生成已${row[kind + '_enabled'] !== false ? '开启，点击暂停' : '暂停，点击开启'}`
+                                "
+                            >
+                                <button
+                                    type="button"
+                                    class="capability-toggle"
+                                    :class="{ muted: row[kind + '_enabled'] === false }"
+                                    :aria-label="`${row.email || row.id} ${kind === 'image' ? '图片' : '视频'}生成`"
+                                    :aria-pressed="row[kind + '_enabled'] !== false"
+                                    :disabled="accountSettingLocked(row)"
+                                    @click="
+                                        toggleAccountSetting(row, kind + '_enabled', row[kind + '_enabled'] === false)
+                                    "
+                                >
+                                    <el-icon>
+                                        <Picture v-if="kind === 'image'" />
+                                        <VideoCamera v-else />
+                                    </el-icon>
+                                    {{ kind === 'image' ? '图片' : '视频' }}
+                                </button>
                             </el-tooltip>
                         </div>
                     </template>
                 </el-table-column>
-                <el-table-column label="会话健康" min-width="205">
+                <el-table-column label="会话健康" min-width="195">
                     <template #default="{ row }">
                         <div class="account-list-health">
                             <span
@@ -1796,14 +1949,21 @@ onUnmounted(() => {
                         </div>
                     </template>
                 </el-table-column>
-                <el-table-column label="操作" width="180" fixed="right">
+                <el-table-column label="操作" width="160" fixed="right">
                     <template #default="{ row }">
                         <el-button v-if="!row.vidsOnly" text type="primary" @click="toggleQuickAccount(row)">
                             {{ expandedAccountIds.includes(row.id) ? '收起' : '展开编辑' }}
                         </el-button>
                         <template v-else>
                             <el-button text type="primary" @click="openDetail(row)">详情</el-button>
-                            <el-button text type="danger" :loading="busy.has(row.id + ':delete')" @click="action(row, 'delete')">删除</el-button>
+                            <el-button
+                                text
+                                type="danger"
+                                :loading="busy.has(row.id + ':delete')"
+                                @click="action(row, 'delete')"
+                            >
+                                删除
+                            </el-button>
                         </template>
                         <el-button
                             v-if="row.browser_profile_source === 'cloak'"
@@ -1826,9 +1986,6 @@ onUnmounted(() => {
                                             刷新 ST / AT
                                         </el-dropdown-item>
                                         <el-dropdown-item command="refresh-credits">刷新余额</el-dropdown-item>
-                                        <el-dropdown-item :command="row.is_active ? 'disable' : 'enable'">
-                                            {{ row.is_active ? '暂停账号' : '启用账号' }}
-                                        </el-dropdown-item>
                                         <el-dropdown-item command="delete" divided>删除账号</el-dropdown-item>
                                     </template>
                                 </el-dropdown-menu>
@@ -1845,7 +2002,7 @@ onUnmounted(() => {
                         "
                     >
                         <template #image><Mascot portrait compact mood="sleepy" class="empty-mascot" /></template>
-                        <el-button v-if="!accounts.length" type="primary" :icon="Plus" @click="openEditor()">
+                        <el-button v-if="!accounts.length" type="primary" :icon="Plus" @click="openCloakLogin">
                             添加账号
                         </el-button>
                     </el-empty>
@@ -1865,11 +2022,49 @@ onUnmounted(() => {
                                 <small>{{ row.remark || row.name || '成员 #' + row.id }}</small>
                             </span>
                         </button>
-                        <el-tag :type="row.is_active ? 'success' : 'info'" size="small" effect="light" round>
-                            {{ row.is_active ? '已启用' : '已暂停' }}
-                        </el-tag>
-                        <el-button v-if="row.vidsOnly" text type="danger" :loading="busy.has(row.id + ':delete')" @click="action(row, 'delete')">删除</el-button>
+                        <el-switch
+                            class="account-status-switch"
+                            :model-value="row.is_active"
+                            :disabled="accountSettingLocked(row)"
+                            :loading="accountSettingBusy(row)"
+                            :aria-label="`${row.email || row.id} 账号状态`"
+                            inline-prompt
+                            active-text="已启用"
+                            :inactive-text="row.ban_reason === 'refresh_failed' ? '待恢复' : '已暂停'"
+                            :width="66"
+                            @change="toggleAccountSetting(row, 'is_active', $event)"
+                        />
+                        <el-button
+                            v-if="row.vidsOnly"
+                            text
+                            type="danger"
+                            :loading="busy.has(row.id + ':delete')"
+                            @click="action(row, 'delete')"
+                        >
+                            删除
+                        </el-button>
                     </header>
+                    <div class="capability-icons mobile-capability-controls">
+                        <span>创作能力</span>
+                        <button
+                            v-for="kind in ['image', 'video']"
+                            :key="kind"
+                            type="button"
+                            class="capability-toggle"
+                            :class="{ muted: row[kind + '_enabled'] === false }"
+                            :aria-label="`${row.email || row.id} ${kind === 'image' ? '图片' : '视频'}生成`"
+                            :aria-pressed="row[kind + '_enabled'] !== false"
+                            :disabled="accountSettingLocked(row)"
+                            @click="toggleAccountSetting(row, kind + '_enabled', row[kind + '_enabled'] === false)"
+                        >
+                            <el-icon>
+                                <Picture v-if="kind === 'image'" />
+                                <VideoCamera v-else />
+                            </el-icon>
+                            {{ kind === 'image' ? '图片' : '视频' }} ·
+                            {{ row[kind + '_enabled'] !== false ? '开启' : '暂停' }}
+                        </button>
+                    </div>
                     <button
                         v-if="!row.vidsOnly"
                         class="account-proxy-trigger"
@@ -1889,7 +2084,9 @@ onUnmounted(() => {
                         :proxies="proxyPool"
                         :saving="quickSavingId === row.id"
                         :saving-kind="quickSavingKind"
-                        :locked="quickSavingId !== null || (saving && editing?.id === row.id)"
+                        :locked="
+                            quickSavingId !== null || accountSettingBusy(row) || (saving && editing?.id === row.id)
+                        "
                         :error="quickErrors[row.id]"
                         :saved="quickSaved[row.id]"
                         :pool-error="proxyPoolError"
@@ -2032,14 +2229,6 @@ onUnmounted(() => {
                 />
             </footer>
         </section>
-        <aside class="crew-note">
-            <el-icon class="note-icon"><Connection /></el-icon>
-            <p>
-                <strong>小队协作，一起出发。</strong>
-                Flow 与 Vids 共享账号开关和创作能力；启用且就绪的 Vids 账号会自动同步额度，离开页面后暂停轮询。
-            </p>
-            <el-button text :icon="ArrowRight" @click="onboardAll" :loading="onboarding">接入 Vids</el-button>
-        </aside>
 
         <el-drawer
             v-model="detailOpen"
@@ -2299,7 +2488,14 @@ onUnmounted(() => {
             </el-empty>
             <template #footer>
                 <el-button @click="detailOpen = false">关闭</el-button>
-                <el-button v-if="detail && detail.vidsOnly" type="danger" :loading="busy.has(detail.id + ':delete')" @click="action(detail, 'delete')">删除账号</el-button>
+                <el-button
+                    v-if="detail && detail.vidsOnly"
+                    type="danger"
+                    :loading="busy.has(detail.id + ':delete')"
+                    @click="action(detail, 'delete')"
+                >
+                    删除账号
+                </el-button>
                 <el-button v-if="detail && !detail.vidsOnly" type="primary" @click="editDetail">编辑账号配置</el-button>
             </template>
         </el-drawer>
@@ -2307,7 +2503,7 @@ onUnmounted(() => {
         <el-drawer
             v-model="editorOpen"
             :size="'min(700px, 100vw)'"
-            :title="editing ? '编辑成员配置' : '添加创作成员'"
+            title="编辑成员配置"
             :close-on-click-modal="!saving"
             @closed="clearFormValidation"
         >
@@ -2321,13 +2517,7 @@ onUnmounted(() => {
                                 autocomplete="off"
                                 placeholder="输入 Google Flow 的 Session Token"
                             />
-                            <span class="field-note">
-                                {{
-                                    editing
-                                        ? '仅更新后的 Token 会重新校验账号身份'
-                                        : '保存时将自动验证账号并获取 Access Token'
-                                }}
-                            </span>
+                            <span class="field-note">更新登录凭据会重新校验账号身份</span>
                         </el-form-item>
                         <div class="form-grid">
                             <el-form-item label="登录协议">
@@ -2370,7 +2560,7 @@ onUnmounted(() => {
                                 <el-input
                                     v-model="form.login_password"
                                     autocomplete="new-password"
-                                    :placeholder="editing ? '留空保留原密码' : '选填'"
+                                    placeholder="留空保留原密码"
                                 />
                             </el-form-item>
                         </div>
@@ -2433,7 +2623,11 @@ onUnmounted(() => {
                         <el-form-item label="生成提交出口">
                             <el-select v-model="form.submission_proxy_mode" aria-label="生成提交出口">
                                 <el-option label="账号固定代理" value="fixed" />
-                                <el-option label="代理池随机（每次生成取健康出口）" value="pool_random" :disabled="editing?.browser_profile_source === 'cloak'" />
+                                <el-option
+                                    label="代理池随机（每次生成取健康出口）"
+                                    value="pool_random"
+                                    :disabled="editing?.browser_profile_source === 'cloak'"
+                                />
                             </el-select>
                             <span class="field-note">
                                 Cloak 账号的生成、登录和刷新共用 Profile 固定出口；其他账号可选择代理池出口。
@@ -2478,9 +2672,7 @@ onUnmounted(() => {
             </el-form>
             <template #footer>
                 <el-button :disabled="saving" @click="editorOpen = false">取消</el-button>
-                <el-button type="primary" :loading="saving" @click="saveAccount">
-                    {{ editing ? '保存成员配置' : '验证并添加账号' }}
-                </el-button>
+                <el-button type="primary" :loading="saving" @click="saveAccount">保存成员配置</el-button>
             </template>
         </el-drawer>
 
@@ -2499,7 +2691,7 @@ onUnmounted(() => {
             </p>
             <p v-if="!presentationReady" class="field-note" role="status">正在连接账号浏览器服务…</p>
             <el-form label-position="top" @submit.prevent="startLogin">
-<el-form-item v-if="!loginSession" label="账号代理">
+                <el-form-item v-if="!loginSession" label="账号代理">
                     <el-select
                         v-model="loginForm.proxy_pool_id"
                         placeholder="自动分配并绑定"
@@ -2544,7 +2736,15 @@ onUnmounted(() => {
                 >
                     继续登录
                 </el-button>
-                <el-button v-if="loginSession" text :loading="loginFinishing" :disabled="loginCanceling" @click="pollLoginStatus">刷新登录状态</el-button>
+                <el-button
+                    v-if="loginSession"
+                    text
+                    :loading="loginFinishing"
+                    :disabled="loginCanceling"
+                    @click="pollLoginStatus"
+                >
+                    刷新登录状态
+                </el-button>
                 <template v-else>
                     <el-button :disabled="loginStarting" @click="loginOpen = false">关闭</el-button>
                     <el-button
@@ -2625,22 +2825,6 @@ onUnmounted(() => {
                 >
                     {{ importing ? '正在提交' : sameImportSubmitted ? '已提交后台' : '后台导入' }}
                 </el-button>
-            </template>
-        </el-dialog>
-        <el-dialog v-model="convertOpen" title="ST → AT 会话转换" width="min(560px, calc(100vw - 32px))">
-            <p class="dialog-note">转换仅获取会话信息，账号不会自动加入小队。</p>
-            <el-input v-model="convertST" placeholder="粘贴 Session Token" autocomplete="off" />
-            <el-descriptions v-if="convertResult" :column="1" border class="convert-result">
-                <el-descriptions-item label="账号">{{ convertResult.email }}</el-descriptions-item>
-                <el-descriptions-item label="有效期">{{ date(convertResult.expires) }}</el-descriptions-item>
-                <el-descriptions-item label="Access Token">
-                    <el-input :model-value="convertResult.access_token" readonly />
-                    <el-button text type="primary" @click="copy(convertResult.access_token)">复制 Token</el-button>
-                </el-descriptions-item>
-            </el-descriptions>
-            <template #footer>
-                <el-button @click="convertOpen = false">关闭</el-button>
-                <el-button type="primary" :loading="converting" @click="convert">转换会话</el-button>
             </template>
         </el-dialog>
     </div>
@@ -2762,6 +2946,12 @@ onUnmounted(() => {
     display: flex;
     gap: 9px;
     align-items: center;
+}
+.table-tools {
+    flex-wrap: wrap;
+}
+.table-tools > .el-button {
+    margin-left: 0;
 }
 .account-search {
     width: 260px;
@@ -2943,11 +3133,55 @@ onUnmounted(() => {
 }
 .capability-icons {
     display: flex;
-    gap: 13px;
+    align-items: center;
+    gap: 5px;
     color: var(--accent);
-    font-size: 18px;
 }
-.capability-icons .muted {
+.capability-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    min-height: 32px;
+    padding: 3px 5px;
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    background: var(--pink-soft);
+    color: var(--accent);
+    font: inherit;
+    font-size: 12px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.capability-toggle .el-icon {
+    font-size: 15px;
+}
+.capability-toggle.muted {
+    color: var(--muted);
+    background: transparent;
+    border-color: var(--el-border-color);
+}
+.capability-toggle:hover:not(:disabled) {
+    background: var(--pink-soft);
+}
+.capability-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+.capability-toggle:disabled {
+    cursor: default;
+    opacity: 0.55;
+}
+.account-status-switch {
+    flex-shrink: 0;
+    --el-switch-off-color: var(--muted);
+}
+.mobile-capability-controls {
+    margin-top: 8px;
+}
+.mobile-capability-controls > span {
+    margin-right: auto;
+    font-size: 12px;
     color: var(--muted);
 }
 .session-status {
@@ -2998,26 +3232,6 @@ onUnmounted(() => {
     background: var(--blue-soft);
     font-size: 13px;
     color: var(--blue);
-}
-.crew-note {
-    display: flex;
-    gap: 15px;
-    align-items: center;
-    padding: 20px 5px;
-    color: var(--muted);
-}
-.note-icon {
-    font-size: 31px;
-    color: var(--accent);
-}
-.crew-note p {
-    font-size: 13px;
-    line-height: 1.8;
-    flex: 1;
-}
-.crew-note strong {
-    color: var(--ink);
-    font-weight: 650;
 }
 .account-alert {
     margin-bottom: 14px;
@@ -3325,8 +3539,7 @@ onUnmounted(() => {
 .upload-link {
     color: var(--accent);
 }
-.import-text,
-.convert-result {
+.import-text {
     margin-top: 18px;
 }
 .profile-import-jobs {
@@ -3524,6 +3737,10 @@ onUnmounted(() => {
     .mobile-account-header > .el-tag {
         flex-shrink: 0;
     }
+    .mobile-capability-controls .capability-toggle {
+        min-height: 44px;
+        padding: 5px 8px;
+    }
     .mobile-account > .account-proxy-trigger {
         min-height: 44px;
         font-size: 13px;
@@ -3621,12 +3838,6 @@ onUnmounted(() => {
     .selection-bar > span {
         width: 100%;
         margin-bottom: 6px;
-    }
-    .crew-note {
-        align-items: flex-start;
-    }
-    .crew-note .el-button {
-        display: none;
     }
     .form-grid {
         grid-template-columns: 1fr;
@@ -3746,7 +3957,6 @@ html.dark .quota-error {
         flex-shrink: 0;
     }
     .accounts-view > .page-heading p,
-    .crew-note,
     .crew-metric > p,
     .crew-metric .metric-top .el-icon,
     .account-surface > .section-heading {

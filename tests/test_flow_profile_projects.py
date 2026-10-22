@@ -5,7 +5,7 @@ import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from src.core.database import Database
 from src.core.models import Project, Token
@@ -39,16 +39,20 @@ class FlowProfileProjectTests(unittest.IsolatedAsyncioTestCase):
         self.close_error = False
 
         @asynccontextmanager
-        async def session(email, verifier, **kwargs):
-            self.opened.append((email, kwargs))
+        async def session(tokens, token, proxy):
+            self.opened.append((token.email, {"proxy_url": proxy, "existing_only": True}))
             yield self.context
             if self.close_error:
                 raise RuntimeError("synthetic close error")
 
+        self.enterContext(patch("src.services.browser.flow_projects.account_http_session", session))
+
         self.tokens = SimpleNamespace(
             db=self.db,
             profile_refresher=SimpleNamespace(
-                manager=SimpleNamespace(credential_session=session),
+                manager=SimpleNamespace(
+                    credential_session=Mock(side_effect=AssertionError("browser opened"))
+                ),
                 verifier=object(),
                 _proxy_url=ProxyManager(self.db).resolve_account_proxy,
             ),

@@ -1,6 +1,7 @@
 const match=location.pathname.match(/^\/api\/profile-browser\/([1-9]\d*)$/);
 const tokenId=match?.[1];
 const viewerId=new URL(location.href,location.origin).searchParams.get('viewer_id');
+const loginSessionId=new URL(location.href,location.origin).searchParams.get('login_session');
 const viewerQuery=viewerId?`?viewer_id=${encodeURIComponent(viewerId)}`:'';
 const statusElement=document.getElementById('status');
 const screen=document.getElementById('screen');
@@ -15,6 +16,7 @@ const pasteCancelButton=document.getElementById('pasteCancel');
 const focusNativeButton=document.getElementById('focusNativeBrowser');
 let rfb=null,pollTimer=null,busy=false,closed=false,connected=false,failed=false,credentialResult=false,clipboardReading=false,pasteShortcut=false;
 let nativePresentation=window.lay4flowDesktop?.runtime==='native';
+let loginTimer=null,loginPolling=false,loginCompleted=false;
 
 function showNativeWindow(){
     screen.dataset.presentation='native';
@@ -99,6 +101,23 @@ function disconnect(){
     rfb?.disconnect();
 }
 
+async function pollLoginStatus(){
+    if(!loginSessionId||!viewerId||loginPolling||loginCompleted)return;
+    loginPolling=true;
+    try{
+        const state=await request(`/api/profile-login/${encodeURIComponent(loginSessionId)}?viewer_id=${encodeURIComponent(viewerId)}`);
+        if(state.status==='ready'||state.result){
+            loginCompleted=true;closed=true;
+            if(loginTimer!==null){clearInterval(loginTimer);loginTimer=null;}
+            disconnect();setStatus('登录验证成功，正在关闭窗口…');
+            window.close();
+            location.href='/manage#/accounts';
+        }else if(state.status==='error')setStatus(state.message||'登录验证暂时失败，请返回管理页继续登录',true);
+        else if(closed)setStatus(state.message||'正在保存登录态并验证账号…');
+    }catch(error){setStatus(error.message,true);}
+    finally{loginPolling=false;}
+}
+
 async function closeBrowser(refresh=false){
     if(busy)return;
     setBusy(true);credentialResult=false;
@@ -172,6 +191,11 @@ async function connect(){
     if(!tokenId){setStatus('账号浏览器地址无效',true);closeButton.disabled=true;refreshButton.disabled=true;refreshOpenButton.disabled=true;return;}
     document.getElementById('accountTitle').textContent=`账号 ${tokenId} 的浏览器`;
     try{
+        if(loginSessionId&&viewerId){
+            loginTimer=setInterval(pollLoginStatus,3000);
+            await pollLoginStatus();
+            if(loginCompleted)return;
+        }
         await pollStatus();
         if(nativePresentation){
             showNativeWindow();
@@ -221,6 +245,7 @@ document.addEventListener('keyup',event=>{
     }
 },true);
 window.addEventListener('pagehide',()=>{
+    if(loginTimer!==null){clearInterval(loginTimer);loginTimer=null;}
     disconnect();
     if(tokenId&&!closed)fetch(`/api/tokens/${tokenId}/browser${viewerQuery}`,{method:'DELETE',credentials:'same-origin',keepalive:true}).catch(()=>{});
 });

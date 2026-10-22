@@ -23,6 +23,10 @@ class CloakBrowserBackend:
             profile_dir,
             proxy_url=proxy_url,
             display=os.environ.get("LAY4FLOW_PROFILE_BACKGROUND_DISPLAY"),
+            # Background maintenance must never inherit the interactive
+            # presentation setting.  Windows has no isolated DISPLAY, so a
+            # headed backend here would flash a browser for every request.
+            headless=True,
         )
 
     async def open_interactive(self, profile_dir: Path, *, proxy_url: str | None = None) -> Any:

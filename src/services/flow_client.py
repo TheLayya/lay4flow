@@ -12,7 +12,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 from urllib.parse import quote, urljoin, urlparse
@@ -31,6 +31,7 @@ from .flow.fingerprint import (
     resolve_browser_impersonate,
     summarize_remote_http_error,
 )
+from .flow.remote_captcha import RemoteCaptchaError, check_remote_response
 from .flow.session import with_session_token
 from .flow.video_edit import (
     validate_optional_video_trim,
@@ -74,9 +75,13 @@ class FlowClient:
             contextvars.ContextVar("flow_request_fingerprint", default=None)
         )
         self._remote_browser_prefill_last_sent: Dict[str, float] = {}
+        self._remote_browser_prefill_supported = True
         # Trusted account configuration, separate from remote solver fingerprints.
         self._account_proxy_ctx = contextvars.ContextVar("flow_account_proxy", default=None)
         self._account_token_ctx = contextvars.ContextVar("flow_account_token", default=None)
+        self._account_generation_ctx = contextvars.ContextVar(
+            "flow_account_generation", default=None
+        )
         self.token_manager = None
 
         # 仅保留当前上游仍稳定出现的最小浏览器风格头；具体 UA / Accept-Language / UA-CH
@@ -114,9 +119,30 @@ class FlowClient:
         token = self._account_token_ctx.get()
         if token is None or getattr(token, "browser_profile_source", "") != "cloak":
             return None
+        current = self._account_generation_ctx.get()
+        if current is not None and current.token.id == token.id:
+            return current
         from .browser.flow_generation import FlowProfileGeneration
 
         return FlowProfileGeneration(self, self.token_manager, token)
+
+    @asynccontextmanager
+    async def generation_session(self, token):
+        if getattr(token, "browser_profile_source", "") != "cloak":
+            yield None
+            return
+        from .browser.flow_generation import FlowProfileGeneration
+
+        async with FlowProfileGeneration(self, self.token_manager, token).session() as generation:
+            yield generation
+
+    @contextmanager
+    def account_request_generation(self, generation):
+        marker = self._account_generation_ctx.set(generation)
+        try:
+            yield
+        finally:
+            self._account_generation_ctx.reset(marker)
 
     def _set_request_fingerprint(self, fingerprint: Optional[Dict[str, Any]]):
         """设置当前请求链路的浏览器指纹上下文。"""
@@ -4539,22 +4565,26 @@ class FlowClient:
         base_url, api_key, timeout = self._get_remote_browser_service_config()
         url = f"{base_url}{path}"
         effective_timeout = max(5, int(timeout_override or timeout))
+        body = dict(json_data or {})
+        if method.upper() == "POST":
+            # The deployed service resolves owner identity from clientKey.
+            # Bearer alone is treated as an IP-authenticated request.
+            body["clientKey"] = api_key
+        if path == "/api/v1/solve":
+            body["type"] = "RecaptchaV3TaskProxyless"
+            body["pageAction"] = body.get("action") or "IMAGE_GENERATION"
 
-        status_code, payload, response_text = await self._sync_json_http_request(
-            method=method,
-            url=url,
-            headers={"Authorization": f"Bearer {api_key}"},
-            payload=json_data,
-            timeout=effective_timeout,
-        )
-
-        if status_code >= 300:
-            raise RuntimeError(f"remote_browser request failed: HTTP {status_code}")
-
-        if not isinstance(payload, dict):
-            raise RuntimeError("remote_browser 返回格式错误")
-
-        return payload
+        try:
+            status_code, payload, _ = await self._sync_json_http_request(
+                method=method,
+                url=url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                payload=body,
+                timeout=effective_timeout,
+            )
+        except Exception:
+            raise RemoteCaptchaError("TRANSPORT_ERROR") from None
+        return check_remote_response(payload, status_code)
 
     async def prefill_remote_browser_pool(
         self,
@@ -4566,6 +4596,8 @@ class FlowClient:
     ) -> bool:
         """让本地 remote_browser 服务提前开始补池，尽量把取 token 等待搬到前面。"""
 
+        if not self._remote_browser_prefill_supported:
+            return False
         normalized_project = str(project_id or "").strip()
         normalized_action = str(action or "IMAGE_GENERATION").strip() or "IMAGE_GENERATION"
         if not normalized_project:
@@ -4591,6 +4623,8 @@ class FlowClient:
             self._remote_browser_prefill_last_sent[cache_key] = now_value
             return True
         except Exception as e:
+            if isinstance(e, RemoteCaptchaError) and e.http_status in {404, 405}:
+                self._remote_browser_prefill_supported = False
             debug_logger.log_warning(f"[reCAPTCHA RemoteBrowser] prefill 失败: {type(e).__name__}")
             return False
 
@@ -4636,6 +4670,7 @@ class FlowClient:
                 json_data={"project_id": project_id, "action": action, "token_id": token_id},
                 timeout_override=self._resolve_remote_browser_solve_timeout(action),
             )
+            check_remote_response(payload, 200)
             token, session_id = payload.get("token"), payload.get("session_id")
             if (
                 payload.get("success") is False
@@ -4644,10 +4679,16 @@ class FlowClient:
                 or not isinstance(session_id, str)
                 or not session_id.strip()
             ):
-                raise RuntimeError("Remote captcha solve failed or missing token/session_id")
+                if isinstance(session_id, str) and session_id.strip():
+                    await self._notify_browser_captcha_error(
+                        session_id.strip(), error_reason="invalid_solve_response"
+                    )
+                raise RemoteCaptchaError("MISSING_TOKEN_OR_SESSION")
             self._set_request_fingerprint(self._remote_solve_fingerprint(payload, project_id))
             return token.strip(), session_id.strip()
         except Exception as error:
-            debug_logger.log_error(f"[Remote captcha] solve failed ({type(error).__name__})")
             self.clear_request_fingerprint()
-            return None, None
+            if not isinstance(error, RemoteCaptchaError):
+                error = RemoteCaptchaError("TRANSPORT_ERROR")
+            debug_logger.log_error(f"[Remote captcha] {error}")
+            raise error from None

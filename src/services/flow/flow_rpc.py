@@ -2,6 +2,7 @@
 
 import json
 import re
+import time
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
@@ -133,7 +134,13 @@ class FlowRPCError(Exception):
             if isinstance(public_error, str) and public_error in _PUBLIC_ERRORS.values()
             else None
         )
-        self.retryable = (
+        # Only a fully decoded error-only RPC response proves a rejected write.
+        self.submission_rejected = False
+        self.retryable = reason not in {
+            "login_required",
+            "session_invalid",
+            "identity_mismatch",
+        } and (
             reason in {"transient_error", "xsrf_rejected"}
             or self.public_error in _RETRYABLE_PUBLIC_ERRORS
         )
@@ -183,7 +190,9 @@ def _rpc_error(code: Any, error: Any, step: str, *, executor: bool = False) -> F
     auth_codes = (401, 403, 16) if executor else (7, 16, 401, 403)
     reason = (
         "login_required"
-        if code in auth_codes
+        # PERMISSION_DENIED also wraps typed business rejections. Keep their
+        # reason rather than invalidating a valid login on unusual activity.
+        if code in (16, 401) or (public is None and code in auth_codes)
         else "transient_error"
         if public in _RETRYABLE_PUBLIC_ERRORS
         or (public is None and code in (4, 8, 10, 13, 14, 408, 429, 502, 503, 504))
@@ -260,6 +269,7 @@ def _rpc_payload(text: str, rpcid: str, step: str) -> Any:
         remaining = remaining[4:]
     decoder = json.JSONDecoder()
     matches, errors, xsrf = [], [], []
+    has_payload = False
     try:
         while remaining.strip():
             remaining = remaining.lstrip()
@@ -290,6 +300,7 @@ def _rpc_payload(text: str, rpcid: str, step: str) -> Any:
                         code = row[6]
                     errors.append(_rpc_error(code, row, step, executor=True))
                 elif row[0] == "wrb.fr" and len(row) >= 3 and row[1] == rpcid:
+                    has_payload = has_payload or row[2] is not None
                     error = row[5] if len(row) > 5 else None
                     if error:
                         code = error[0] if isinstance(error, list) and error else None
@@ -308,6 +319,9 @@ def _rpc_payload(text: str, rpcid: str, step: str) -> Any:
                 raise ValueError
             raise _XSRFRejected(xsrf[0])
         if errors:
+            # A response with both a payload and an error is not a confirmed
+            # rejection; callers must not replay a write in that case.
+            errors[0].submission_rejected = not has_payload and len(errors) == 1
             raise errors[0]
         if len(matches) != 1:
             raise ValueError
@@ -427,18 +441,30 @@ async def flow_rpc(
     source_path = _source_path(source_path)
     if type(timeout_ms) is not int or timeout_ms <= 0:
         raise FlowRPCError("account_probe_error", network_step)
-    try:
-        response = await context.request.get(
-            FLOW_ORIGIN + source_path, timeout=20000, max_redirects=0
-        )
-        _check_response(response, "flow_bootstrap")
-        bootstrap = _bootstrap(await response.text())
-    except FlowRPCError:
-        raise
-    except Exception:
-        raise FlowRPCError("transient_error", "flow_bootstrap") from None
+    cache = getattr(context, "flow_bootstrap_cache", None)
+    cached = cache.get(source_path) if isinstance(cache, dict) else None
+    if cached and time.monotonic() - cached[0] < 60:
+        bootstrap = cached[1]
+    else:
+        try:
+            response = await context.request.get(
+                FLOW_ORIGIN + source_path, timeout=20000, max_redirects=0
+            )
+            _check_response(response, "flow_bootstrap")
+            bootstrap = _bootstrap(await response.text())
+        except FlowRPCError:
+            raise
+        except Exception:
+            raise FlowRPCError("transient_error", "flow_bootstrap") from None
+        if isinstance(cache, dict):
+            cache[source_path] = (time.monotonic(), bootstrap)
     if expected_email is not None and not same_google_identity(bootstrap["oPEP7c"], expected_email):
         raise FlowRPCError("identity_mismatch", "flow_bootstrap")
-    return await _rpc(
-        context.request, bootstrap, rpcid, payload, network_step, timeout_ms, source_path
-    )
+    try:
+        return await _rpc(
+            context.request, bootstrap, rpcid, payload, network_step, timeout_ms, source_path
+        )
+    except FlowRPCError:
+        if isinstance(cache, dict):
+            cache.pop(source_path, None)
+        raise

@@ -89,20 +89,36 @@ class GenerationHandler:
 
     async def _account_generation_pipeline(self, pipeline, token, proxy_url=None):
         """Scope each advance/close, so proxy ContextVar tokens never span a yield."""
-        try:
-            while True:
-                try:
-                    with (
-                        self._account_proxy_context(token, proxy_url),
-                        self._account_token_context(token),
-                    ):
-                        chunk = await anext(pipeline)
-                except StopAsyncIteration:
-                    return
-                yield chunk
-        finally:
-            with self._account_proxy_context(token, proxy_url), self._account_token_context(token):
-                await pipeline.aclose()
+        factory = getattr(self.flow_client, "generation_session", None)
+        session = factory(token) if factory is not None else nullcontext()
+        async with session as generation:
+
+            def generation_context():
+                return (
+                    self.flow_client.account_request_generation(generation)
+                    if generation is not None
+                    else nullcontext()
+                )
+
+            try:
+                while True:
+                    try:
+                        with (
+                            self._account_proxy_context(token, proxy_url),
+                            self._account_token_context(token),
+                            generation_context(),
+                        ):
+                            chunk = await anext(pipeline)
+                    except StopAsyncIteration:
+                        return
+                    yield chunk
+            finally:
+                with (
+                    self._account_proxy_context(token, proxy_url),
+                    self._account_token_context(token),
+                    generation_context(),
+                ):
+                    await pipeline.aclose()
 
     def _create_response_state(self) -> Dict[str, Any]:
         """为单次请求创建独立的响应状态，避免并发请求互相污染。"""
@@ -629,10 +645,7 @@ class GenerationHandler:
                 error_msg = generation_result.get("error_message") or "生成未成功完成"
                 submission_error = error_msg
                 debug_logger.log_warning(f"[GENERATION] 生成未成功，不扣次数: {error_msg}")
-                if token and not (
-                    submission_error is not None
-                    and ProxyManager.is_submission_transport_error(submission_error)
-                ):
+                if token and self._should_count_token_error(error_msg):
                     await self.token_manager.record_error(token.id)
                 duration = time.time() - start_time
                 record_generation_result(generation_type, "failed", duration)
@@ -835,6 +848,7 @@ class GenerationHandler:
             "打码服务资源阻塞",
             "remote captcha",
             "remote_browser",
+            "flow_captcha",
         )
         if any(marker in error_text for marker in non_token_fault_markers):
             return False

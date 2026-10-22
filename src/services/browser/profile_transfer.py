@@ -613,6 +613,8 @@ class ProfileTransfer:
                 token = await self.tokens.db.get_token(token_id)
                 expected = self.tokens._refresh_expected(token, token)
                 expected.update(auto_refresh_enabled=False, banned_at=token.banned_at)
+                # Workspace HTTP calls may rotate the same login's Cookie jar.
+                expected.pop("google_cookies", None)
                 if account["is_active"]:
                     progress("prepare_workspace")
                     await self.tokens._flow_call_for_token(

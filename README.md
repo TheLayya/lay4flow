@@ -143,7 +143,7 @@ Copy-Item .env.example .env
 |---|---|
 | `global.api_key` | 自行设置服务 API Key，替换 `__configure_api_key__`；外部客户端使用此 Key |
 | `global.admin_username` / `global.admin_password` | **默认 `admin` / `admin`**，部署后在「工坊设置」自行修改 |
-| `captcha.remote_browser_api_key` | 在 [打码服务](https://cap.tk218.top/) 申请的独立 Bearer Key，与本服务 API Key 分开 |
+| `captcha.remote_browser_api_key` | 在 [打码服务](https://cap.tk218.top/) 申请的独立 Key，通过 `clientKey` 绑定请求，与本服务 API Key 分开 |
 | `captcha.remote_browser_timeout` | 远程验证码服务超时，默认 60 秒 |
 | `server.public_base_url` | 可选，反向代理后的公开服务地址 |
 

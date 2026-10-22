@@ -11,7 +11,7 @@ onMounted(async () => {
     referrer.name = 'referrer'; referrer.content = 'no-referrer'; document.head.appendChild(referrer)
   }
   try {
-    const viewerModule = '/static/js/profile_browser.js?v=20261022-native-profile'
+    const viewerModule = '/static/js/profile_browser.js?v=20261023-login-close'
     await import(/* @vite-ignore */ viewerModule)
   } catch (error) {
     const status = document.getElementById('status')

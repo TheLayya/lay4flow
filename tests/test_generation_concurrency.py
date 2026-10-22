@@ -57,6 +57,29 @@ class GenerationConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         kwargs["generation_result"]["success"] = True
         yield "result"
 
+    async def test_remote_captcha_failure_does_not_disable_account_in_either_error_path(self):
+        from src.services.flow.remote_captcha import RemoteCaptchaError
+
+        await self.cm.initialize([self.token])
+
+        async def raised(*args, **kwargs):
+            raise RemoteCaptchaError("ERROR_IP_NOT_ALLOWED")
+            yield
+
+        self.handler._handle_video_generation = raised
+        await self.collect("video")
+        self.handler.token_manager.record_error.assert_not_awaited()
+
+        async def returned(*args, **kwargs):
+            self.handler._mark_generation_failed(
+                kwargs["generation_result"], "Flow flow_captcha: captcha_failed"
+            )
+            yield self.handler._create_error_response("Flow flow_captcha: captcha_failed")
+
+        self.handler._handle_video_generation = returned
+        await self.collect("video")
+        self.handler.token_manager.record_error.assert_not_awaited()
+
     async def collect(self, kind="image"):
         return [chunk async for chunk in self.handler.handle_generation(f"{kind}-test", "prompt")]
 
