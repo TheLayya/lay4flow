@@ -107,13 +107,13 @@ class ProfileBrowserRouteTests(unittest.TestCase):
         response = self.client.post("/api/profile-login", json={}, headers=headers)
         self.assertEqual(response.status_code, 200)
         self.viewer.login.start.assert_awaited_once_with("", "", "admin-test")
-        response = self.client.get(
-            "/api/profile-login/pending?viewer_id=current", headers=headers
-        )
+        response = self.client.get("/api/profile-login/pending?viewer_id=current", headers=headers)
         self.assertEqual(response.status_code, 200)
         self.viewer.login.status.assert_called_once_with("pending", "admin-test", "current")
         self.assertEqual(
-            self.client.post("/api/profile-login/pending/retry", json={}, headers=headers).status_code,
+            self.client.post(
+                "/api/profile-login/pending/retry", json={}, headers=headers
+            ).status_code,
             422,
         )
         response = self.client.post(
@@ -121,6 +121,35 @@ class ProfileBrowserRouteTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.viewer.login.retry.assert_awaited_once_with("pending", "admin-test", "current")
+
+    def test_direct_login_forwards_selected_proxy_without_starting_on_invalid_selection(self):
+        headers = {"Origin": "http://testserver"}
+        self.login()
+        response = self.client.post(
+            "/api/profile-login", json={"proxy_pool_id": 7}, headers=headers
+        )
+        self.assertEqual(response.status_code, 200)
+        self.viewer.login.start.assert_awaited_once_with("", "", "admin-test", proxy_pool_id=7)
+        self.viewer.login.start.reset_mock()
+
+        for value in (0, -1, True, "7"):
+            with self.subTest(value=value):
+                response = self.client.post(
+                    "/api/profile-login", json={"proxy_pool_id": value}, headers=headers
+                )
+                self.assertEqual(response.status_code, 422)
+        self.viewer.login.start.assert_not_awaited()
+
+    def test_direct_login_forwards_custom_residential_proxy(self):
+        self.login()
+        proxy = "socks5h://synthetic:secret@residential.invalid:1080"
+        response = self.client.post(
+            "/api/profile-login",
+            json={"proxy_url": proxy},
+            headers={"Origin": "http://testserver"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.viewer.login.start.assert_awaited_once_with("", proxy, "admin-test")
 
     def test_login_status_and_retry_check_auth_origin_and_preserve_viewer_errors(self):
         from src.services.browser.profile_viewer import ViewerError
@@ -131,7 +160,9 @@ class ProfileBrowserRouteTests(unittest.TestCase):
         headers = {"Origin": "http://testserver"}
         self.assertEqual(self.client.get(path, headers=headers).status_code, 401)
         self.assertEqual(
-            self.client.post(path + "/retry", json={"viewer_id": "current"}, headers=headers).status_code,
+            self.client.post(
+                path + "/retry", json={"viewer_id": "current"}, headers=headers
+            ).status_code,
             401,
         )
         self.login()
@@ -144,9 +175,7 @@ class ProfileBrowserRouteTests(unittest.TestCase):
         )
         self.viewer.login.retry.assert_not_awaited()
         self.assertEqual(self.client.get(path, headers=headers).status_code, 403)
-        response = self.client.post(
-            path + "/retry", json={"viewer_id": "current"}, headers=headers
-        )
+        response = self.client.post(path + "/retry", json={"viewer_id": "current"}, headers=headers)
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"], "stale viewer")
 

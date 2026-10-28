@@ -30,6 +30,38 @@ COOKIE_ATTRIBUTES = {
     "samesite",
     "priority",
 }
+FLOW_COOKIE_COMBO_NAMES = ("__Secure-1PSID", "SID", "OSID", "__Secure-1PSIDTS")
+
+
+def extract_flow_cookie_combo(raw: Any) -> dict[str, Any]:
+    """Format saved, unexpired Flow cookies without opening a browser or refreshing them."""
+    jar = GoogleCookieJar(raw)
+    # Select the same scopes a Flow request uses. Prefer the host-specific value
+    # when both a parent cookie and a Flow cookie have the same name.
+    cookies = {}
+    for row in sorted(
+        jar.export(),
+        key=lambda item: (
+            len(item["domain"].removeprefix(".")),
+            len(item["path"]),
+        ),
+    ):
+        domain = row["domain"].removeprefix(".")
+        if row["name"] not in FLOW_COOKIE_COMBO_NAMES:
+            continue
+        if domain != "flow.google.com" and (domain != "google.com" or row["hostOnly"]):
+            continue
+        if row["path"] != "/":
+            continue
+        cookies[row["name"]] = row["value"]
+    names = [name for name in FLOW_COOKIE_COMBO_NAMES if cookies.get(name)]
+    missing = [name for name in FLOW_COOKIE_COMBO_NAMES[:3] if not cookies.get(name)]
+    return {
+        "cookie": "::".join(cookies[name] for name in names) if not missing else "",
+        "cookie_names": names,
+        "missing": missing,
+        "has_1psidts": bool(cookies.get(FLOW_COOKIE_COMBO_NAMES[-1])),
+    }
 
 
 def _trusted_url(url: str) -> bool:

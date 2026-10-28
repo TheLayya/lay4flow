@@ -101,6 +101,7 @@ function view(name, overrides = {}) {
         Date,
         console,
         setTimeout: () => 1,
+        clearTimeout: () => {},
         setInterval: () => 1,
         clearInterval: () => {},
         localStorage: { removeItem: () => {} },
@@ -447,6 +448,80 @@ test('bound proxy metadata edits preserve the original connection string', async
     fixture.state.poolForm.note = 'stable exit'
     await fixture.state.addProxy()
     assert.deepEqual(writes, [{ path: '/api/proxy/pool/8', body: { note: 'stable exit' } }])
+})
+
+test('Flow cookie combo copies the saved value without changing cookie fields or browser state', async () => {
+    const copied = [],
+        reads = []
+    let hasTimestamp = false
+    const fixture = view('Accounts', {
+        context: { navigator: { clipboard: { writeText: async (value) => copied.push(value) } } },
+        api: {
+            get: async (path, options) => {
+                reads.push({ path, options })
+                return {
+                    success: true,
+                    cookie: hasTimestamp ? 'psid::sid=value::osid%2Fvalue::timestamp' : 'psid::sid=value::osid%2Fvalue',
+                    has_1psidts: hasTimestamp,
+                }
+            },
+        },
+    })
+    const s = fixture.state
+    const account = { id: 7, email: 'fixture@example.invalid', google_cookies: 'saved original fixture' }
+    s.accounts.value = [account]
+    s.openEditor(account)
+    s.form.google_cookies = 'unsaved fixture draft'
+    await s.copyFlowCookieCombo(account)
+    hasTimestamp = true
+    await s.copyFlowCookieCombo(account)
+    assert.deepEqual(copied, ['psid::sid=value::osid%2Fvalue', 'psid::sid=value::osid%2Fvalue::timestamp'])
+    assert.deepEqual(
+        reads.map(({ path, options }) => ({ path, options: { cache: options.cache } })),
+        [
+            { path: '/api/tokens/7/flow-cookie-combo', options: { cache: 'no-store' } },
+            { path: '/api/tokens/7/flow-cookie-combo', options: { cache: 'no-store' } },
+        ],
+    )
+    assert.equal(account.google_cookies, 'saved original fixture')
+    assert.equal(s.form.google_cookies, 'unsaved fixture draft')
+    assert.equal(fixture.requests.length, 0)
+    assert.equal(s.busy.has('7:copy-cookie-combo'), false)
+    assert.match(fixture.notices.at(-1).value, /4 段/)
+})
+
+test('Flow cookie combo failures keep the clipboard untouched and release the pending copy', async () => {
+    const pending = deferred(),
+        copied = []
+    let reads = 0
+    const fixture = view('Accounts', {
+        context: { navigator: { clipboard: { writeText: async (value) => copied.push(value) } } },
+        api: {
+            get: async () => {
+                reads++
+                return pending.promise
+            },
+        },
+    })
+    const row = { id: 7 },
+        s = fixture.state
+    const first = s.copyFlowCookieCombo(row)
+    await s.copyFlowCookieCombo(row)
+    await s.copyFlowCookieCombo({ id: 8, vidsOnly: true })
+    assert.equal(reads, 1)
+    assert.equal(s.busy.has('7:copy-cookie-combo'), true)
+    pending.reject(
+        Object.assign(new Error('Missing saved credentials'), {
+            payload: { detail: { missing: ['__Secure-1PSID', 'OSID'] } },
+        }),
+    )
+    await first
+    assert.deepEqual(copied, [])
+    assert.match(fixture.errors[0].message, /__Secure-1PSID、OSID/)
+    assert.equal(s.busy.has('7:copy-cookie-combo'), false)
+    fixture.api.get = async () => ({ success: true, cookie: 'psid::sid::osid' })
+    await s.copyFlowCookieCombo(row)
+    assert.deepEqual(copied, ['psid::sid::osid'])
 })
 
 test('inline proxy drafts survive row switches and exact credentials copy', async () => {
@@ -1212,12 +1287,20 @@ test('overlapping account polls share requests and a mutation reload waits for f
 test('account quota polling paints cached balances first, merges requests and retains values on failure', async () => {
     const response = deferred()
     const reads = []
+    let now = Date.now()
     const cached = [{ token_id: 1, enabled: true, ready: true, last_quota: { image: { available: 10, total: 100 } } }]
     const {
         state: s,
         api,
         notices,
     } = view('Accounts', {
+        context: {
+            Date: class extends Date {
+                static now() {
+                    return now
+                }
+            },
+        },
         api: {
             get: async (path) => {
                 reads.push(path)
@@ -1238,15 +1321,53 @@ test('account quota polling paints cached balances first, merges requests and re
     response.resolve({ accounts: [{ ...cached[0], last_quota: { image: { available: 8, total: 100 } } }] })
     await Promise.all([first, second])
     assert.equal(s.rows.value[0].vids.last_quota.image.available, 8)
+    await s.load(true)
+    const lastKnown = s.rows.value[0].vids.last_quota.image.available
+    await s.refreshVidsQuota()
+    assert.equal(reads.filter((path) => path.includes('?refresh=true')).length, 1)
+    now += 15 * 60 * 1000
     api.get = async () => {
         throw new Error('额度连接暂时中断')
     }
     await s.refreshVidsQuota()
-    assert.equal(s.rows.value[0].vids.last_quota.image.available, 8)
+    assert.equal(s.rows.value[0].vids.last_quota.image.available, lastKnown)
     assert.equal(s.quotaInfo(s.rows.value[0]).label, '更新失败 · 保留上次额度')
     assert.match(s.quotaInfo(s.rows.value[0]).error, /额度连接/)
     assert.equal(s.quotaRefreshing.value, false)
     assert.equal(notices.length, 0)
+})
+
+test('dashboard quota requests share the 15 minute display refresh interval and pause when hidden', async () => {
+    let now = Date.now()
+    const reads = []
+    const fixture = view('Dashboard', {
+        context: {
+            Date: class extends Date {
+                static now() {
+                    return now
+                }
+            },
+            useRouter: () => ({ push() {} }),
+        },
+        api: {
+            get: async (path) => {
+                reads.push(path)
+                return { configured_count: 0, quota: {} }
+            },
+        },
+    })
+    await fixture.state.refreshVidsQuota()
+    now += 30 * 1000
+    await fixture.state.refreshVidsQuota()
+    assert.equal(reads.length, 1)
+    now += 15 * 60 * 1000
+    fixture.document.hidden = true
+    await fixture.state.refreshVidsQuota()
+    assert.equal(reads.length, 1)
+    fixture.document.hidden = false
+    await fixture.state.refreshVidsQuota()
+    assert.equal(reads.length, 2)
+    assert.ok(reads.every((path) => path === '/api/admin/vids/status?refresh=true'))
 })
 
 test('account quotas distinguish zero, unknown, stale and partial totals while skipping paused pages', async () => {
@@ -1461,6 +1582,234 @@ test('invalid account input stops before API requests and rejected imports do no
     assert.equal(s.accounts.value.length, 1)
     assert.equal(s.importing.value, false)
     assert.match(fixture.errors.at(-1).message, /Unexpected fixture request/)
+})
+
+test('adding an account lets the user choose a proxy before creating Cloak', async () => {
+    const fixture = view('Accounts', {
+        context: { window: { open: () => assert.fail('The picker must not open Cloak') } },
+        api: {
+            get: async (path) => {
+                assert.equal(path, '/api/proxy/pool')
+                return {
+                    entries: [
+                        { id: 17, enabled: true, note: '住宅线路', proxy_url: 'socks5://residential.fixture:1080' },
+                    ],
+                }
+            },
+        },
+    })
+    await fixture.state.openCloakLogin()
+    assert.equal(fixture.state.loginOpen.value, true)
+    assert.equal(fixture.state.loginStarting.value, false)
+    assert.equal(fixture.state.loginSession.value, null)
+    assert.equal(fixture.state.availableProxies.value[0].id, 17)
+    assert.equal(fixture.requests.length, 0)
+})
+
+for (const runtime of ['native', 'docker']) {
+    test(`${runtime} desktop sends extension login to its actual local management address without a WebView handshake`, async () => {
+        const bridge = []
+        const clipboard = []
+        const browserWindow = {
+            lay4flowDesktop: { runtime, version: '1.5.4' },
+            postMessage: (message) => bridge.push(message),
+        }
+        const fixture = view('Accounts', {
+            context: {
+                window: browserWindow,
+                location: { origin: 'http://127.0.0.1:48127' },
+                navigator: { clipboard: { writeText: async (text) => clipboard.push(text) } },
+            },
+        })
+        const s = fixture.state
+        assert.equal(s.desktopShell.value, true)
+        assert.equal(s.nativeDesktop.value, runtime === 'native')
+        assert.equal(s.desktopManagementUrl.value, 'http://127.0.0.1:48127/#/accounts')
+        s.openExtensionLogin()
+        s.detectExtension()
+        s.extensionMessage('import.hello')
+        s.extensionReady.value = true
+        await s.startExtensionLogin()
+        assert.equal(s.extensionOpen.value, true)
+        assert.equal(s.extensionDetecting.value, false)
+        assert.equal(s.extensionSession.value, null)
+        assert.deepEqual(bridge, [])
+        assert.deepEqual(fixture.requests, [])
+        await s.copy(s.desktopManagementUrl.value)
+        assert.deepEqual(clipboard, ['http://127.0.0.1:48127/#/accounts'])
+        s.extensionReady.value = false
+        s.receiveExtensionMessage({
+            source: browserWindow,
+            origin: 'http://127.0.0.1:48127',
+            data: {
+                source: 'lay4flow-import-extension',
+                type: 'import.ready',
+                extension_id: 'unexpected-in-webview',
+                version: '1.8.0',
+            },
+        })
+        assert.equal(s.extensionReady.value, false)
+    })
+}
+
+test('extension detection reports silence and releases its timeout when the view closes', () => {
+    const timers = new Map()
+    let nextTimer = 0
+    const fixture = view('Accounts', {
+        context: {
+            setTimeout: (callback) => {
+                timers.set(++nextTimer, callback)
+                return nextTimer
+            },
+            clearTimeout: (id) => timers.delete(id),
+            window: { postMessage() {}, removeEventListener() {} },
+        },
+    })
+    const s = fixture.state
+    s.detectExtension()
+    assert.equal(s.extensionDetecting.value, true)
+    assert.match(s.extensionDetectionStatus.value, /正在检测/)
+    assert.equal(timers.size, 1)
+    const callback = [...timers.values()][0]
+    timers.clear()
+    callback()
+    assert.equal(s.extensionDetecting.value, false)
+    assert.equal(s.extensionReady.value, false)
+    assert.match(s.extensionDetectionStatus.value, /未检测到扩展/)
+    assert.match(s.extensionDetectionStatus.value, /1\.7\.3/)
+    assert.match(s.extensionDetectionStatus.value, /刷新当前管理页/)
+    s.detectExtension()
+    assert.equal(timers.size, 1)
+    for (const cleanup of fixture.cleanup) cleanup()
+    assert.equal(timers.size, 0)
+})
+
+test('extension detection identifies an incompatible bridge and accepts a compatible extension installed alongside it', () => {
+    const browserWindow = { postMessage() {} }
+    const fixture = view('Accounts', { context: { window: browserWindow } })
+    const s = fixture.state
+    const ready = (extension_id, version) =>
+        s.receiveExtensionMessage({
+            source: browserWindow,
+            origin: 'http://fixture.local',
+            data: { source: 'lay4flow-import-extension', type: 'import.ready', extension_id, version },
+        })
+    s.detectExtension()
+    ready('old', '1.7.3')
+    assert.equal(s.extensionReady.value, false)
+    assert.equal(s.extensionId.value, '')
+    assert.match(s.extensionDetectionStatus.value, /旧扩展 1\.7\.3/)
+    assert.match(s.extensionDetectionStatus.value, /停用旧扩展/)
+    ready('current', '1.8.1')
+    assert.equal(s.extensionReady.value, true)
+    assert.equal(s.extensionVersion.value, '1.8.1')
+    assert.equal(s.extensionId.value, 'current')
+    assert.equal(s.extensionDetectionStatus.value, '')
+    ready('old', '1.7.3')
+    assert.equal(s.extensionReady.value, true)
+    assert.equal(s.extensionId.value, 'current')
+    s.extensionSession.value = { session_id: 'owned-session' }
+    ready('another', '1.9.0')
+    assert.equal(s.extensionId.value, 'current', 'an active login remains bound to its extension')
+})
+
+test('extension login uses the fingerprint browser network and keeps only a scoped receipt in browser storage', async () => {
+    const posts = []
+    const bridge = []
+    const browserWindow = { postMessage: (message, origin) => bridge.push({ message: plain(message), origin }) }
+    const fixture = view('Accounts', {
+        context: { window: browserWindow },
+        api: {
+            post: async (path, body) => {
+                posts.push({ path, body: plain(body) })
+                return {
+                    success: true,
+                    session_id: 'extension-session',
+                    nonce: 'never-persist-this-nonce',
+                    expires_at: Date.now() / 1000 + 300,
+                    complete_url: 'http://fixture.local/api/plugin/import/complete',
+                    return_url: 'http://fixture.local/manage#/accounts',
+                }
+            },
+        },
+    })
+    const s = fixture.state
+    await s.openExtensionLogin()
+    assert.equal(s.extensionOpen.value, true)
+    assert.equal(fixture.requests.length, 0, 'extension login does not load the server proxy pool')
+    bridge.length = 0
+    s.receiveExtensionMessage({
+        source: browserWindow,
+        origin: 'http://fixture.local',
+        data: {
+            source: 'lay4flow-import-extension',
+            type: 'import.ready',
+            extension_id: 'fixture-extension',
+            version: '1.8.0',
+        },
+    })
+    await s.startExtensionLogin()
+    assert.deepEqual(posts, [{ path: '/api/plugin/import/start', body: {} }])
+    assert.equal(bridge[0].origin, 'http://fixture.local')
+    assert.equal(bridge[0].message.type, 'import.start.v2')
+    assert.equal(bridge[0].message.payload.login_context, 'profile')
+    assert.equal(bridge[0].message.payload.nonce, 'never-persist-this-nonce')
+    const stored = JSON.parse(fixture.storage.get('lay4flow.extensionLogin'))
+    assert.equal(stored.session_id, 'extension-session')
+    assert.equal(stored.extension_id, 'fixture-extension')
+    assert.equal('nonce' in stored, false)
+    assert.equal('cookies' in stored, false)
+    s.cancelExtensionLogin()
+    assert.equal(bridge[1].message.type, 'import.cancel.v2')
+    assert.equal(s.extensionSession.value.session_id, 'extension-session')
+    s.receiveExtensionMessage({
+        source: browserWindow,
+        origin: 'http://fixture.local',
+        data: {
+            source: 'lay4flow-import-extension',
+            extension_id: 'fixture-extension',
+            type: 'import.error',
+            session_id: 'extension-session',
+            error_code: 'cancelled',
+            error_summary: '已取消扩展登录',
+        },
+    })
+    assert.equal(s.extensionSession.value, null)
+    assert.equal(fixture.storage.has('lay4flow.extensionLogin'), false)
+})
+
+test('extension bridge ignores foreign origins, extensions and stale sessions before accepting account completion', async () => {
+    const browserWindow = {}
+    const fixture = view('Accounts', { context: { window: browserWindow }, api: { get: accountReads([]) } })
+    const s = fixture.state
+    const ready = { source: 'lay4flow-import-extension', type: 'import.ready', extension_id: 'owned', version: '1.8.0' }
+    s.receiveExtensionMessage({ source: browserWindow, origin: 'https://foreign.fixture', data: ready })
+    assert.equal(s.extensionReady.value, false)
+    s.receiveExtensionMessage({ source: browserWindow, origin: 'http://fixture.local', data: ready })
+    s.extensionSession.value = { session_id: 'current' }
+    const completion = {
+        ...ready,
+        type: 'import.result',
+        session_id: 'current',
+        success: true,
+        result: { email: 'verified@fixture.local' },
+    }
+    s.receiveExtensionMessage({
+        source: browserWindow,
+        origin: 'http://fixture.local',
+        data: { ...completion, extension_id: 'foreign' },
+    })
+    s.receiveExtensionMessage({
+        source: browserWindow,
+        origin: 'http://fixture.local',
+        data: { ...completion, session_id: 'stale' },
+    })
+    assert.equal(s.extensionSession.value.session_id, 'current')
+    assert.equal(fixture.notices.length, 0)
+    s.receiveExtensionMessage({ source: browserWindow, origin: 'http://fixture.local', data: completion })
+    assert.equal(s.extensionSession.value, null)
+    assert.match(s.extensionStatus.value, /verified@fixture.local/)
+    assert.equal(fixture.notices.length, 1)
 })
 
 test('Cloak login opens without an email and automatically completes from its scoped status', async () => {

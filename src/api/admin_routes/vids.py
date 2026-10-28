@@ -14,7 +14,10 @@ from ...services.vids.dispatcher import VidsDispatchError
 from ...services.vids.gateway import GatewayError
 
 KINDS = ("image", "video")
-QUOTA_REFRESH_SECONDS = 60
+# Quota is an observation, not a heartbeat.  Keep automatic reads sparse so
+# opening several console pages cannot turn into a steady upstream poll.
+QUOTA_REFRESH_SECONDS = 15 * 60
+QUOTA_RETRY_MAX_SECONDS = 60 * 60
 
 
 def empty_quota():
@@ -37,9 +40,17 @@ def create_vids_admin_router(
     router = APIRouter(dependencies=[Depends(authenticate)], tags=["Vids console"])
     # ponytail: process-local quota cache; restart explicitly returns "not queried".
     quota_cache = {}
+    # Stores the next monotonic time at which an automatic read is allowed.
     quota_attempts = {}
+    quota_failures = {}
     # ponytail: serialize this small pool's refreshes; use account locks if needed.
     refresh_lock = asyncio.Lock()
+
+    def record_quota_attempt(token_id, failed):
+        failures = min(quota_failures.get(token_id, 0) + 1, 2) if failed else 0
+        quota_failures[token_id] = failures
+        delay = min(QUOTA_RETRY_MAX_SECONDS, QUOTA_REFRESH_SECONDS * (2**failures))
+        quota_attempts[token_id] = time.monotonic() + delay
 
     def observed_quota(token_id):
         now = datetime.now(timezone.utc)
@@ -158,6 +169,7 @@ def create_vids_admin_router(
 
     async def refresh_account_quota(token_id, *, allow_repair, kinds=KINDS):
         repaired = False
+        had_error = False
         try:
             if not runtime_ready():
                 raise GatewayError(503, "session_unavailable", "Vids session is unavailable")
@@ -197,6 +209,7 @@ def create_vids_admin_router(
                     "stale": False,
                 }
             except Exception as failure:
+                had_error = True
                 if isinstance(failure, VidsProtocolError) and failure.status in {401, 403}:
                     binding = dispatcher._accounts.get(token_id)
                     if binding is not None:
@@ -218,7 +231,7 @@ def create_vids_admin_router(
                     ),
                     "stale": values[kind]["queried_at"] is not None,
                 }
-        quota_attempts[token_id] = time.monotonic()
+        record_quota_attempt(token_id, had_error)
 
     async def refresh_due_quotas():
         async with refresh_lock:
@@ -230,10 +243,7 @@ def create_vids_admin_router(
                 if not row.get("ready") or not row.get("enabled") or not kinds:
                     continue
                 attempted_at = quota_attempts.get(token_id)
-                if (
-                    attempted_at is not None
-                    and time.monotonic() - attempted_at < QUOTA_REFRESH_SECONDS
-                ):
+                if attempted_at is not None and time.monotonic() < attempted_at:
                     continue
                 try:
                     gateway = dispatcher._account(token_id, network=True).gateway
@@ -242,6 +252,7 @@ def create_vids_admin_router(
                     await refresh_account_quota(token_id, allow_repair=False, kinds=kinds)
                 except (GatewayError, VidsDispatchError):
                     # A concurrent runtime/session change is visible in detail().
+                    record_quota_attempt(token_id, True)
                     continue
 
     @router.post("/api/admin/vids/accounts/{token_id}/quota-refresh")

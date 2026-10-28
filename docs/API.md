@@ -36,6 +36,8 @@ OpenAI 兼容接口（`/v1/*`）使用 `Authorization: Bearer YOUR_API_KEY`，�
 
 原生 Profile、旧版账号及混合列表共用单工作队列，每任务最多 500 项。同一 `request_id` 与相同内容复用任务，内容不同返回 409。状态只含账号、进度和结果，原始登录态留在服务内存；成功项立即释放输入，失败项供重试。终态最多保留 24 小时 / 100 条，服务重启后重新提交 JSON，已导入账号和 Profile 保留。旧同步端点 `/api/profile-transfer/import` 保持兼容。
 
+指纹浏览器账号登录使用 `/api/plugin/import/extension.zip` 下载当前管理站点专用扩展；管理员在同源页面调用 `POST /api/plugin/import/start`，提交 `{}`，取得五分钟有效的一次性会话。开始接口不访问代理池，Google 登录沿用指纹浏览器自身的网络设置。扩展将当前浏览器的作用域 Cookie、环境、标签页及 Cookie store 标识提交到 `/api/plugin/import/complete`，以 `Authorization: Bearer import:SESSION_ID.NONCE` 和当前管理员 Cookie 共同认证。扩展不读取或修改浏览器代理；服务端收到登录态后，按现有导入规则选择并保存账号固定出口，后续保持绑定。提交内容中的代理字段不会覆盖服务端选择。服务端通过当前 Flow 身份接口、Profile 正常关闭及冷启动检查后才保存账号；重复成功提交返回同一结果。会话随服务重启失效，现有账号不会被覆盖，验证码仍使用 `remote_browser`。
+
 ## 图片
 
 ```sh

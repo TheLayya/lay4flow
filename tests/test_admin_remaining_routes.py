@@ -15,7 +15,14 @@ class AdminRemainingRouteTests(unittest.IsolatedAsyncioTestCase):
         names = [route.endpoint.__name__ for route in routes]
         ordered = [name for name in names if name in admin._ROUTE_ORDER]
         self.assertEqual(ordered, list(admin._ROUTE_ORDER))
-        self.assertFalse(any(route.path.startswith("/api/plugin") for route in routes))
+        self.assertEqual(
+            {route.path for route in routes if route.path.startswith("/api/plugin")},
+            {
+                "/api/plugin/import/start",
+                "/api/plugin/import/complete",
+                "/api/plugin/import/extension.zip",
+            },
+        )
         self.assertFalse(any(route.path == "/api/captcha/runtime-status" for route in routes))
         self.assertLess(
             names.index("batch_proxy_pool_action"), names.index("toggle_proxy_pool_entry")

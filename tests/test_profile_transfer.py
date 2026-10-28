@@ -234,6 +234,19 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
         self.tokens.ensure_project_exists.assert_awaited_once_with(token.id)
         self.assertIsNone(token.ban_reason)
 
+    async def test_explicit_proxy_snapshot_rejects_a_changed_pool_address_before_profile_open(self):
+        original = (await self.database.get_proxy_pool_entry(self.proxy_id)).proxy_url
+        await self.database.update_proxy_pool_entry(
+            self.proxy_id, "socks5://changed.invalid:1080", "changed"
+        )
+        with self.assertRaises(ProfileTransferError) as failure:
+            await self.service.import_bundle(
+                bundle(), proxy_pool_id=self.proxy_id, proxy_url=original
+            )
+        self.assertEqual(failure.exception.code, "proxy_unavailable")
+        self.assertEqual(self.backend.opens, 0)
+        self.assertEqual(await self.database.get_all_tokens(), [])
+
     async def test_disabled_source_stays_disabled_and_duplicate_never_opens_or_overwrites(self):
         first = await self.service.import_bundle(bundle(False))
         token = await self.database.get_token(first["token_id"])

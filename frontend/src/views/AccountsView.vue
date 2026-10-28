@@ -386,6 +386,8 @@ function rememberLoginFailure(failure) {
     }
     sessionStorage.setItem(loginStorage, JSON.stringify(loginSession.value))
 }
+const desktopShell = computed(() => Boolean(window.lay4flowDesktop))
+const desktopManagementUrl = computed(() => `${location.origin}/#/accounts`)
 const nativeDesktop = computed(() => window.lay4flowDesktop?.runtime === 'native')
 const nativePresentation = ref(window.lay4flowDesktop?.runtime === 'native')
 const presentationReady = ref(nativePresentation.value)
@@ -410,10 +412,193 @@ async function detectNativePresentation() {
 const nativeBrowser = ref(null)
 const nativeBrowserBusy = computed(() => busy.has('native-browser'))
 const loginForm = reactive({ proxy_pool_id: null })
+const extensionOpen = ref(false)
+const extensionReady = ref(false)
+const extensionVersion = ref('')
+const extensionDetecting = ref(false)
+const extensionDetectionStatus = ref('')
+const extensionMinimumVersion = '1.8.0'
+let extensionDetectionTimer
+const extensionId = ref('')
+const extensionStarting = ref(false)
+const extensionSession = ref(null)
+const extensionStatus = ref('')
+const extensionError = ref(false)
+const extensionForm = reactive({ login_context: 'profile' })
+const extensionStorage = 'lay4flow.extensionLogin'
+const extensionProgress = {
+    opening: '正在打开指纹浏览器登录页…',
+    tab_open: '请在打开的 Google Flow 页面完成登录。',
+    waiting_flow: '请在当前浏览器中完成 Google Flow 登录。',
+    waiting_credentials: '等待 Google 登录凭据…',
+    submitting: '已读取登录态，服务器正在验证账号并保存。',
+    verifying: '正在验证账号身份和登录态…',
+    closing: '账号已处理，正在结束本次登录。',
+}
+function extensionMessage(type, payload = {}) {
+    if (desktopShell.value) return
+    window.postMessage?.(
+        {
+            source: 'lay4flow-manage',
+            type,
+            ...(extensionId.value ? { extension_id: extensionId.value } : {}),
+            ...(type === 'import.hello' ? payload : { payload }),
+        },
+        location.origin,
+    )
+}
+function clearExtensionSession() {
+    extensionSession.value = null
+    sessionStorage.removeItem(extensionStorage)
+}
+function compatibleExtensionVersion(value) {
+    if (typeof value !== 'string' || !/^\d+(?:\.\d+){2,3}$/.test(value)) return false
+    const parts = value.split('.').map(Number)
+    const minimum = extensionMinimumVersion.split('.').map(Number)
+    for (let index = 0; index < Math.max(parts.length, minimum.length); index++) {
+        const difference = (parts[index] || 0) - (minimum[index] || 0)
+        if (difference) return difference > 0
+    }
+    return true
+}
+function stopExtensionDetection() {
+    clearTimeout(extensionDetectionTimer)
+    extensionDetectionTimer = undefined
+    extensionDetecting.value = false
+}
+function detectExtension() {
+    stopExtensionDetection()
+    if (desktopShell.value) return
+    extensionReady.value = false
+    extensionVersion.value = ''
+    extensionDetectionStatus.value = '正在检测当前浏览器中的登录扩展…'
+    if (!extensionSession.value) extensionId.value = ''
+    extensionDetecting.value = true
+    extensionDetectionTimer = setTimeout(() => {
+        extensionDetectionTimer = undefined
+        extensionDetecting.value = false
+        extensionDetectionStatus.value = `未检测到扩展。请下载本窗口提供的新版扩展（${extensionMinimumVersion} 或更新），加载解压目录后刷新当前管理页；旧版 1.7.3 无法连接此页面。`
+    }, 1800)
+    extensionMessage('import.hello', { session_id: extensionSession.value?.session_id || '' })
+}
+function openExtensionLogin() {
+    loginOpen.value = false
+    extensionOpen.value = true
+    detectExtension()
+}
+async function startExtensionLogin() {
+    if (desktopShell.value) {
+        extensionOpen.value = true
+        return
+    }
+    if (extensionStarting.value || extensionSession.value) return
+    if (!extensionReady.value)
+        return ElMessage.warning(
+            extensionDetectionStatus.value || '请先安装本窗口提供的新版扩展，刷新当前管理页后检测。',
+        )
+    extensionStarting.value = true
+    extensionError.value = false
+    try {
+        const receipt = ensure(await api.post('/api/plugin/import/start', {}))
+        const complete = new URL(receipt.complete_url, location.origin)
+        const back = new URL(receipt.return_url, location.origin)
+        if (
+            complete.origin !== location.origin ||
+            complete.pathname !== '/api/plugin/import/complete' ||
+            complete.search ||
+            complete.hash ||
+            back.origin !== location.origin ||
+            !receipt.session_id ||
+            !receipt.nonce ||
+            !Number.isFinite(Number(receipt.expires_at)) ||
+            Number(receipt.expires_at) <= Date.now() / 1000
+        )
+            throw new Error('扩展登录回执校验失败，请重新开始。')
+        extensionSession.value = {
+            session_id: receipt.session_id,
+            expires_at: receipt.expires_at,
+            extension_id: extensionId.value,
+        }
+        sessionStorage.setItem(extensionStorage, JSON.stringify(extensionSession.value))
+        extensionStatus.value = '请在打开的 Google Flow 页面完成登录。'
+        extensionMessage('import.start.v2', { ...receipt, login_context: extensionForm.login_context })
+    } catch (error) {
+        extensionError.value = true
+        extensionStatus.value = error.message
+        notifyError(error)
+    } finally {
+        extensionStarting.value = false
+    }
+}
+function cancelExtensionLogin() {
+    if (extensionSession.value?.verifying) return
+    if (!extensionSession.value) return
+    extensionMessage('import.cancel.v2', { session_id: extensionSession.value.session_id })
+    extensionStatus.value = '正在结束登录窗口…'
+    extensionError.value = false
+}
+function receiveExtensionMessage(event) {
+    if (desktopShell.value) return
+    if (event.source !== window || event.origin !== location.origin) return
+    const message = event.data || {}
+    if (message.source !== 'lay4flow-import-extension' || !message.extension_id) return
+    if (message.type === 'import.ready') {
+        if (extensionSession.value && extensionId.value && message.extension_id !== extensionId.value) return
+        if (!compatibleExtensionVersion(message.version)) {
+            if (extensionReady.value) return
+            stopExtensionDetection()
+            const version =
+                typeof message.version === 'string' && /^\d+(?:\.\d+){2,3}$/.test(message.version)
+                    ? message.version
+                    : '未知版本'
+            extensionDetectionStatus.value = `检测到旧扩展 ${version}，当前页面需要 ${extensionMinimumVersion} 或更新版本。请停用旧扩展，下载本窗口提供的新版扩展并加载，随后刷新管理页。`
+            return
+        }
+        stopExtensionDetection()
+        extensionId.value = message.extension_id
+        extensionVersion.value = message.version
+        extensionReady.value = true
+        extensionDetectionStatus.value = ''
+        return
+    }
+    if (extensionId.value && message.extension_id !== extensionId.value) return
+    const current = extensionSession.value
+    if (!current || message.session_id !== current.session_id) return
+    if (message.type === 'import.result' && message.success) {
+        const email = message.result?.email || message.email || 'Google 账号'
+        clearExtensionSession()
+        extensionStatus.value = `账号已验证并保存：${email}`
+        extensionError.value = false
+        ElMessage.success(extensionStatus.value)
+        load(true, true)
+    } else if (message.type === 'import.error') {
+        if (message.error_code === 'cleanup_failed') {
+            extensionSession.value.verifying = true
+            sessionStorage.setItem(extensionStorage, JSON.stringify(extensionSession.value))
+            extensionStatus.value = message.error_summary || '正在清理本次登录，请稍候。'
+            extensionError.value = true
+            return
+        }
+        clearExtensionSession()
+        extensionError.value = message.error_code !== 'cancelled'
+        extensionStatus.value = message.error_summary || '扩展登录未完成，请检查扩展后重新开始。'
+    } else if (message.type === 'import.status' && message.active === false) {
+        clearExtensionSession()
+        extensionStatus.value = '上次扩展登录已结束，可查看账号列表或重新开始。'
+        load(true, true)
+    } else if (['import.accepted', 'import.status', 'import.progress'].includes(message.type)) {
+        if (['submitting', 'verifying', 'closing'].includes(message.state)) {
+            extensionSession.value.verifying = true
+            sessionStorage.setItem(extensionStorage, JSON.stringify(extensionSession.value))
+        }
+        extensionStatus.value = extensionProgress[message.state] || '请在指纹浏览器完成 Google Flow 登录。'
+    }
+}
 let pollTimer
 let loadingPromise
 let quotaPromise
 let quotaVersion = 0
+let nextQuotaRefreshAt = 0
 let disposed = false
 const form = reactive({})
 const defaults = () => ({
@@ -698,6 +883,9 @@ function updateAccountSelection(value) {
 }
 async function refreshVidsQuota() {
     if (disposed || quotaPromise || document.hidden || editorOpen.value) return quotaPromise
+    const now = Date.now()
+    if (now < nextQuotaRefreshAt) return
+    nextQuotaRefreshAt = now + 15 * 60 * 1000
     quotaRefreshing.value = true
     const version = quotaVersion
     quotaPromise = api
@@ -712,6 +900,7 @@ async function refreshVidsQuota() {
             if (version === quotaVersion) vidsError.value = error.message
         })
         .finally(() => {
+            nextQuotaRefreshAt = Date.now() + 15 * 60 * 1000
             quotaRefreshing.value = false
             quotaPromise = null
         })
@@ -796,11 +985,7 @@ async function toggleAccountSetting(row, field, value) {
 function selectMobile(row, checked) {
     selected.value = selected.value.filter((item) => item.id !== row.id)
     if (checked) selected.value.push(row)
-    accountsTable.value?.toggleRowSelection(
-        rows.value.find((item) => item.id === row.id) || row,
-        checked,
-        false,
-    )
+    accountsTable.value?.toggleRowSelection(rows.value.find((item) => item.id === row.id) || row, checked, false)
 }
 async function saveAccount() {
     if (!editing.value || saving.value || accountSettingBusy(editing.value) || quickSavingId.value === editing.value.id)
@@ -1033,6 +1218,26 @@ async function copy(value) {
         ElMessage.success('已复制')
     } catch (error) {
         notifyError(error)
+    }
+}
+async function copyFlowCookieCombo(row) {
+    if (!row?.id || row.vidsOnly) return
+    const key = `${row.id}:copy-cookie-combo`
+    if (busy.has(key)) return
+    busy.add(key)
+    try {
+        const result = ensure(await api.get(`/api/tokens/${row.id}/flow-cookie-combo`, { cache: 'no-store' }))
+        if (typeof result.cookie !== 'string' || !result.cookie) throw new Error('已保存的 Cookie 缺少必填项')
+        await navigator.clipboard.writeText(result.cookie)
+        ElMessage.success(`加号格式已复制（${result.has_1psidts ? 4 : 3} 段，使用 :: 分隔）`)
+    } catch (error) {
+        const missing = error?.payload?.detail?.missing
+        if (Array.isArray(missing)) {
+            const names = missing.filter((name) => ['__Secure-1PSID', 'SID', 'OSID'].includes(name))
+            notifyError(new Error(`已保存的 Cookie 缺少：${names.join('、') || '必填项'}`))
+        } else notifyError(error)
+    } finally {
+        busy.delete(key)
     }
 }
 async function toggleRefresh(value) {
@@ -1332,7 +1537,7 @@ async function pollLoginStatus() {
 function openCloakLogin() {
     loginOpen.value = true
     if (loginSession.value) resumeLogin()
-    else startLogin()
+    else return reloadQuickProxies()
 }
 function scheduleLoginStatusPoll() {
     clearInterval(loginStatusTimer)
@@ -1435,6 +1640,22 @@ onMounted(() => {
     load()
     refreshImportJobs()
     document.addEventListener('visibilitychange', refreshVisible)
+    window.addEventListener?.('message', receiveExtensionMessage)
+    try {
+        const stored = JSON.parse(sessionStorage.getItem(extensionStorage) || 'null')
+        if (stored?.session_id && Number(stored.expires_at) > Date.now() / 1000) {
+            extensionSession.value = {
+                session_id: stored.session_id,
+                expires_at: stored.expires_at,
+                verifying: stored.verifying === true,
+            }
+            extensionId.value = stored.extension_id || ''
+            extensionStatus.value = '有一份扩展登录正在进行，可继续查看进度。'
+        } else clearExtensionSession()
+    } catch {
+        clearExtensionSession()
+    }
+    detectExtension()
     try {
         const stored = JSON.parse(sessionStorage.getItem(loginStorage) || 'null')
         if (
@@ -1463,15 +1684,17 @@ onMounted(() => {
     }
     pollTimer = setInterval(() => {
         refreshVisible()
-    }, 15000)
+    }, 30000)
 })
 onUnmounted(() => {
+    stopExtensionDetection()
     disposed = true
     quotaVersion++
     clearInterval(pollTimer)
     clearInterval(importJobTimer)
     clearInterval(loginStatusTimer)
     document.removeEventListener('visibilitychange', refreshVisible)
+    window.removeEventListener?.('message', receiveExtensionMessage)
 })
 </script>
 
@@ -1484,6 +1707,7 @@ onUnmounted(() => {
             </div>
             <div class="page-actions">
                 <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
+                <el-button :icon="Connection" @click="openExtensionLogin">扩展登录</el-button>
                 <el-button type="primary" :icon="Plus" @click="openCloakLogin">添加账号</el-button>
             </div>
         </header>
@@ -1594,7 +1818,7 @@ onUnmounted(() => {
                         成员档案
                         <span class="count-label">{{ rows.length }}</span>
                     </h2>
-                    <p>Flow 积分与 Vids 剩余额度直接查看 · 每分钟自动同步</p>
+                    <p>Flow 积分读取本地记录 · Vids 额度每 15 分钟按需更新</p>
                 </div>
                 <div class="refresh-toggle">
                     <span>自动刷新 ST</span>
@@ -2218,7 +2442,7 @@ onUnmounted(() => {
                 </el-empty>
             </div>
             <footer class="table-footer">
-                <span>显示 {{ filtered.length }} 位成员 · 每 15 秒同步状态 · Vids 额度每分钟自动更新</span>
+                <span>显示 {{ filtered.length }} 位成员 · 每 30 秒读取本地状态 · Vids 额度每 15 分钟按需更新</span>
                 <el-pagination
                     v-model:current-page="page"
                     v-model:page-size="pageSize"
@@ -2355,6 +2579,13 @@ onUnmounted(() => {
                             </div>
                         </dl>
                         <div class="detail-actions">
+                            <el-button
+                                :loading="busy.has(detail.id + ':copy-cookie-combo')"
+                                title="复制已保存的 Cookie 值，按 __Secure-1PSID、SID、OSID、可选 __Secure-1PSIDTS 的顺序使用 :: 拼接"
+                                @click="copyFlowCookieCombo(detail)"
+                            >
+                                复制加号格式
+                            </el-button>
                             <el-button
                                 :icon="Refresh"
                                 :loading="busy.has(detail.id + ':refresh-at')"
@@ -2546,7 +2777,17 @@ onUnmounted(() => {
                                 autocomplete="off"
                                 placeholder="Google Cookies 导出文本"
                             />
-                            <span class="field-note">用于协议登录和会话自动刷新</span>
+                            <div class="cookie-field-actions">
+                                <span class="field-note">用于协议登录和会话自动刷新</span>
+                                <el-button
+                                    size="small"
+                                    :loading="busy.has(editing?.id + ':copy-cookie-combo')"
+                                    title="读取账号已保存的 Cookie，以 :: 拼接；编辑中的未保存内容不参与复制"
+                                    @click="copyFlowCookieCombo(editing)"
+                                >
+                                    复制加号格式
+                                </el-button>
+                            </div>
                         </el-form-item>
                         <div class="form-grid">
                             <el-form-item label="登录账号">
@@ -2689,6 +2930,9 @@ onUnmounted(() => {
                         : '在服务器浏览器完成 Google 登录，验证身份与 Flow 会话后保存 Profile 并加入账号小队。'
                 }}
             </p>
+            <el-button v-if="!loginSession" text :icon="Connection" @click="openExtensionLogin">
+                使用指纹浏览器扩展登录
+            </el-button>
             <p v-if="!presentationReady" class="field-note" role="status">正在连接账号浏览器服务…</p>
             <el-form label-position="top" @submit.prevent="startLogin">
                 <el-form-item v-if="!loginSession" label="账号代理">
@@ -2706,7 +2950,10 @@ onUnmounted(() => {
                             :label="proxyOptionLabel(row)"
                         />
                     </el-select>
-                    <span class="field-note">登录前从池内分配固定出口，后续会话刷新与 API 保持一致。</span>
+                    <span class="field-note">
+                        先选择登录代理，再打开 Cloak；留空时自动分配。登录、刷新与 API 共用选定出口。
+                    </span>
+                    <span class="field-note">住宅代理可先加入代理池，再在这里选择对应线路。</span>
                     <router-link to="/proxies">管理代理池</router-link>
                     <span v-if="proxyPoolError" class="field-note">代理池读取失败：{{ proxyPoolError }}</span>
                 </el-form-item>
@@ -2754,6 +3001,100 @@ onUnmounted(() => {
                         @click="startLogin"
                     >
                         {{ nativePresentation ? '打开本地 Cloak 登录' : '打开 Cloak 登录' }}
+                    </el-button>
+                </template>
+            </template>
+        </el-dialog>
+
+        <el-dialog
+            v-model="extensionOpen"
+            title="扩展登录 · 指纹浏览器"
+            width="min(600px, calc(100vw - 32px))"
+            :close-on-click-modal="false"
+        >
+            <template v-if="desktopShell">
+                <p class="dialog-note">扩展需要在指纹浏览器中运行。软件和下面的本机管理页共用同一个后台与账号资料。</p>
+                <el-form label-position="top">
+                    <el-form-item label="本机管理地址">
+                        <el-input :model-value="desktopManagementUrl" readonly aria-label="本机管理地址" />
+                        <el-button text @click="copy(desktopManagementUrl)">复制管理地址</el-button>
+                    </el-form-item>
+                </el-form>
+                <ol class="extension-steps">
+                    <li>复制上方地址，在你自己的指纹浏览器中打开，并登录管理员账号。</li>
+                    <li>在该页面进入「扩展登录」，下载并安装当前地址专用扩展，完成 Google Flow 登录。</li>
+                    <li>登录成功后回到软件，点击「刷新账号」，即可看到新添加的账号。</li>
+                </ol>
+                <p class="field-note">Google 登录使用指纹浏览器已配置的网络与代理。操作期间保持软件后台运行。</p>
+            </template>
+            <template v-else>
+                <p class="dialog-note">
+                    登录使用指纹浏览器中已配置的网络与代理。在该浏览器打开本管理页，安装扩展后完成 Google Flow 登录。
+                </p>
+                <ol class="extension-steps">
+                    <li>
+                        <a href="/api/plugin/import/extension.zip" download>下载当前管理页专用扩展</a>
+                        ，解压后在浏览器扩展管理页开启开发者模式，加载已解压目录。
+                    </li>
+                    <li>在指纹浏览器中刷新本管理页，再点击「检测扩展」。</li>
+                    <li>点击「开始扩展登录」，在打开的 Flow 页面完成登录。</li>
+                </ol>
+                <div class="extension-detection">
+                    <el-tag :type="extensionReady ? 'success' : 'info'">
+                        {{
+                            extensionReady
+                                ? `扩展已连接 · ${extensionVersion}`
+                                : extensionDetecting
+                                  ? '正在检测扩展'
+                                  : '扩展未连接'
+                        }}
+                    </el-tag>
+                    <el-button text :loading="extensionDetecting" @click="detectExtension">检测扩展</el-button>
+                </div>
+                <el-alert
+                    v-if="extensionDetectionStatus"
+                    :title="extensionDetectionStatus"
+                    :type="extensionDetecting ? 'info' : 'warning'"
+                    :closable="false"
+                    show-icon
+                    role="status"
+                />
+                <el-form v-if="!extensionSession" label-position="top" @submit.prevent="startExtensionLogin">
+                    <el-form-item label="登录环境">
+                        <el-radio-group v-model="extensionForm.login_context" :disabled="extensionStarting">
+                            <el-radio-button value="profile">当前指纹环境</el-radio-button>
+                            <el-radio-button value="isolated">临时无痕窗口</el-radio-button>
+                        </el-radio-group>
+                        <span class="field-note">
+                            当前指纹环境沿用本浏览器的登录态；无痕窗口需要先允许扩展在无痕模式下运行。
+                        </span>
+                    </el-form-item>
+                </el-form>
+                <el-alert
+                    v-if="extensionStatus"
+                    :title="extensionStatus"
+                    :type="extensionError ? 'warning' : 'info'"
+                    :closable="false"
+                    show-icon
+                />
+            </template>
+            <template #footer>
+                <el-button @click="extensionOpen = false">关闭</el-button>
+                <el-button v-if="desktopShell" type="primary" :loading="loading" @click="load(true, true)">
+                    刷新账号
+                </el-button>
+                <template v-else>
+                    <el-button v-if="extensionSession" :disabled="extensionSession.verifying" @click="cancelExtensionLogin">
+                        {{ extensionSession.verifying ? '正在验证并保存' : '取消本次登录' }}
+                    </el-button>
+                    <el-button
+                        v-else
+                        type="primary"
+                        :loading="extensionStarting"
+                        :disabled="!extensionReady"
+                        @click="startExtensionLogin"
+                    >
+                        开始扩展登录
                     </el-button>
                 </template>
             </template>
@@ -3505,6 +3846,32 @@ onUnmounted(() => {
     line-height: 1.7;
     color: var(--muted);
     margin-top: 7px;
+}
+.cookie-field-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+    margin-top: 7px;
+}
+.cookie-field-actions .field-note {
+    margin-top: 0;
+}
+.extension-steps {
+    padding-left: 22px;
+    line-height: 1.8;
+    color: var(--muted);
+}
+.extension-steps li + li {
+    margin-top: 8px;
+}
+.extension-detection {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 16px 0;
 }
 .capability-setting {
     display: flex;

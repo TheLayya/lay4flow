@@ -11,7 +11,11 @@ import httpx
 from fastapi import FastAPI
 
 from src.api import admin
-from src.api.admin_routes.vids import create_vids_admin_router
+from src.api.admin_routes.vids import (
+    QUOTA_REFRESH_SECONDS,
+    QUOTA_RETRY_MAX_SECONDS,
+    create_vids_admin_router,
+)
 from src.services.vids.client import VidsProtocolError, VidsTransportError
 from src.services.vids.dispatcher import VidsDispatchError, VidsProviderDispatcher
 
@@ -362,7 +366,12 @@ class VidsAdminManagementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status["quota"]["image"]["eligible"], 1)
             old = response.json()["accounts"][0]["last_quota"]
 
-            clock.return_value = 161
+            # Several local page refreshes must not repeat upstream reads.
+            clock.return_value = 100 + QUOTA_REFRESH_SECONDS - 1
+            await self.client.get("/api/admin/vids/accounts/detail?refresh=true")
+            self.assertEqual(self.gateway.quota.await_count, 2)
+
+            clock.return_value = 100 + QUOTA_REFRESH_SECONDS + 1
             self.gateway.quota.side_effect = VidsTransportError("private-upstream")
             response = await self.client.get("/api/admin/vids/accounts/detail?refresh=true")
             quota = response.json()["accounts"][0]["last_quota"]
@@ -374,7 +383,11 @@ class VidsAdminManagementTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(quota[kind]["stale"])
             await self.client.get("/api/admin/vids/status?refresh=true")
             self.assertEqual(self.gateway.quota.await_count, 4)
-            clock.return_value = 222
+            # Failure doubles the normal delay and preserves prior observations.
+            clock.return_value += QUOTA_REFRESH_SECONDS + 1
+            await self.client.get("/api/admin/vids/status?refresh=true")
+            self.assertEqual(self.gateway.quota.await_count, 4)
+            clock.return_value += QUOTA_REFRESH_SECONDS + 1
             await self.client.get("/api/admin/vids/status?refresh=true")
             self.assertEqual(self.gateway.quota.await_count, 6)
         self.assert_no_generation_or_session_start()
@@ -403,6 +416,37 @@ class VidsAdminManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.gateway.quota.await_count, 2)
         self.assert_no_generation_or_session_start()
 
+    async def test_automatic_failure_backoff_caps_and_manual_success_resets_it(self):
+        self.gateway.quota.side_effect = VidsTransportError("private-upstream")
+        with patch("src.api.admin_routes.vids.time.monotonic", return_value=100) as clock:
+            await self.client.get("/api/admin/vids/accounts/detail?refresh=true")
+            calls = 2
+            for delay in (
+                2 * QUOTA_REFRESH_SECONDS,
+                4 * QUOTA_REFRESH_SECONDS,
+                QUOTA_RETRY_MAX_SECONDS,
+                QUOTA_RETRY_MAX_SECONDS,
+            ):
+                clock.return_value += delay - 1
+                await self.client.get("/api/admin/vids/status?refresh=true")
+                self.assertEqual(self.gateway.quota.await_count, calls)
+                clock.return_value += 2
+                await self.client.get("/api/admin/vids/status?refresh=true")
+                calls += 2
+                self.assertEqual(self.gateway.quota.await_count, calls)
+
+            self.gateway.quota.side_effect = self.quota
+            await self.client.post("/api/admin/vids/accounts/4/quota-refresh")
+            calls += 2
+            self.assertEqual(self.gateway.quota.await_count, calls)
+            clock.return_value += QUOTA_REFRESH_SECONDS - 1
+            await self.client.get("/api/admin/vids/status?refresh=true")
+            self.assertEqual(self.gateway.quota.await_count, calls)
+            clock.return_value += 2
+            await self.client.get("/api/admin/vids/status?refresh=true")
+            self.assertEqual(self.gateway.quota.await_count, calls + 2)
+        self.assert_no_generation_or_session_start()
+
     async def test_manual_refresh_bypasses_ttl_and_warms_automatic_cache(self):
         with patch("src.api.admin_routes.vids.time.monotonic", return_value=100):
             for _ in range(2):
@@ -429,7 +473,7 @@ class VidsAdminManagementTests(unittest.IsolatedAsyncioTestCase):
         with patch("src.api.admin_routes.vids.datetime", wraps=datetime) as clock:
             clock.now.return_value = observed
             await self.client.get("/api/admin/vids/accounts/detail?refresh=true")
-            clock.now.return_value = observed + timedelta(seconds=60)
+            clock.now.return_value = observed + timedelta(seconds=QUOTA_REFRESH_SECONDS)
             detail = (await self.client.get("/api/admin/vids/accounts/detail")).json()
             self.assertTrue(detail["accounts"][0]["last_quota"]["image"]["stale"])
             status = (await self.client.get("/api/admin/vids/status")).json()

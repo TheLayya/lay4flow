@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "lay4flow-remote OAuth Account Import",
+  "version": "1.8.0",
+  "description": "One-time Google account login for lay4flow-remote.",
+  "permissions": [
+    "cookies",
+    "scripting",
+    "tabs",
+    "storage",
+    "windows",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://*.google.com/*",
+    "https://flow.google.com/*",
+    "https://*.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "授权当前 lay4flow-remote 管理页"
+  },
+  "incognito": "spanning",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://flow.google.com/*"
+      ],
+      "js": [
+        "flow_identity.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ]
+}

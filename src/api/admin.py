@@ -59,6 +59,7 @@ from .admin_routes import captcha_tools
 from .admin_routes.auth import create_auth_router
 from .admin_routes.captcha_config import create_captcha_config_router
 from .admin_routes.captcha_score import create_captcha_score_router
+from .admin_routes.extension_login import create_extension_login_router
 from .admin_routes.logs import (
     _extract_error_summary as _extract_error_summary,
     _truncate_text as _truncate_text,
@@ -239,6 +240,7 @@ router.include_router(auth_router)
         refresh_at,
         st_to_at,
         import_tokens,
+        get_flow_cookie_combo,
     ),
 ) = create_token_router(
     lambda: db,
@@ -365,6 +367,7 @@ _ROUTE_ORDER = (
     "refresh_at",
     "st_to_at",
     "import_tokens",
+    "get_flow_cookie_combo",
     "get_proxy_config",
     "get_proxy_config_alias",
     "update_proxy_config_alias",
@@ -520,3 +523,4 @@ async def import_legacy_account(bundle, *, proxy_url=None, proxy_pool_id=None):
 router.include_router(
     create_profile_transfer_router(lambda: token_manager, verify_admin_token, import_legacy_account)
 )
+router.include_router(create_extension_login_router(lambda: token_manager, verify_admin_token))

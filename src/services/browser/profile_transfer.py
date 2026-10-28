@@ -466,10 +466,17 @@ class ProfileTransfer:
             manager = self.refresher.manager
             normalized = manager._normalize_account_key(email)
             profile_dir = manager.root_dir / normalized
+            requested_proxy_url = proxy_url
             try:
                 proxy_pool_id, proxy_url = await ProxyManager(self.tokens.db).select_account_proxy(
                     proxy_pool_id, proxy_url
                 )
+                if (
+                    requested_proxy_url
+                    and ProxyManager(self.tokens.db).normalize_proxy_url(requested_proxy_url)
+                    != proxy_url
+                ):
+                    raise ValueError("proxy changed")
             except ValueError:
                 raise ProfileTransferError(
                     "proxy_unavailable", "请选择可用的代理池出口，或先在代理池添加出口"

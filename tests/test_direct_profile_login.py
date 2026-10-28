@@ -32,9 +32,11 @@ class LoginBackend:
         self.signed_in = True
         self.flow_error = None
         self.flow_reads = []
+        self.launch_proxies = []
 
     async def open(self, profile_dir, **kwargs):
         self.opens += 1
+        self.launch_proxies.append(kwargs.get("proxy_url"))
         (profile_dir / "Default").mkdir(exist_ok=True)
         (profile_dir / "launch_settings.sha256").write_text("synthetic-options")
         page = SimpleNamespace(
@@ -297,6 +299,44 @@ class DirectProfileLoginTests(unittest.IsolatedAsyncioTestCase):
         await self.db.set_proxy_pool_enabled(second, False)
         with self.assertRaises(ViewerError):
             await self.viewer.login.start("user@example.invalid", "", "owner", proxy_pool_id=second)
+        self.assertEqual(await self.db.get_all_tokens(), [])
+
+    async def test_selected_proxy_survives_anonymous_identity_adoption_and_cold_reopen(self):
+        selected_url = "http://synthetic:secret@residential.invalid:8080"
+        selected_id = await self.db.add_proxy_pool_entry(selected_url)
+        self.refresher._proxy_url = ProfileSessionRefresher._proxy_url.__get__(self.refresher)
+
+        receipt = await self.viewer.login.start(owner="owner", proxy_pool_id=selected_id)
+        pending = await self.db.get_token(receipt["token_id"])
+        self.assertEqual((pending.proxy_pool_id, pending.proxy_url), (selected_id, selected_url))
+        self.assertFalse(pending.is_active)
+        await self.login()
+
+        result = await self.viewer.login.complete(
+            receipt["session_id"], "owner", receipt["viewer_id"]
+        )
+
+        saved = await self.db.get_token(receipt["token_id"])
+        self.assertTrue(result["success"] and saved.is_active)
+        self.assertEqual(saved.email, self.backend.identity)
+        self.assertEqual((saved.proxy_pool_id, saved.proxy_url), (selected_id, selected_url))
+        self.assertEqual(self.backend.launch_proxies, [selected_url] * 3)
+        self.assertEqual(self.backend.closed, 3)
+        self.assertNotIn("secret", str(result))
+
+    async def test_custom_proxy_is_registered_and_used_instead_of_automatic_pool_choice(self):
+        selected_url = "socks5h://synthetic:secret@residential.invalid:1080"
+        self.refresher._proxy_url = ProfileSessionRefresher._proxy_url.__get__(self.refresher)
+
+        receipt = await self.viewer.login.start("user@example.invalid", selected_url, "owner")
+
+        saved = await self.db.get_token(receipt["token_id"])
+        self.assertNotEqual(saved.proxy_pool_id, self.proxy_id)
+        self.assertEqual(saved.proxy_url, selected_url)
+        entry = await self.db.get_proxy_pool_entry(saved.proxy_pool_id)
+        self.assertEqual(entry.proxy_url, selected_url)
+        self.assertEqual(self.backend.launch_proxies, [selected_url] * 2)
+        await self.viewer.login.cancel(receipt["session_id"], "owner", receipt["viewer_id"])
         self.assertEqual(await self.db.get_all_tokens(), [])
 
     async def test_cold_identity_failure_and_manual_disable_do_not_enable_account(self):

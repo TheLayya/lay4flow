@@ -29,7 +29,8 @@ const loading = ref(true),
     refreshed = ref('')
 let timer,
     refreshing = false,
-    quotaRequest
+    quotaRequest,
+    nextQuotaRefreshAt = 0
 const metrics = computed(() => [
     {
         label: '今日图片',
@@ -91,6 +92,10 @@ const vidsQuotas = computed(() =>
 )
 async function refreshVidsQuota() {
     if (quotaRequest) return quotaRequest
+    if (document.hidden) return
+    const now = Date.now()
+    if (now < nextQuotaRefreshAt) return
+    nextQuotaRefreshAt = now + 15 * 60 * 1000
     quotaLoading.value = true
     quotaRequest = api
         .get('/api/admin/vids/status?refresh=true')
@@ -102,6 +107,7 @@ async function refreshVidsQuota() {
             quotaError.value = error.message
         })
         .finally(() => {
+            nextQuotaRefreshAt = Date.now() + 15 * 60 * 1000
             quotaLoading.value = false
             quotaRequest = null
         })

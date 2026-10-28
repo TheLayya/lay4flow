@@ -107,7 +107,14 @@ class AdminCaptchaConfigTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     response.json()["detail"], "Only remote_browser captcha is supported"
                 )
-        self.assertFalse(any(route.path.startswith("/api/plugin") for route in admin.router.routes))
+        self.assertEqual(
+            {route.path for route in admin.router.routes if route.path.startswith("/api/plugin")},
+            {
+                "/api/plugin/import/start",
+                "/api/plugin/import/complete",
+                "/api/plugin/import/extension.zip",
+            },
+        )
 
     async def test_reload_runs_after_successful_persistence(self):
         order = []

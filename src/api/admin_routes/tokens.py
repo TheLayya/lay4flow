@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from ...core.account_identity import same_google_identity
+from ...services.flow.google_cookies import extract_flow_cookie_combo
 from ...services.proxy_manager import ProxyManager
 from ...services.vids.gateway import GatewayError
 from ..admin_schemas import AddTokenRequest, ImportTokensRequest, ST2ATRequest, UpdateTokenRequest
@@ -173,6 +174,25 @@ def create_token_router(
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"添加Token失败: {str(e)}")
+
+    @router.get("/api/tokens/{token_id}/flow-cookie-combo")
+    async def get_flow_cookie_combo(token_id: int, token: str = Depends(verify_token)):
+        """Read only the stored account credentials; extraction never starts Cloak."""
+        headers = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+        account = await get_token_manager().get_token(token_id)
+        if account is None:
+            raise HTTPException(404, detail="账号不存在", headers=headers)
+        result = extract_flow_cookie_combo(account.google_cookies)
+        if result["missing"]:
+            raise HTTPException(
+                422,
+                detail={"message": "已保存的 Cookie 缺少必填项", "missing": result["missing"]},
+                headers=headers,
+            )
+        return JSONResponse(
+            {"success": True, "token_id": account.id, "email": account.email, **result},
+            headers=headers,
+        )
 
     @router.put("/api/tokens/{token_id}")
     async def update_token(
@@ -542,4 +562,5 @@ def create_token_router(
         refresh_at,
         st_to_at,
         import_tokens,
+        get_flow_cookie_combo,
     )

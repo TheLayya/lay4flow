@@ -78,8 +78,21 @@ await context.route('**/*', async (route) => {
         return route.fulfill({ contentType: 'text/html', body: '<p>Synthetic Cloak login</p>' })
     if (url.pathname === '/api/profile-login/synthetic-session') {
         if (!completeReady) return json(route, { success: true, status: 'waiting', message: '等待 Google 登录完成' })
-        if (!accounts.length) accounts.push({ id: 71, email: 'direct@example.test', is_active: true, credits: 1050, browser_profile_source: 'cloak', browser_profile_status: 'ready', refresh_status: 'ready' })
-        return json(route, { success: true, status: 'ready', result: { token_id: 71, email: 'direct@example.test', is_active: true } })
+        if (!accounts.length)
+            accounts.push({
+                id: 71,
+                email: 'direct@example.test',
+                is_active: true,
+                credits: 1050,
+                browser_profile_source: 'cloak',
+                browser_profile_status: 'ready',
+                refresh_status: 'ready',
+            })
+        return json(route, {
+            success: true,
+            status: 'ready',
+            result: { token_id: 71, email: 'direct@example.test', is_active: true },
+        })
     }
     if (url.pathname === '/api/tokens/71/profile-export') return json(route, { success: true, bundle })
     if (url.pathname === '/api/profile-transfer/jobs') {
@@ -135,18 +148,35 @@ const record = (text) => {
     console.log(`PASS ${text}`)
 }
 try {
-    await page.goto(`${base}/static/app/#/accounts`)
+    await page.goto(`${base}/#/accounts`)
     await page.locator('.accounts-view h1').waitFor()
-    const popupPromise = context.waitForEvent('page')
+    await page.locator('.page-actions').getByRole('button', { name: '扩展登录', exact: true }).click()
+    const extensionDialog = page.getByRole('dialog', { name: '扩展登录 · 指纹浏览器' })
+    await extensionDialog.waitFor()
+    assert.equal(await extensionDialog.locator('.el-select').count(), 0)
+    assert.equal(await extensionDialog.getByText('管理代理池', { exact: true }).count(), 0)
+    await extensionDialog.getByText('登录使用指纹浏览器中已配置的网络与代理。', { exact: false }).waitFor()
+    await extensionDialog.getByRole('button', { name: '关闭', exact: true }).click()
+    await extensionDialog.waitFor({ state: 'hidden' })
+    record('Extension login uses the fingerprint browser network without asking for another proxy')
     await page.locator('.page-actions').getByRole('button', { name: '添加账号', exact: true }).click()
+    await loginDialog().getByRole('button', { name: '打开 Cloak 登录', exact: true }).waitFor()
+    assert.equal(
+        requests.some((request) => request.path === '/api/profile-login'),
+        false,
+    )
+    await loginDialog().locator('.el-select').click()
+    await page.getByRole('option', { name: /#17/ }).click()
+    const popupPromise = context.waitForEvent('page')
+    await loginDialog().getByRole('button', { name: '打开 Cloak 登录', exact: true }).click()
     const popup = await popupPromise
     await popup.waitForURL(`${base}/api/profile-browser/71?viewer_id=synthetic-viewer&login_session=synthetic-session`)
     await loginDialog().getByText('等待登录', { exact: true }).waitFor()
     assert.equal(await loginDialog().getByPlaceholder('name@gmail.com').count(), 0)
     assert.equal(await loginDialog().getByRole('button', { name: '完成登录并添加', exact: true }).count(), 0)
     assert.ok(await page.evaluate(() => !!sessionStorage.getItem('lay4flow.profileLogin')))
-    assert.deepEqual(requests.find((request) => request.path === '/api/profile-login').body, {})
-    record('Add account immediately opens Cloak without an email or manual completion')
+    assert.deepEqual(requests.find((request) => request.path === '/api/profile-login').body, { proxy_pool_id: 17 })
+    record('Add account offers proxy selection before opening Cloak without an email or manual completion')
 
     await page.reload()
     await page.getByRole('button', { name: '查看登录进度', exact: true }).click()
@@ -155,7 +185,10 @@ try {
     await loginDialog().waitFor({ state: 'hidden' })
     await page.locator('.accounts-table').getByText('direct@example.test', { exact: true }).waitFor()
     assert.equal(await page.evaluate(() => sessionStorage.getItem('lay4flow.profileLogin')), null)
-    assert.equal(requests.some((request) => request.path.endsWith('/complete')), false)
+    assert.equal(
+        requests.some((request) => request.path.endsWith('/complete')),
+        false,
+    )
     record('Reload resumes status polling and automatically adds the detected Google account')
 
     const downloadPromise = page.waitForEvent('download')

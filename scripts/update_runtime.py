@@ -15,6 +15,14 @@ import tarfile
 from pathlib import Path, PurePosixPath
 
 PUBLIC_ROOTS = {"src", "static", "docker", "docs", "scripts"}
+EXTENSION_FILES = {
+    "account_import_extension/manifest.json",
+    "account_import_extension/manifest.template.json",
+    "account_import_extension/background.js",
+    "account_import_extension/content.js",
+    "account_import_extension/flow_identity.js",
+    "account_import_extension/README.md",
+}
 PUBLIC_FILES = {
     "VERSION",
     "main.py",
@@ -62,6 +70,8 @@ def public_path(name: str) -> bool:
     if any(part.lower() in PRIVATE_PARTS for part in path.parts):
         return False
     if name in PUBLIC_FILES:
+        return True
+    if name in EXTENSION_FILES:
         return True
     if not path.parts or path.parts[0] not in PUBLIC_ROOTS:
         return False
@@ -130,7 +140,7 @@ def prepare(archive: Path, checksums: Path, candidate: Path, version: str) -> di
 
 
 def public_files(root: Path):
-    for name in sorted(PUBLIC_FILES):
+    for name in sorted(PUBLIC_FILES | EXTENSION_FILES):
         path = root / name
         if path.is_file() and not path.is_symlink():
             yield path, name

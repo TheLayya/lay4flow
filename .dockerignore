@@ -22,6 +22,7 @@ docker/**
 !scripts/
 scripts/**
 !scripts/smoke_package.py
+!scripts/build_account_import_extension.py
 !scripts/update.ps1
 !scripts/update.sh
 !scripts/update_runtime.py
@@ -42,6 +43,9 @@ config/**
 !README.md
 !LICENSE
 !NOTICE
+!account_import_extension/
+!account_import_extension/*.js
+!account_import_extension/*.md
 !SECURITY.md
 !.env.example
 
@@ -68,3 +72,5 @@ config/**
 **/.env.*
 !.env.example
 !config/setting_example.toml
+!account_import_extension/manifest.json
+!account_import_extension/manifest.template.json

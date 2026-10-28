@@ -9,6 +9,40 @@ from scripts import update_runtime
 
 
 class UpdateRuntimeTests(unittest.TestCase):
+    def test_login_extension_assets_are_public_but_extra_extension_files_are_not(self):
+        for name in update_runtime.EXTENSION_FILES:
+            with self.subTest(name=name):
+                self.assertTrue(update_runtime.public_path(name))
+        for name in (
+            "account_import_extension/cookies.json",
+            "account_import_extension/accounts.json",
+            "account_import_extension/extra.js",
+            "account_import_extension/session.private.json",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(update_runtime.public_path(name))
+
+    def test_apply_and_rollback_include_login_extension_public_files_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root, candidate, backup = base / "installed", base / "candidate", base / "backup"
+            for target in (root, candidate):
+                target.mkdir()
+                (target / "VERSION").write_text("fixture", encoding="utf-8")
+                (target / "account_import_extension").mkdir()
+            name = "account_import_extension/background.js"
+            (root / name).write_text("old worker", encoding="utf-8")
+            (candidate / name).write_text("new worker", encoding="utf-8")
+            (candidate / "account_import_extension/cookies.json").write_text(
+                "private synthetic fixture", encoding="utf-8"
+            )
+            update_runtime.snapshot(root, backup, candidate, "")
+            update_runtime.apply(root, candidate)
+            self.assertEqual((root / name).read_text(encoding="utf-8"), "new worker")
+            self.assertFalse((root / "account_import_extension/cookies.json").exists())
+            update_runtime.restore(root, backup)
+            self.assertEqual((root / name).read_text(encoding="utf-8"), "old worker")
+
     def make_archive(self, root: Path, *, unsafe: str | None = None) -> tuple[Path, Path]:
         archive = root / "lay4flow-remote-1.2.0-runtime.tar.gz"
         required = {
