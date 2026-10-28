@@ -248,6 +248,30 @@ def apply(root: Path, candidate: Path) -> None:
 def restore(root: Path, backup: Path, *, restore_data: bool = False) -> dict:
     root, backup = map(filesystem_path, (root, backup))
     metadata = json.loads((backup / "metadata.json").read_text(encoding="utf-8"))
+    # Prove the current data directories can move before replacing any public
+    # files. A still-running backend on Windows may lock data/; failing here
+    # must not leave old program files paired with an unrestored database.
+    displaced = []
+    if restore_data:
+        try:
+            for name in ("data", "tmp"):
+                saved = backup / "persistent" / name
+                current = root / name
+                if not saved.exists():
+                    continue
+                failed = backup / ("failed-" + name)
+                if failed.exists():
+                    raise ValueError(f"Preserved failed data already exists: {failed}")
+                if current.exists():
+                    current.rename(failed)
+                    displaced.append((current, failed))
+        except (OSError, ValueError):
+            for current, failed in reversed(displaced):
+                failed.rename(current)
+            raise ValueError(
+                "The application data is still in use; current runtime and data were preserved. "
+                "Stop this installation's backend before retrying recovery."
+            ) from None
     for name in metadata["added_files"]:
         if public_path(name):
             if name in {"scripts/update.ps1", "scripts/update.sh", "scripts/update_runtime.py"}:
@@ -261,11 +285,6 @@ def restore(root: Path, backup: Path, *, restore_data: bool = False) -> dict:
             saved = backup / "persistent" / name
             current = root / name
             if saved.exists():
-                failed = backup / ("failed-" + name)
-                if current.exists():
-                    if failed.exists():
-                        raise ValueError(f"Preserved failed data already exists: {failed}")
-                    current.rename(failed)
                 shutil.copytree(saved, current, symlinks=True)
     # .env/config are never overwritten by an update; keep all current local values.
     return metadata

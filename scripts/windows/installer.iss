@@ -10,6 +10,9 @@
 #ifndef WebView2Bootstrapper
   #error Pass Microsoft-signed WebView2 bootstrapper path
 #endif
+#ifndef SetupCompression
+  #define SetupCompression "lzma2"
+#endif
 
 [Setup]
 AppId={{7A53958F-0D3A-4831-A9BE-B52BDF0D83C8}
@@ -20,7 +23,7 @@ DefaultDirName={localappdata}\lay4flow-remote
 OutputDir={#OutputDir}
 OutputBaseFilename=lay4flow-remote-{#AppVersion}-windows-x64-setup
 SetupIconFile=tkcrm.ico
-Compression=lzma2
+Compression={#SetupCompression}
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible

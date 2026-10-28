@@ -2,7 +2,8 @@
 param(
   [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'lay4flow-remote'),
   [int]$Port = 38000,
-  [switch]$NoBrowser
+  [switch]$NoBrowser,
+  [switch]$AllowMaintenance
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -15,24 +16,12 @@ $statePath = Join-Path $stateDir 'native-service.json'
 $logPath = Join-Path $stateDir 'native-service.log'
 $stopPath = Join-Path $stateDir 'native-service.stop'
 $expectedVersion = (Get-Content -LiteralPath (Join-Path $InstallDir 'VERSION') -Raw).Trim()
+. (Join-Path $PSScriptRoot 'native-process.ps1')
 if ($Port -lt 1 -or $Port -gt 65535) { throw 'The native backend port is invalid.' }
 if (-not (Test-Path -LiteralPath $python)) { throw "Bundled Python runtime is missing: $python" }
 if (-not (Test-Path -LiteralPath $service)) { throw "Native backend launcher is missing: $service" }
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 
-function Get-OwnedProcess($State) {
-  if (-not $State.PSObject.Properties['pid'] -or -not $State.PSObject.Properties['creation_ticks']) { return $null }
-  try {
-    $taskProcessId = [int]$State.pid
-    $value = Get-CimInstance Win32_Process -Filter "ProcessId=$taskProcessId"
-    if (-not $value -or -not $value.ExecutablePath -or -not $value.CommandLine) { return $null }
-    if ([IO.Path]::GetFullPath([string]$value.ExecutablePath) -ne $python) { return $null }
-    if ($value.CommandLine.IndexOf($service, [StringComparison]::OrdinalIgnoreCase) -lt 0 -or $value.CommandLine.IndexOf($InstallDir, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $null }
-    $process = Get-Process -Id $taskProcessId -ErrorAction Stop
-    if ([string]$process.StartTime.ToUniversalTime().Ticks -ne [string]$State.creation_ticks) { return $null }
-    return $process
-  } catch { return $null }
-}
 function Test-NativeHealth {
   try {
     $status = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 3
@@ -40,26 +29,27 @@ function Test-NativeHealth {
   } catch { return $false }
 }
 
-$hashAlgorithm = [Security.Cryptography.SHA256]::Create()
-try { $key = ([BitConverter]::ToString($hashAlgorithm.ComputeHash([Text.Encoding]::UTF8.GetBytes($InstallDir.ToUpperInvariant())))).Replace('-', '').Substring(0, 24) } finally { $hashAlgorithm.Dispose() }
-$mutex = [Threading.Mutex]::new($false, ('Local\lay4flow-native-start-' + $key))
+$mutex = Get-NativeMutex $InstallDir
 $locked = $false
 try {
   try { $locked = $mutex.WaitOne(120000) } catch [Threading.AbandonedMutexException] { $locked = $true }
   if (-not $locked) { throw 'Another launch is still starting the native backend.' }
+  if (-not $AllowMaintenance -and (Test-Path -LiteralPath (Join-Path $stateDir 'update-maintenance'))) {
+    throw 'The application is being updated. Its backend will restart automatically when installation completes.'
+  }
+  $owned = @(Get-NativeOwnedProcesses $InstallDir)
+  if ($owned.Count -gt 1) { throw 'More than one owned native backend is running. Close this installation before retrying.' }
+  if ($owned.Count -eq 1) {
+    $Port = $owned[0].Port
+    @{pid=$owned[0].Process.Id; port=$Port; creation_ticks=$owned[0].CreationTicks; backend=$backend} | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+    if (Test-NativeHealth) { Write-Host "lay4flow-remote native backend is ready: http://127.0.0.1:$Port/login"; return }
+    throw "The existing native backend is still running but is not ready. See $logPath"
+  }
   if (Test-Path -LiteralPath $statePath) {
-    try {
-      $saved = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-      $owned = Get-OwnedProcess $saved
-    } catch { $owned = $null }
-    if ($owned) {
-      $Port = [int]$saved.port
-      if (Test-NativeHealth) { Write-Host "lay4flow-remote native backend is ready: http://127.0.0.1:$Port/login"; return }
-      throw "The existing native backend is still running but is not ready. See $logPath"
-    }
     Remove-Item -LiteralPath $statePath -Force
   }
   $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
+  $listener.ExclusiveAddressUse = $true
   try { $listener.Start() } catch { throw "The local port $Port belongs to another process. Choose an available local port." } finally { $listener.Stop() }
   $env:LAY4FLOW_NATIVE_RUNTIME = '1'
   $env:LAY4FLOW_PROFILE_VIEWER_ENABLED = '1'

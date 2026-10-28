@@ -4,6 +4,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import update_runtime
 
@@ -144,6 +145,35 @@ class UpdateRuntimeTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "generation jobs"):
                 update_runtime.assert_idle(root)
+
+    def test_locked_data_cannot_partially_rollback_public_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root, candidate, backup = base / "installed", base / "candidate", base / "backup"
+            for target in (root, candidate):
+                target.mkdir()
+            (root / "VERSION").write_text("old", encoding="utf-8")
+            (candidate / "VERSION").write_text("new", encoding="utf-8")
+            for name in ("data", "tmp"):
+                (root / name).mkdir()
+                (root / name / "state.txt").write_text("saved", encoding="utf-8")
+            update_runtime.snapshot(root, backup, candidate, "")
+            update_runtime.apply(root, candidate)
+            (root / "data/state.txt").write_text("current", encoding="utf-8")
+            rename = Path.rename
+
+            def blocked(path, target):
+                if path.name == "tmp":
+                    raise PermissionError("synthetic locked directory")
+                return rename(path, target)
+
+            with patch.object(Path, "rename", blocked):
+                with self.assertRaisesRegex(ValueError, "still in use"):
+                    update_runtime.restore(root, backup, restore_data=True)
+            self.assertEqual((root / "VERSION").read_text(), "new")
+            self.assertEqual((root / "data/state.txt").read_text(), "current")
+            self.assertEqual((root / "tmp/state.txt").read_text(), "saved")
+            self.assertFalse((backup / "failed-data").exists())
 
     def test_apply_rejects_parent_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:

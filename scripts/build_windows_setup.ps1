@@ -2,7 +2,8 @@
 param(
   [Parameter(Mandatory = $true)][string]$BundleZip,
   [Parameter(Mandatory = $true)][string]$OutputDir,
-  [string]$Iscc = (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
+  [string]$Iscc = (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
+  [ValidateSet('lzma2', 'lzma2/fast')][string]$Compression = 'lzma2'
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -28,7 +29,7 @@ try {
   }
   $signature = Get-AuthenticodeSignature -LiteralPath $bootstrapper
   if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { throw "Microsoft WebView2 bootstrapper signature verification failed" }
-  & $Iscc "/DAppVersion=$version" "/DBundleDir=$bundle" "/DOutputDir=$OutputDir" "/DWebView2Bootstrapper=$bootstrapper" (Join-Path $PSScriptRoot "windows\installer.iss")
+  & $Iscc "/DAppVersion=$version" "/DBundleDir=$bundle" "/DOutputDir=$OutputDir" "/DWebView2Bootstrapper=$bootstrapper" "/DSetupCompression=$Compression" (Join-Path $PSScriptRoot "windows\installer.iss")
   if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed: $LASTEXITCODE" }
   $hash = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant()
   Add-Content -LiteralPath (Join-Path $OutputDir "SHA256SUMS") -Encoding ascii -Value "$hash  $([IO.Path]::GetFileName($output))"

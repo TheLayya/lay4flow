@@ -4,7 +4,8 @@ param(
   [int]$Port = 38000,
   [string]$ProjectName = "lay4flow-remote",
   [switch]$AlreadyStarted,
-  [switch]$NoBrowser
+  [switch]$NoBrowser,
+  [switch]$AllowMaintenance
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -20,7 +21,7 @@ if (Test-Path -LiteralPath (Join-Path $InstallDir '.lay4flow-windows\backend\win
     $nativePort = Select-String -LiteralPath $nativeEnv -Pattern '^LAY4FLOW_REMOTE_PORT=(\d+)' | Select-Object -First 1
     if ($nativePort) { $Port = [int]$nativePort.Matches[0].Groups[1].Value }
   }
-  & (Join-Path $PSScriptRoot 'native-start.ps1') -InstallDir $InstallDir -Port $Port -NoBrowser
+  & (Join-Path $PSScriptRoot 'native-start.ps1') -InstallDir $InstallDir -Port $Port -NoBrowser -AllowMaintenance:$AllowMaintenance
   if (-not $NoBrowser) {
     Start-Process -FilePath (Join-Path $InstallDir '.lay4flow-windows\desktop\Lay4Flow.Desktop.exe') -ArgumentList @('--install-dir', ('"' + $InstallDir + '"')) -WorkingDirectory $InstallDir
   }
