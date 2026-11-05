@@ -117,6 +117,108 @@ class FlowProfileProjectTests(unittest.IsolatedAsyncioTestCase):
                 await create_profile_project(self.tokens, self.token, "Fixture title")
         self.assertEqual(await self.db.get_projects_by_token(self.token_id), [])
 
+    async def test_empty_remote_list_creates_project(self):
+        self.rpc.side_effect = [[], ["project-id"]]
+        result = await create_profile_project(self.tokens, self.token, "Fixture title")
+        self.assertEqual((result.project_id, result.token_id), ("project-id", self.token_id))
+        self.rpc.assert_awaited_with(
+            self.context,
+            "jHPbke",
+            ["projects/*", [None, ["Fixture title"]], [None, 22]],
+            network_step="flow_projects",
+        )
+        self.assertEqual(
+            [row.project_id for row in await self.db.get_projects_by_token(self.token_id)],
+            ["project-id"],
+        )
+
+    async def test_malformed_remote_list_never_creates_project(self):
+        for payload in ({}, None, ["x"], [["non-row"]]):
+            self.rpc.reset_mock()
+            self.rpc.side_effect = [payload, ["project-id"]]
+            with self.subTest(payload=payload), self.assertRaises(FlowRPCError):
+                await create_profile_project(self.tokens, self.token, "Fixture title")
+            self.rpc.assert_awaited_once_with(
+                self.context, "UpteDb", ["projects/*", 21], network_step="flow_projects"
+            )
+        self.assertEqual(await self.db.get_projects_by_token(self.token_id), [])
+
+    async def test_empty_remote_list_never_saves_malformed_created_project(self):
+        for payload in ([], {}, [None], [""], [False]):
+            self.rpc.side_effect = [[], payload]
+            with self.subTest(payload=payload), self.assertRaises(FlowRPCError):
+                await create_profile_project(self.tokens, self.token, "Fixture title")
+        self.assertEqual(await self.db.get_projects_by_token(self.token_id), [])
+
+    async def test_created_project_logs_only_token_id_and_result(self):
+        self.rpc.side_effect = [[], ["project-id"]]
+        with self.assertLogs("lay4flow.flow_projects", "INFO") as logs:
+            await create_profile_project(self.tokens, self.token, "Fixture title")
+        self.assertEqual(len(logs.records), 1)
+        message = logs.records[0].getMessage()
+        self.assertEqual(logs.records[0].levelname, "INFO")
+        self.assertIn(f"token {self.token_id}", message)
+        self.assertIn("pool write ok", message)
+        for private in (self.token.email, "Fixture title", "project-id"):
+            self.assertNotIn(private, message)
+
+    async def test_rejected_project_write_logs_rejection_without_identity(self):
+        self.rpc.side_effect = [[], ["project-id"]]
+        with (
+            patch.object(
+                self.db, "add_project_if_credentials_match", new=AsyncMock(return_value=None)
+            ),
+            self.assertLogs("lay4flow.flow_projects", "INFO") as logs,
+            self.assertRaises(FlowRPCError),
+        ):
+            await create_profile_project(self.tokens, self.token, "Fixture title")
+        self.assertEqual(len(logs.records), 1)
+        message = logs.records[0].getMessage()
+        self.assertIn(f"token {self.token_id}", message)
+        self.assertIn("pool write rejected", message)
+        for private in (self.token.email, "Fixture title", "project-id"):
+            self.assertNotIn(private, message)
+
+    async def test_reused_remote_project_does_not_log_creation(self):
+        self.rpc.side_effect = None
+        self.rpc.return_value = [[["remote-id", ["Existing title"]]]]
+        with self.assertNoLogs("lay4flow.flow_projects", "INFO"):
+            await create_profile_project(self.tokens, self.token, "Fixture title")
+        with (
+            patch.object(
+                self.db, "add_project_if_credentials_match", new=AsyncMock(return_value=None)
+            ),
+            self.assertNoLogs("lay4flow.flow_projects", "INFO"),
+            self.assertRaises(FlowRPCError),
+        ):
+            await create_profile_project(self.tokens, self.token, "Fixture title")
+
+    async def test_empty_account_fills_project_pool_with_named_projects(self):
+        created = iter(f"created-{index}" for index in range(1, 10))
+
+        async def rpc(context, rpcid, payload, **kwargs):
+            return [] if rpcid == "UpteDb" else [next(created)]
+
+        self.rpc.side_effect = rpc
+        pool = ProjectPool(self.db, object())
+
+        async def create(token, pool_index):
+            name = ProjectPool.build_project_name(pool_index, "Fixture")
+            return await create_profile_project(self.tokens, token, name)
+
+        selected = await pool.ensure_project_exists(
+            self.token_id, create_project=create, pool_size=4
+        )
+        projects = await self.db.get_projects_by_token(self.token_id)
+        self.assertEqual(
+            sorted(project.project_name for project in projects),
+            ["Fixture P1", "Fixture P2", "Fixture P3", "Fixture P4"],
+        )
+        self.assertEqual(len({project.project_id for project in projects}), 4)
+        token = await self.db.get_token(self.token_id)
+        self.assertEqual(token.current_project_id, selected)
+        self.assertIn(selected, {project.project_id for project in projects})
+
     async def change_binding(self, kind):
         if kind == "deleted":
             await self.db.delete_token(self.token_id)

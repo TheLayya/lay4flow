@@ -1,5 +1,6 @@
 """Prepare account projects through the persisted Flow HTTP session."""
 
+import logging
 from typing import Any
 
 from ...core.models import Project
@@ -7,6 +8,8 @@ from ..flow.flow_rpc import FlowRPCError, flow_rpc
 from ..project_pool import flow_session_binding
 from .flow_session import account_http_session
 from .token_account_probe import TokenManagerAccountProbe
+
+_logger = logging.getLogger("lay4flow.flow_projects")
 
 
 async def create_profile_project(tokens: Any, token: Any, title: str) -> Project:
@@ -40,10 +43,15 @@ async def create_profile_project(tokens: Any, token: Any, title: str) -> Project
         projects = await flow_rpc(
             context, "UpteDb", ["projects/*", 21], network_step="flow_projects"
         )
-        if not isinstance(projects, list) or not projects or not isinstance(projects[0], list):
+        if not isinstance(projects, list):
             raise FlowRPCError("account_probe_error", "flow_projects")
+        # A new account returns [] for an empty project list.
+        if projects and not isinstance(projects[0], list):
+            raise FlowRPCError("account_probe_error", "flow_projects")
+        rows = projects[0] if projects else []
+        created = False
         local_ids = {row.project_id for row in await tokens.db.get_projects_by_token(token.id)}
-        for row in projects[0]:
+        for row in rows:
             if not isinstance(row, list) or not row or not isinstance(row[0], str) or not row[0]:
                 raise FlowRPCError("account_probe_error", "flow_projects")
             if row[0] in local_ids:
@@ -68,9 +76,14 @@ async def create_profile_project(tokens: Any, token: Any, title: str) -> Project
             if not isinstance(identifier, str) or not identifier.strip():
                 raise FlowRPCError("account_probe_error", "flow_projects")
             project = Project(project_id=identifier, token_id=token.id, project_name=title)
+            created = True
     project.id = await tokens.db.add_project_if_credentials_match(
         project, expected, expected_proxy_binding=expected_proxy_binding
     )
     if project.id is None:
+        if created:
+            _logger.info("Flow project created for token %s (pool write rejected)", token.id)
         raise FlowRPCError("account_probe_error", "flow_projects")
+    if created:
+        _logger.info("Flow project created for token %s (pool write ok)", token.id)
     return project
