@@ -504,6 +504,63 @@ class DirectProfileLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         self.assertEqual(len(self.backend.flow_reads), 3)
 
+    @staticmethod
+    def pool_failure(reason="account_probe_error", network_step="flow_projects"):
+        try:
+            try:
+                raise FlowRPCError(reason, network_step)
+            except FlowRPCError as exc:
+                raise ValueError(f"Failed to prepare project pool: {exc}") from exc
+        except ValueError as wrapped:
+            return wrapped
+
+    async def assert_prepare_workspace_failure(self, receipt):
+        with self.assertRaises(ViewerError) as caught:
+            await self.viewer.login.complete(receipt["session_id"], "owner", receipt["viewer_id"])
+        self.assertEqual(caught.exception.status, 503)
+        detail = caught.exception.detail
+        self.assertEqual(detail["reason"], "transient_error")
+        self.assertEqual(detail["stage"], "prepare_workspace")
+        self.assertTrue(detail["retryable"])
+        self.assertFalse(detail["browser_open"])
+        saved = await self.db.get_token(receipt["token_id"])
+        self.assertFalse(saved.is_active)
+        return saved
+
+    async def test_wrapped_project_failure_keeps_flow_reason_on_account(self):
+        receipt = await self.start()
+        self.tokens.ensure_project_exists.side_effect = self.pool_failure()
+        saved = await self.assert_prepare_workspace_failure(receipt)
+        self.assertEqual(
+            (saved.refresh_reason, saved.refresh_stage, saved.refresh_network_step),
+            ("account_probe_error", "prepare_workspace", "flow_projects"),
+        )
+
+    async def test_project_failure_without_flow_error_leaves_refresh_fields_unchanged(self):
+        receipt = await self.start()
+        before = await self.db.get_token(receipt["token_id"])
+        self.tokens.ensure_project_exists.side_effect = RuntimeError("synthetic project failure")
+        saved = await self.assert_prepare_workspace_failure(receipt)
+        self.assertEqual(
+            (saved.refresh_reason, saved.refresh_stage, saved.refresh_network_step),
+            (before.refresh_reason, before.refresh_stage, before.refresh_network_step),
+        )
+
+    async def test_successful_retry_clears_kept_project_failure_reason(self):
+        receipt = await self.start()
+        self.tokens.ensure_project_exists.side_effect = self.pool_failure()
+        await self.assert_prepare_workspace_failure(receipt)
+        self.tokens.ensure_project_exists.side_effect = None
+        result = await self.viewer.login.complete(
+            receipt["session_id"], "owner", receipt["viewer_id"]
+        )
+        self.assertTrue(result["success"])
+        saved = await self.db.get_token(receipt["token_id"])
+        self.assertTrue(saved.is_active)
+        self.assertEqual(
+            (saved.refresh_reason, saved.refresh_stage, saved.refresh_network_step), ("", "", "")
+        )
+
     async def test_failed_close_retains_pending_identity_and_profile_lock(self):
         receipt = await self.start()
         self.backend.fail_close = True

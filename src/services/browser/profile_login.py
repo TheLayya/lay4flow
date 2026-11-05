@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from ...core.account_identity import same_google_identity
 from ...core.models import Token
+from ..flow.flow_rpc import FlowRPCError
 from ..flow.google_cookies import GoogleCookieJar
 from ..proxy_manager import ProxyManager
 from .profile_viewer import ViewerError
@@ -32,6 +33,20 @@ _LOGIN_NETWORK_STEPS = {
     "flow_credits",
     "flow_projects",
 }
+
+
+def _find_flow_rpc_error(exc: BaseException) -> FlowRPCError | None:
+    """The project pool wraps Flow failures, so follow the cause chain."""
+    seen = set()
+    current = exc
+    for _ in range(10):
+        if current is None or id(current) in seen:
+            return None
+        if isinstance(current, FlowRPCError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
 
 
 class DirectProfileLogin:
@@ -381,7 +396,21 @@ class DirectProfileLogin:
                 await self.tokens._flow_call_for_token(
                     token, lambda: self.tokens.ensure_project_exists(token_id)
                 )
-            except Exception:
+            except Exception as exc:
+                flow_error = _find_flow_rpc_error(exc)
+                if flow_error is not None:
+                    try:
+                        await self.tokens.db.update_token_if_credentials_match(
+                            token_id,
+                            expected,
+                            refresh_reason=flow_error.reason,
+                            refresh_stage="prepare_workspace",
+                            refresh_network_step=flow_error.network_step
+                            if flow_error.network_step in _LOGIN_NETWORK_STEPS
+                            else "",
+                        )
+                    except Exception:
+                        pass
                 detail = self._failure_detail(
                     "transient_error",
                     stage="prepare_workspace",
