@@ -834,6 +834,39 @@ class VidsClientTests(unittest.TestCase):
             self.assertEqual(client.bootstrap.await_count, 1)
             self.assertEqual(session.return_value.request.await_count, 1)
 
+    def test_current_frontend_flags_select_seconds_based_video_features(self):
+        # Captured editor flags: flix-evga and flix-evgvl are gone.
+        flags = {"flix-evg1p2ui": 1, "flix-evge": 1, "flix-eofpsq": 0, "flix-eof": 0}
+        self.assertEqual(video_feature(flags), 374)
+        self.assertEqual(image_video_feature(flags, "animate"), 375)
+        self.assertEqual(image_video_feature(flags, "ingredients"), 376)
+        request = build_text_request("doc", flags, "A landscape", session_id="s", request_id="r")
+        self.assertEqual(request[0], 374)
+        self.assertIsNotNone(request[5])
+        with patch("src.services.vids.client.AsyncSession"):
+            client = VidsClient("https://docs.google.com/videos/d/doc/edit", [])
+            client.flags = flags
+            client.session_id = "s"
+            client.settings = AsyncMock()
+            client._request = AsyncMock(return_value=["result"])
+            for mode, feature in (("animate", 375), ("ingredients", 376)):
+                with self.subTest(mode=mode):
+                    asyncio.run(client.submit_images(["temporary-image"], "A cat", mode=mode))
+                    method, path, sent = client._request.await_args.args
+                    self.assertEqual((method, path), ("POST", "/v1/genai/generate"))
+                    self.assertEqual(sent[0], feature)
+
+    def test_legacy_video_flags_keep_their_feature_numbers(self):
+        for flags, feature in (
+            ({"flix-evgvl": 1}, 257),
+            ({"flix-eofpsq": 1}, 386),
+            ({"flix-eof": 1}, 367),
+            ({"flix-evga": 1}, 342),
+            ({"flix-evga": 1, "flix-evg1p2ui": 1}, 374),
+        ):
+            with self.subTest(flags=flags):
+                self.assertEqual(video_feature(flags), feature)
+
     def test_static_request_and_protocol_error_do_not_claim_verified_generation(self):
         flags = parse_flags(
             'before _docs_flag_initialData = {"flix-evga":1,"flix-evg1p2ui":1,'
@@ -841,7 +874,11 @@ class VidsClientTests(unittest.TestCase):
             'keys={"espresso_api_key":"synthetic-key"};'
         )
         self.assertEqual(flags["espresso_api_key"], "nested-key")
+        # Without flix-evg1p2ui there is still no recognised video switch, so 104 remains.
         self.assertEqual(video_feature({"flix-eofpsq": "false", "flix-eof": "0"}), 104)
+        self.assertEqual(
+            video_feature({"flix-eofpsq": "false", "flix-eof": "0", "flix-evg1p2ui": 1}), 374
+        )
         request = build_text_request("doc", flags, "A landscape", session_id="s", request_id="r")
         self.assertEqual(video_feature(flags), 374)
         self.assertEqual(request[2][0], 9)

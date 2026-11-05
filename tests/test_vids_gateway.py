@@ -592,6 +592,20 @@ class VidsGatewayTests(unittest.IsolatedAsyncioTestCase):
         await self.gateway.close()
         self.directory.cleanup()
 
+    async def test_video_quota_uses_current_frontend_feature(self):
+        self.client.flags = {
+            "docs-hue": "same-account",
+            "flix-evg1p2ui": 1,
+            "flix-evge": 1,
+            "flix-eofpsq": 0,
+            "flix-eof": 0,
+        }
+        self.client.quota.reset_mock()
+        self.client.quota.return_value = [[None, ["500", None, "491"], "9"]]
+        quota = await self.gateway.quota("video")
+        self.client.quota.assert_awaited_once_with(374)
+        self.assertEqual(quota, {"kind": "video", "total": 500, "available": 491, "consumed": 9})
+
     async def test_api_idempotency_content_and_private_response(self):
         body = {"kind": "speech", "prompt": "Hello"}
         headers = {"Idempotency-Key": "same-key"}

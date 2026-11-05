@@ -236,8 +236,11 @@ def video_feature(flags: dict[str, Any]) -> int:
     for name, feature in (("flix-evgvl", 257), ("flix-eofpsq", 386), ("flix-eof", 367)):
         if enabled(flags, name):
             return feature
+    # The current editor no longer sends flix-evga; flix-evg1p2ui alone selects 374.
+    if enabled(flags, "flix-evg1p2ui"):
+        return 374
     if enabled(flags, "flix-evga"):
-        return 374 if enabled(flags, "flix-evg1p2ui") else 342
+        return 342
     return 104
 
 
