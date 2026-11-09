@@ -409,6 +409,8 @@ _ROUTE_ORDER = (
     "update_debug_config",
     "get_generation_timeout",
     "update_generation_timeout",
+    "get_profile_maintenance_config",
+    "update_profile_maintenance_config",
     "get_token_refresh_config",
     "update_token_refresh_enabled",
     "update_token_refresh_config",

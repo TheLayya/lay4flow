@@ -1,26 +1,28 @@
 """Database storage layer for lay4flow"""
 
 import asyncio
-import aiosqlite
 from contextlib import asynccontextmanager
 from datetime import date
-from typing import Optional, List, Dict, Any
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import aiosqlite
+
 from .models import (
-    Token,
-    TokenStats,
-    Task,
-    RequestLog,
     AdminConfig,
-    ProxyConfig,
-    GenerationConfig,
     CacheConfig,
-    Project,
-    CaptchaConfig,
     CallLogicConfig,
+    CaptchaConfig,
+    DebugConfig,
+    GenerationConfig,
+    Project,
+    ProxyConfig,
+    RequestLog,
+    Task,
+    Token,
     TokenRefreshConfig,
+    TokenStats,
 )
-from .models import DebugConfig
 from .storage.accounts import AccountRepository
 from .storage.generation_history import GenerationHistoryRepository
 from .storage.schema import SchemaManager
@@ -44,6 +46,7 @@ class Database:
         self._schema = SchemaManager(self)
         self._settings = SettingsRepository(self)
         self._accounts = AccountRepository(self)
+        self._profile_maintenance_policy = None
 
     def db_exists(self) -> bool:
         """Check if database file exists"""
@@ -142,11 +145,15 @@ class Database:
                         Used only to initialize missing config rows with default values.
                         Existing config rows will NOT be overwritten.
         """
-        return await self._schema.check_and_migrate_db(config_dict)
+        result = await self._schema.check_and_migrate_db(config_dict)
+        await self.get_profile_maintenance_config()
+        return result
 
     async def init_db(self):
         """Initialize database tables"""
-        return await self._schema.init_db()
+        result = await self._schema.init_db()
+        await self.get_profile_maintenance_config()
+        return result
 
     async def _migrate_request_logs(self, db):
         """Migrate request_logs table from old schema to new schema"""
@@ -199,11 +206,24 @@ class Database:
         expected: Dict[str, Any],
         *,
         expected_proxy_binding: tuple[int, str] | None = None,
+        expected_profile_maintenance_revision: int | None = None,
         **kwargs,
     ) -> bool:
         """Conditionally update refresh state without replacing newer credentials."""
         return await self._accounts.update_token_if_credentials_match(
-            token_id, expected, expected_proxy_binding=expected_proxy_binding, **kwargs
+            token_id,
+            expected,
+            expected_proxy_binding=expected_proxy_binding,
+            expected_profile_maintenance_revision=expected_profile_maintenance_revision,
+            **kwargs,
+        )
+
+    async def get_profile_maintenance_config(self):
+        return await self._settings.get_profile_maintenance_config()
+
+    async def update_profile_maintenance_config(self, enabled, refresh_interval_minutes):
+        return await self._settings.update_profile_maintenance_config(
+            enabled, refresh_interval_minutes
         )
 
     async def delete_token(self, token_id: int):
@@ -443,6 +463,8 @@ class Database:
         - Proxy config will be handled by ProxyManager
         """
         from .config import config
+
+        await self.get_profile_maintenance_config()
 
         # Reload admin config
         admin_config = await self.get_admin_config()

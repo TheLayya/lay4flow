@@ -109,6 +109,7 @@ await context.route('**/*',async route=>{
         '/api/admin/studio/jobs':{jobs:[]},
         '/api/admin/config':{admin_username:'演示管理员',api_key:'',error_ban_threshold:3,debug_enabled:false},
         '/api/config/generation':{config:{image_timeout:300,video_timeout:1500,max_retries:20}},
+        '/api/profile-maintenance/config':{success:true,config:{enabled:true,refresh_interval_minutes:30,scope:'all_profile_accounts',scheduler_scan_seconds:60,revision:1}},
         '/api/account-error-policy':{success:true,config:{rules,consecutive_failure_threshold:3,failure_cooldown_seconds:300,max_account_attempts:3}},
         '/api/admin/vids/config':{config:{keepalive_enabled:true,keepalive_interval_minutes:10,repair_cooldown_seconds:300,consecutive_failure_threshold:3,failure_cooldown_seconds:300,rules:''}},
         '/api/call-logic/config':{config:{call_mode:'default'}},
@@ -134,6 +135,14 @@ try{
     await page.locator('.accounts-table .el-table__row').first().waitFor()
     for(const label of ['Free','Plus','Pro','Ultra'])assert.ok((await page.locator('.account-plan-tag').allInnerTexts()).includes(label))
     await shot('accounts-overview.png')
+    await page.locator('.accounts-table .el-table__row').first().locator('.el-table__expand-icon').click()
+    const expanded = page.locator('.account-quick-panel').first()
+    await expanded.getByRole('tab', {name:'账号信息',exact:true}).waitFor()
+    assert.equal(await expanded.locator('details[open]').count(),0)
+    await shot('account-expanded-info.png')
+    await expanded.getByRole('tab', {name:'代理',exact:true}).click()
+    await expanded.getByText('账号绑定出口',{exact:true}).waitFor()
+    await shot('account-expanded-proxy.png')
     await page.goto(`${base}/#/proxies`,{waitUntil:'domcontentloaded'})
     await page.locator('.pool-table-dense .el-table__row').first().waitFor()
     await shot('proxy-pool-overview.png')
@@ -149,6 +158,11 @@ try{
     await page.getByRole('tab',{name:'自定义规则',exact:true}).click()
     await page.getByRole('heading',{name:'Flow 自定义规则',exact:true}).waitFor()
     await shot('error-rules.png')
+    await page.getByRole('tab',{name:'生成与调度',exact:true}).click()
+    const maintenance = page.locator('[data-setting-card="refresh"]')
+    await maintenance.getByRole('spinbutton').waitFor()
+    await maintenance.scrollIntoViewIfNeeded()
+    await shot('account-maintenance-settings.png')
     await page.evaluate(receipt=>{
         localStorage.setItem('lay4flow_studio_receipts:v2:creator',JSON.stringify([{provider:'vids',kind:'video',status:'completed',started:Date.now()-120000,title:'暮色山谷 · 镜头缓慢前进',description:'保持暮色与山谷构图，让镜头继续缓慢前进，远处的夕阳逐渐落下。',receipt,outputs:[{kind:'video',path:`/api/admin/vids/v1/vids/generations/${receipt}/content`}]}]))
     },receipt)

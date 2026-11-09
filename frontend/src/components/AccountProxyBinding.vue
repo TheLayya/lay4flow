@@ -1,5 +1,6 @@
 <script setup>
 import { computed } from 'vue'
+import { parseDate } from '../lib/api'
 
 const props = defineProps({
     account: { type: Object, required: true },
@@ -11,8 +12,35 @@ const props = defineProps({
     error: { type: String, default: '' },
     saved: { type: String, default: '' },
     poolError: { type: String, default: '' },
+    activeTab: { type: String, default: 'account' },
 })
-const emit = defineEmits(['save', 'copy', 'reload'])
+const emit = defineEmits(['save', 'copy', 'reload', 'update:activeTab'])
+const tabs = [{ id: 'account', label: '账号信息' }, { id: 'proxy', label: '代理' }]
+function navigateTabs(event, index) {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+    event.preventDefault()
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+        : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+    emit('update:activeTab', tabs[next].id)
+    event.currentTarget.parentElement.querySelectorAll('[role="tab"]')[next]?.focus()
+}
+function formatDate(value) {
+    if (!value) return '暂无'
+    const date = parseDate(value)
+    return Number.isNaN(date.getTime()) ? '暂无' : date.toLocaleString('zh-CN', { hour12: false })
+}
+const tier = computed(() => ({ PAYGATE_TIER_NOT_PAID: 'Free', PAYGATE_TIER_ZERO: 'Plus',
+    PAYGATE_TIER_ONE: 'Pro', PAYGATE_TIER_TWO: 'Ultra' })[props.account.user_paygate_tier] || '未知')
+const information = computed(() => [
+    { label: '账号', value: props.account.email || props.account.login_account || '暂无' },
+    { label: '账号 ID', value: '#' + props.account.id },
+    { label: 'Flow 套餐', value: tier.value },
+    { label: 'Flow 积分', value: props.account.credits == null ? '尚未同步' : Number(props.account.credits).toLocaleString('zh-CN') },
+    { label: '会话状态', value: ({ ready: '会话正常', idle: '等待维护', refreshing: '正在维护', retrying: '等待重试', login_required: '需要重新登录', config_error: '配置需要调整' })[props.account.refresh_status] || (props.account.browser_profile_status === 'ready' ? '会话正常' : '待验证') },
+    { label: '项目', value: props.account.current_project_name || props.account.current_project_id || '暂无' },
+    { label: '最近维护', value: formatDate(props.account.last_refresh_at || props.account.last_st_refresh_at) },
+    { label: '最近使用', value: formatDate(props.account.last_used_at) },
+])
 const current = computed(() => props.proxies.find((row) => row.id === props.account.proxy_pool_id))
 const picked = computed(() => props.proxies.find((row) => row.id === props.draft.proxy_pool_id))
 const proxyChanged = computed(() => props.draft.proxy_pool_id !== (props.account.proxy_pool_id ?? null))
@@ -83,9 +111,33 @@ const optionLabel = (row) =>
     <section
         class="account-quick-panel"
         :data-account-id="account.id"
-        :aria-label="`${account.email || account.id} 的代理与配置`"
+        :aria-label="`${account.email || account.id} 的账号信息与代理`"
     >
-        <div class="account-quick-grid">
+        <div class="account-quick-tabs" role="tablist" :aria-label="`${account.email || account.id} 的详情分类`">
+            <button v-for="(tab, index) in tabs" :id="`account-${account.id}-tab-${tab.id}`" :key="tab.id"
+                type="button" role="tab" :aria-selected="activeTab === tab.id"
+                :aria-controls="`account-${account.id}-panel-${tab.id}`" :tabindex="activeTab === tab.id ? 0 : -1"
+                @click="emit('update:activeTab', tab.id)" @keydown="navigateTabs($event, index)">{{ tab.label }}</button>
+        </div>
+        <section v-show="activeTab === 'account'" :id="`account-${account.id}-panel-account`" role="tabpanel"
+            :aria-labelledby="`account-${account.id}-tab-account`" class="quick-account-section">
+            <dl class="quick-account-fields">
+                <div v-for="field in information" :key="field.label"><dt>{{ field.label }}</dt><dd>{{ field.value }}</dd></div>
+            </dl>
+            <p v-if="account.refresh_error || account.browser_profile_error" class="quick-error" role="status">{{ account.refresh_error || account.browser_profile_error }}</p>
+            <p class="quick-maintenance-link">会话维护周期在<a :href="`#/settings?section=generation&account_id=${account.id}`">工坊设置</a>中统一管理。</p>
+            <details class="quick-credentials">
+                <summary>登录凭据 · 展开查看与复制</summary>
+                <dl>
+                    <div v-for="field in credentials" :key="field.label">
+                        <dt>{{ field.label }}</dt>
+                        <dd><code>{{ field.value || '未填写' }}</code><el-button v-if="field.value" text size="small" @click="emit('copy', field.value)">复制</el-button></dd>
+                    </div>
+                </dl>
+            </details>
+        </section>
+        <section v-show="activeTab === 'proxy'" :id="`account-${account.id}-panel-proxy`" role="tabpanel"
+            :aria-labelledby="`account-${account.id}-tab-proxy`" class="account-quick-grid">
             <section class="quick-proxy-section">
                 <h3>
                     账号代理
@@ -151,6 +203,12 @@ const optionLabel = (row) =>
                     <el-button text size="small" @click="emit('reload')">重试</el-button>
                 </p>
                 <p v-else-if="!options.length" class="quick-hint">代理池暂无已启用的出口。</p>
+                <p v-if="proxyChanged" class="quick-hint">上方为待绑定出口，保存后生效。</p>
+                <p v-if="picked?.last_check_ok === false" class="quick-hint">此出口最近检测连接异常，请确认当前连接状态。</p>
+                <p v-if="account.browser_profile_source === 'cloak'" class="quick-hint">可主动切换 Cloak 代理，验证通过后重新绑定；验证失败保留原出口。</p>
+            </section>
+            <section class="quick-proxy-details">
+                <h3>出口信息</h3>
                 <template v-if="shownURL">
                     <div class="quick-proxy-url">
                         <code>{{ shownURL }}</code>
@@ -174,77 +232,9 @@ const optionLabel = (row) =>
                         </div>
                     </dl>
                 </template>
-                <p v-if="proxyChanged" class="quick-hint">上方为待绑定出口，保存后生效。</p>
-                <p v-if="picked?.last_check_ok === false" class="quick-hint">
-                    此出口最近检测连接异常，请确认当前连接状态。
-                </p>
-                <p v-if="account.browser_profile_source === 'cloak'" class="quick-hint">
-                    可主动切换 Cloak 代理，验证通过后重新绑定；验证失败保留原出口。
-                </p>
+                <p v-else class="quick-hint">尚未绑定出口。</p>
             </section>
-            <section class="quick-settings-section">
-                <h3>常用配置</h3>
-                <label class="quick-remark">
-                    备注
-                    <el-input
-                        v-model="draft.remark"
-                        :disabled="locked"
-                        maxlength="500"
-                        :aria-label="`${account.email || account.id} 的备注`"
-                        placeholder="添加账号备注"
-                    />
-                </label>
-                <div class="quick-setting-switches">
-                    <label>
-                        <span>图片创作</span>
-                        <el-switch v-model="draft.image_enabled" :disabled="locked" aria-label="图片创作" />
-                    </label>
-                    <label>
-                        <span>视频创作</span>
-                        <el-switch v-model="draft.video_enabled" :disabled="locked" aria-label="视频创作" />
-                    </label>
-                    <label>
-                        <span>自动续期</span>
-                        <el-switch v-model="draft.auto_refresh_enabled" :disabled="locked" aria-label="自动续期" />
-                    </label>
-                </div>
-                <div class="quick-refresh-row">
-                    <label>
-                        刷新间隔
-                        <el-input-number
-                            v-model="draft.refresh_interval_minutes"
-                            :min="1"
-                            :max="1440"
-                            :disabled="locked || !draft.auto_refresh_enabled"
-                            controls-position="right"
-                            aria-label="刷新间隔分钟"
-                        />
-                        <span>分钟</span>
-                    </label>
-                    <el-button
-                        :loading="saving && savingKind === 'settings'"
-                        :disabled="locked"
-                        @click="emit('save', 'settings')"
-                    >
-                        保存配置
-                    </el-button>
-                </div>
-                <details class="quick-credentials">
-                    <summary>登录凭据 · 展开查看与复制</summary>
-                    <dl>
-                        <div v-for="field in credentials" :key="field.label">
-                            <dt>{{ field.label }}</dt>
-                            <dd>
-                                <code>{{ field.value || '未填写' }}</code>
-                                <el-button v-if="field.value" text size="small" @click="emit('copy', field.value)">
-                                    复制
-                                </el-button>
-                            </dd>
-                        </div>
-                    </dl>
-                </details>
-            </section>
-        </div>
+        </section>
         <p v-if="error" class="quick-error" role="alert">{{ error }}</p>
         <p v-else-if="saved" class="quick-saved" role="status">{{ saved }}</p>
     </section>
@@ -252,15 +242,25 @@ const optionLabel = (row) =>
 
 <style scoped>
 .account-quick-panel {
-    padding: 18px 24px;
+    box-sizing: border-box;
+    padding: 0 20px 16px;
     background: var(--ground);
     color: var(--ink);
 }
 .account-quick-grid {
     display: grid;
-    grid-template-columns: minmax(0, 1.15fr) minmax(320px, 1fr);
-    gap: 30px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 28px;
 }
+.account-quick-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+.account-quick-tabs button { padding: 12px 2px 10px; background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--muted); cursor: pointer; font-size: 13px; }
+.account-quick-tabs button[aria-selected='true'] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.account-quick-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.quick-account-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 24px; margin: 0; }
+.quick-account-fields dd { display: block; overflow-wrap: anywhere; }
+.quick-maintenance-link { font-size: 12px; color: var(--muted); margin: 12px 0 0; }
+.quick-maintenance-link a { margin-left: 3px; color: var(--accent); text-decoration: none; }
+.quick-proxy-section, .quick-proxy-details { min-width: 0; }
 h3 {
     font-size: 14px;
     font-weight: 650;
@@ -274,7 +274,6 @@ h3 small {
     margin-left: 8px;
 }
 .quick-proxy-picker,
-.quick-refresh-row,
 .quick-proxy-url,
 dd {
     display: flex;
@@ -337,39 +336,6 @@ dd {
     line-height: 1.65;
     margin: 10px 0 0;
 }
-.quick-remark {
-    display: grid;
-    grid-template-columns: 40px 1fr;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-}
-.quick-setting-switches {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 18px;
-    margin: 9px 0;
-}
-.quick-setting-switches label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-}
-.quick-refresh-row {
-    justify-content: space-between;
-    flex-wrap: wrap;
-}
-.quick-refresh-row label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-}
-.quick-refresh-row .el-input-number {
-    width: 108px;
-}
 .quick-error {
     color: var(--el-color-danger);
     margin: 12px 0 0;
@@ -408,12 +374,11 @@ dd {
         grid-template-columns: 1fr;
         gap: 22px;
     }
+    .quick-account-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 700px) {
     .account-quick-panel {
-        margin: 12px -8px 0;
-        padding: 15px 12px;
-        border-radius: 8px;
+        padding: 0 12px 14px;
     }
     .quick-proxy-picker {
         align-items: stretch;
@@ -422,20 +387,6 @@ dd {
     }
     .quick-proxy-fields {
         gap: 10px 16px;
-    }
-    .quick-setting-switches {
-        gap: 6px 14px;
-    }
-    .quick-setting-switches label {
-        min-height: 44px;
-    }
-    .quick-refresh-row {
-        gap: 12px;
-    }
-    .quick-refresh-row .el-button {
-        width: 100%;
-        margin-left: 0;
-        min-height: 40px;
     }
 }
 </style>

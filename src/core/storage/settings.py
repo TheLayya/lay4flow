@@ -15,6 +15,7 @@ from ..models import (
     GenerationConfig,
     ProxyConfig,
     ProxyPoolEntry,
+    Token,
     TokenRefreshConfig,
 )
 
@@ -27,6 +28,69 @@ class SettingsRepository:
 
     def __init__(self, database: "Database"):
         self._database = database
+
+    async def get_profile_maintenance_config(self):
+        async with self._database._connect() as db:
+            row = await (
+                await db.execute(
+                    "SELECT enabled,refresh_interval_minutes,revision FROM profile_maintenance_config WHERE id=1"
+                )
+            ).fetchone()
+        result = {"enabled": bool(row[0]), "refresh_interval_minutes": row[1], "revision": row[2]}
+        current = self._database._profile_maintenance_policy
+        if not isinstance(current, dict) or current["revision"] <= result["revision"]:
+            self._database._profile_maintenance_policy = result
+        return result.copy()
+
+    async def update_profile_maintenance_config(self, enabled, refresh_interval_minutes):
+        from ...services.profile_maintenance import schedule
+
+        if (
+            type(enabled) is not bool
+            or type(refresh_interval_minutes) is not int
+            or not 1 <= refresh_interval_minutes <= 1440
+        ):
+            raise ValueError("自动维护开关需为布尔值，维护间隔需为1–1440分钟的整数")
+        async with self._database._connect(write=True) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            db.row_factory = aiosqlite.Row
+            row = await (
+                await db.execute("SELECT * FROM profile_maintenance_config WHERE id=1")
+            ).fetchone()
+            previous = dict(row)
+            previous["enabled"] = bool(previous["enabled"])
+            result = {
+                "enabled": enabled,
+                "refresh_interval_minutes": refresh_interval_minutes,
+                "revision": row["revision"] + 1,
+            }
+            await db.execute(
+                "UPDATE profile_maintenance_config SET enabled=?,refresh_interval_minutes=?,revision=? WHERE id=1",
+                (enabled, refresh_interval_minutes, result["revision"]),
+            )
+            rows = await (
+                await db.execute("SELECT * FROM tokens WHERE browser_profile_source='cloak'")
+            ).fetchall()
+            now = datetime.now(timezone.utc)
+            for row in rows:
+                token = Token(**dict(row))
+                values = schedule(token, result, now, anchor_policy=previous)
+                if token.refresh_status == "refreshing":
+                    values["refresh_status"] = (
+                        "ready" if token.browser_profile_status == "ready" else "idle"
+                    )
+                if values:
+                    await db.execute(
+                        "UPDATE tokens SET "
+                        + ",".join(key + "=?" for key in values)
+                        + " WHERE id=?",
+                        (*values.values(), token.id),
+                    )
+            await db.commit()
+        current = self._database._profile_maintenance_policy
+        if not isinstance(current, dict) or current["revision"] <= result["revision"]:
+            self._database._profile_maintenance_policy = result
+        return result.copy()
 
     async def get_admin_config(self) -> Optional[AdminConfig]:
         """Get admin configuration"""

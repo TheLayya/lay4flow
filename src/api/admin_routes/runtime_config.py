@@ -13,6 +13,26 @@ def create_runtime_config_router(
 ):
     router = APIRouter()
 
+    def profile_payload(value):
+        return {
+            "success": True,
+            "config": {**value, "scope": "all_profile_accounts", "scheduler_scan_seconds": 60},
+        }
+
+    @router.get("/api/profile-maintenance/config")
+    async def get_profile_maintenance_config(token: str = Depends(verify_token)):
+        return profile_payload(await get_database().get_profile_maintenance_config())
+
+    @router.post("/api/profile-maintenance/config")
+    async def update_profile_maintenance_config(request: dict, token: str = Depends(verify_token)):
+        if set(request) != {"enabled", "refresh_interval_minutes"}:
+            raise HTTPException(400, "请提供统一自动维护开关和维护间隔")
+        try:
+            result = await get_database().update_profile_maintenance_config(**request)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from None
+        return profile_payload(result)
+
     def refresh_payload(refresh_config):
         return {
             "success": True,
@@ -21,7 +41,7 @@ def create_runtime_config_router(
                 "protocol_refresh_enabled": refresh_config.enabled,
                 "refresh_interval_minutes": refresh_config.refresh_interval_minutes,
                 "scope": "legacy_protocol_accounts",
-                "profile_maintenance": "per_account",
+                "profile_maintenance": "global",
                 "profile_default_interval_minutes": 30,
                 "scheduler_scan_seconds": 60,
             },
@@ -29,7 +49,7 @@ def create_runtime_config_router(
 
     @router.get("/api/token-refresh/config")
     async def get_token_refresh_config(token: str = Depends(verify_token)):
-        """Legacy non-Cloak ST settings; Profile scheduling is per-account."""
+        """Legacy non-Cloak ST settings; Profiles use the shared maintenance policy."""
         refresh_config = await get_database().get_token_refresh_config()
         return refresh_payload(refresh_config)
 

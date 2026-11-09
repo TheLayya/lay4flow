@@ -48,6 +48,7 @@ const json = (route, body, status = 200) =>
     route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 const fixtureKey = 'fixture-current-secret-key'
 const fixtures = {
+    '/api/profile-maintenance/config': { config: { enabled: true, refresh_interval_minutes: 30, scope: 'all_profile_accounts' } },
     '/health': { status: 'ok', backend_running: true, has_active_tokens: true },
     '/api/stats': { total_tokens: 3, active_tokens: 3, today_images: 0, today_videos: 0, today_errors: 0 },
     '/api/profile-transfer/jobs': { jobs: [] },
@@ -218,14 +219,16 @@ try {
     const generation = card('generation', '任务等待时间')
     const timeout = field(generation, '图片生成超时')
     await page.locator('.settings-nav button').filter({ hasText: '生成与调度' }).click()
-    const maintenance = card('generation', 'Profile 登录态维护')
-    await maintenance.getByText('新建 Profile 账号默认每 30 分钟维护一次；已有账号按各自保存的间隔执行。后台每分钟扫描到期账号。', { exact: true }).waitFor()
-    assert.equal(await maintenance.getByRole('switch').count(), 0)
-    assert.equal(await maintenance.getByRole('spinbutton').count(), 0)
+    const maintenance = card('generation', '账号会话维护')
+    await maintenance.getByRole('spinbutton', { name: '统一维护间隔（分钟）', exact: true }).waitFor()
+    assert.equal(await maintenance.getByRole('switch').count(), 1)
+    assert.equal(await maintenance.getByRole('spinbutton').count(), 1)
     assert.equal(await maintenance.getByRole('button', { name: '保存刷新设置', exact: true }).count(), 0)
-    assert.match(await maintenance.getByRole('link', { name: '管理账号维护设置', exact: true }).getAttribute('href'), /#\/accounts$/)
+    assert.equal(await maintenance.getByRole('link', { name: '管理账号维护设置', exact: true }).count(), 0)
     assert.equal(await page.getByText('Access Token 自动刷新始终开启', { exact: true }).count(), 0)
-    record('Profile maintenance exposes per-account controls without the unused global ST switch or interval')
+    assert.equal(await maintenance.getByRole('table').count(), 0)
+    assert.ok(!apiReads.includes('/api/tokens'))
+    record('One global Profile maintenance policy replaces per-account editors without legacy ST settings')
     await timeout.fill('480')
     await timeout.blur()
     const newKey = field(section('general'), '新 API 密钥')

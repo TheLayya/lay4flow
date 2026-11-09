@@ -22,6 +22,7 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.directory.cleanup)
         self.db = Database(str(Path(self.directory.name) / "refresh.db"))
         await self.db.init_db()
+        await self.db.update_profile_maintenance_config(True, 120)
         await self.db.update_token_refresh_config(enabled=True)
         self.manager = TokenManager(self.db, Mock())
         self.manager._st_to_at_for_token = AsyncMock(side_effect=self.session)
@@ -169,6 +170,7 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(saved.next_refresh_at)
 
     async def test_due_profile_renewal_requests_browser_but_validation_probe_does_not(self):
+        await self.db.update_profile_maintenance_config(True, 30)
         token_id = await self.add(
             browser_profile_source="cloak",
             protocol_mode="session",
@@ -193,6 +195,7 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [True, False])
 
     async def test_borrowed_browser_validation_keeps_the_original_renewal_deadline(self):
+        await self.db.update_profile_maintenance_config(True, 30)
         anchor = datetime.now(timezone.utc) - timedelta(minutes=35)
         deadline = anchor + timedelta(minutes=30)
         token_id = await self.add(

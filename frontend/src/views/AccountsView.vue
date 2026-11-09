@@ -264,6 +264,7 @@ const currentProxyLabel = computed(() => {
           : form.proxy_url || '尚未绑定'
 })
 const expandedAccountIds = ref([])
+const quickTabs = reactive({})
 const quickDrafts = reactive({})
 const quickBaselines = reactive({})
 const quickErrors = reactive({})
@@ -317,13 +318,19 @@ function accountProxySummary(row) {
 }
 function toggleQuickAccount(row) {
     quickDraft(row)
-    expandedAccountIds.value = expandedAccountIds.value.includes(row.id)
-        ? expandedAccountIds.value.filter((id) => id !== row.id)
-        : [...expandedAccountIds.value, row.id]
-    if (expandedAccountIds.value.includes(row.id)) accountsTable.value?.setScrollLeft?.(0)
+    if (expandedAccountIds.value.includes(row.id) && quickTabs[row.id] === 'proxy')
+        expandedAccountIds.value = expandedAccountIds.value.filter((id) => id !== row.id)
+    else {
+        quickTabs[row.id] = 'proxy'
+        expandedAccountIds.value = [...new Set([...expandedAccountIds.value, row.id])]
+        accountsTable.value?.setScrollLeft?.(0)
+    }
 }
 function expandQuickAccount(row, expanded) {
-    if (expanded.some((item) => item.id === row.id)) quickDraft(row)
+    if (expanded.some((item) => item.id === row.id)) {
+        quickDraft(row)
+        quickTabs[row.id] ||= 'account'
+    }
     expandedAccountIds.value = expanded.map((item) => item.id)
 }
 async function reloadQuickProxies() {
@@ -368,16 +375,7 @@ async function saveQuickAccount(row, kind = 'proxy') {
         }
         if (draft.submission_proxy_mode === (row.submission_proxy_mode || 'fixed')) return
         body = { submission_proxy_mode: draft.submission_proxy_mode }
-    } else {
-        if (!Number.isInteger(draft.refresh_interval_minutes) || draft.refresh_interval_minutes < 1) {
-            quickErrors[row.id] = '刷新间隔至少 1 分钟'
-            return
-        }
-        body = Object.fromEntries(
-            quickFields.filter((key) => draft[key] !== (row[key] ?? defaults()[key])).map((key) => [key, draft[key]]),
-        )
-        if (!Object.keys(body).length) return
-    }
+    } else return
     quickSavingId.value = row.id
     quickSavingKind.value = kind
     quickErrors[row.id] = ''
@@ -796,9 +794,7 @@ const defaults = () => ({
     refresh_interval_minutes: 120,
     browser_profile_source: 'cookies',
 })
-const rules = {
-    refresh_interval_minutes: [{ type: 'number', min: 1, message: '刷新间隔至少 1 分钟', trigger: 'change' }],
-}
+const rules = {}
 const rows = computed(() => {
     const bound = new Map(vids.value.map((row) => [row.token_id, row]))
     const merged = accounts.value.map((row) => ({ ...row, vids: bound.get(row.id) }))
@@ -1290,6 +1286,9 @@ async function saveAccount() {
     saving.value = true
     try {
         const body = Object.fromEntries(Object.keys(defaults()).map((key) => [key, form[key]]))
+        // Maintenance cadence belongs to Settings. Editing another account
+        // field must not overwrite a newer cadence with this drawer snapshot.
+        delete body.refresh_interval_minutes
         if (body.st === editing.value.st) delete body.st
         if (!body.login_password) delete body.login_password
         if (body.proxy_pool_id === (editing.value.proxy_pool_id ?? null)) delete body.proxy_pool_id
@@ -2326,6 +2325,8 @@ onUnmounted(() => {
                             :error="quickErrors[row.id]"
                             :saved="quickSaved[row.id]"
                             :pool-error="proxyPoolError"
+                            :active-tab="quickTabs[row.id] || 'account'"
+                            @update:active-tab="quickTabs[row.id] = $event"
                             @save="saveQuickAccount(row, $event)"
                             @copy="copy"
                             @reload="reloadQuickProxies"
@@ -2461,7 +2462,6 @@ onUnmounted(() => {
                                 :aria-label="`${row.email || row.id} 自动刷新`"
                                 @change="toggleAccountSetting(row, 'auto_refresh_enabled', $event)"
                             />
-                            <span>{{ row.refresh_interval_minutes || (row.browser_profile_source === 'cloak' ? 30 : 120) }} 分</span>
                         </div>
                         <span v-else class="muted">—</span>
                     </template>
@@ -2535,7 +2535,7 @@ onUnmounted(() => {
                             v-if="!row.vidsOnly"
                             class="account-proxy-trigger"
                             :aria-expanded="expandedAccountIds.includes(row.id)"
-                            :title="accountProxySummary(row) + ' · 展开代理和账号配置'"
+                            :title="accountProxySummary(row) + ' · 打开代理标签'"
                             @click="toggleQuickAccount(row)"
                         >
                             <el-icon><Connection /></el-icon>
@@ -2967,19 +2967,11 @@ onUnmounted(() => {
                         <div class="editor-refresh-setting">
                             <div>
                                 <strong>自动维护会话</strong>
-                                <span>按本账号间隔维护 Google 登录态</span>
+                                <span>按全局周期维护；单独关闭后此账号不参与自动维护</span>
                             </div>
                             <el-switch v-model="form.auto_refresh_enabled" aria-label="自动维护会话" />
                         </div>
-                        <el-form-item label="会话维护间隔（分钟）" prop="refresh_interval_minutes">
-                            <el-input-number
-                                v-model="form.refresh_interval_minutes"
-                                :min="1"
-                                :max="1440"
-                                :disabled="!form.auto_refresh_enabled"
-                                controls-position="right"
-                            />
-                        </el-form-item>
+                        <p class="field-note">会话维护周期在<router-link :to="{ path: '/settings', query: { section: 'generation', account_id: editing?.id } }">工坊设置</router-link>中统一管理。</p>
                     </div>
                     <div class="form-grid">
                         <el-form-item label="账号代理">
@@ -4546,6 +4538,7 @@ html.dark .quota-error {
     width: 220px;
 }
 .account-table-wrap {
+    container-type: inline-size;
     min-width: 0;
     width: 100%;
     height: min(620px, 70dvh);
@@ -4671,7 +4664,7 @@ html.dark .protection-countdown { color: #e2bb72; }
     padding: 0;
 }
 .accounts-table :deep(.account-quick-panel) {
-    width: min(1100px, calc(100vw - 310px));
+    width: 100cqw;
     max-width: 100%;
 }
 .accounts-view.management-view .table-footer {
@@ -4679,11 +4672,6 @@ html.dark .protection-countdown { color: #e2bb72; }
 }
 .selection-bar {
     padding: 7px 12px;
-}
-@media (max-width: 1100px) {
-    .accounts-table :deep(.account-quick-panel) {
-        width: calc(100vw - 125px);
-    }
 }
 @media (max-width: 767px) {
     .accounts-view.management-view > .page-heading {
@@ -4698,9 +4686,6 @@ html.dark .protection-countdown { color: #e2bb72; }
     }
     .account-toolbar .filters .el-select {
         width: calc(50% - 4px);
-    }
-    .accounts-table :deep(.account-quick-panel) {
-        width: calc(100vw - 42px);
     }
 }
 @media (min-width: 1051px) {

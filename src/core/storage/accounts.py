@@ -246,15 +246,45 @@ class AccountRepository:
         expected: Dict[str, Any],
         *,
         expected_proxy_binding: tuple[int, str] | None = None,
+        expected_profile_maintenance_revision: int | None = None,
         **kwargs,
     ) -> bool:
         """Update refresh state only if the credential snapshot is unchanged."""
         if not kwargs or not expected:
             return False
         async with self._database._connect(write=True) as db:
+            if any(key in kwargs for key in ("next_refresh_at", "browser_profile_next_at")):
+                from ...services.profile_maintenance import schedule
+
+                # Admission, proxy switching and manual refresh all commit the
+                # current global policy under the same write transaction. A
+                # late callback cannot restore a schedule from before a save.
+                await db.execute("BEGIN IMMEDIATE")
+                db.row_factory = aiosqlite.Row
+                row = await (
+                    await db.execute("SELECT * FROM tokens WHERE id=?", (token_id,))
+                ).fetchone()
+                if row is not None:
+                    updated = Token(**{**dict(row), **kwargs})
+                    if (
+                        updated.browser_profile_source == "cloak"
+                        and updated.refresh_status == "ready"
+                    ):
+                        policy_row = await (
+                            await db.execute("SELECT * FROM profile_maintenance_config WHERE id=1")
+                        ).fetchone()
+                        policy = dict(policy_row)
+                        policy["enabled"] = bool(policy["enabled"])
+                        deadlines = schedule(updated, policy)
+                        if deadlines.get("browser_profile_next_at") is not None:
+                            deadlines["next_refresh_at"] = deadlines["browser_profile_next_at"]
+                        kwargs.update(deadlines)
             assignments = ", ".join(f"{key} = ?" for key in kwargs)
             where = " AND ".join(f"{key} IS ?" for key in expected)
             params = [*kwargs.values(), token_id, *expected.values()]
+            if expected_profile_maintenance_revision is not None:
+                where += " AND EXISTS (SELECT 1 FROM profile_maintenance_config WHERE id=1 AND revision=?)"
+                params.append(expected_profile_maintenance_revision)
             if expected_proxy_binding is not None:
                 where += " AND EXISTS (SELECT 1 FROM proxy_pool p WHERE p.id = ? AND p.enabled = 1 AND p.proxy_url IS ?)"
                 params.extend(expected_proxy_binding)

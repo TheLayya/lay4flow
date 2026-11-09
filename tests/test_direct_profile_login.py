@@ -151,7 +151,7 @@ class DirectProfileLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ready.browser_profile_next_at, ready.next_refresh_at)
         self.assertEqual(
             (ready.next_refresh_at - ready.last_st_refresh_at).total_seconds(),
-            ready.refresh_interval_minutes * 60,
+            (await self.db.get_profile_maintenance_config())["refresh_interval_minutes"] * 60,
         )
         self.assertTrue(ready.image_enabled and ready.video_enabled)
         self.assertIsNone(ready.current_project_id)

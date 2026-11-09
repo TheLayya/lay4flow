@@ -71,6 +71,9 @@ TOP_LEVEL = (
     "docs/images/omni12-video-upload.png",
     "docs/images/extension-connected.png",
     "docs/images/extension-install.png",
+    "docs/images/account-expanded-info.png",
+    "docs/images/account-expanded-proxy.png",
+    "docs/images/account-maintenance-settings.png",
     "scripts/capture_release_readme.mjs",
 )
 TREE_SUFFIXES = {

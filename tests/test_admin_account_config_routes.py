@@ -22,6 +22,20 @@ class AdminAccountConfigRouteTests(unittest.TestCase):
             ),
             update_cache_config=AsyncMock(),
             reload_config_to_memory=AsyncMock(),
+            get_profile_maintenance_config=AsyncMock(
+                return_value={
+                    "enabled": True,
+                    "refresh_interval_minutes": 30,
+                    "revision": 0,
+                }
+            ),
+            update_profile_maintenance_config=AsyncMock(
+                return_value={
+                    "enabled": False,
+                    "refresh_interval_minutes": 45,
+                    "revision": 1,
+                }
+            ),
         )
         self.manager = SimpleNamespace(
             add_token=AsyncMock(
@@ -131,7 +145,7 @@ class AdminAccountConfigRouteTests(unittest.TestCase):
                 "protocol_refresh_enabled": False,
                 "refresh_interval_minutes": 120,
                 "scope": "legacy_protocol_accounts",
-                "profile_maintenance": "per_account",
+                "profile_maintenance": "global",
                 "profile_default_interval_minutes": 30,
                 "scheduler_scan_seconds": 60,
             },
@@ -144,3 +158,60 @@ class AdminAccountConfigRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.json()["detail"], "Profile cleanup failed")
         self.concurrency.remove_token.assert_not_awaited()
+
+    def test_profile_policy_requires_auth_and_exposes_global_scheduler_scope(self):
+        self.assertEqual(self.client.get("/api/profile-maintenance/config").status_code, 401)
+        self.assertEqual(
+            self.client.post("/api/profile-maintenance/config", json={}).status_code, 401
+        )
+        self.db.get_profile_maintenance_config.assert_not_awaited()
+        self.login()
+        response = self.client.get("/api/profile-maintenance/config")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["config"],
+            {
+                "enabled": True,
+                "refresh_interval_minutes": 30,
+                "revision": 0,
+                "scope": "all_profile_accounts",
+                "scheduler_scan_seconds": 60,
+            },
+        )
+        response = self.client.post(
+            "/api/profile-maintenance/config",
+            json={
+                "enabled": False,
+                "refresh_interval_minutes": 45,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.db.update_profile_maintenance_config.assert_awaited_once_with(
+            enabled=False,
+            refresh_interval_minutes=45,
+        )
+
+    def test_profile_policy_rejects_incomplete_unknown_and_invalid_payload(self):
+        self.login()
+        for payload in (
+            {},
+            {"enabled": True},
+            {"enabled": True, "refresh_interval_minutes": 30, "extra": 1},
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual(
+                    self.client.post("/api/profile-maintenance/config", json=payload).status_code,
+                    400,
+                )
+        self.db.update_profile_maintenance_config.assert_not_awaited()
+        self.db.update_profile_maintenance_config.side_effect = ValueError("invalid interval")
+        self.assertEqual(
+            self.client.post(
+                "/api/profile-maintenance/config",
+                json={
+                    "enabled": True,
+                    "refresh_interval_minutes": 0,
+                },
+            ).status_code,
+            400,
+        )

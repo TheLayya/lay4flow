@@ -17,6 +17,7 @@ from ..core.models import Project, Token
 from ..core.monitoring import record_token_refresh
 from .flow.retry import is_proxy_connection_error, is_retryable_network_error
 from .flow_client import FlowClient
+from .profile_maintenance import cycle_anchor, profile_policy, schedule as profile_schedule
 from .project_pool import ProjectPool
 from .proxy_manager import AccountProxyUnavailable, ProxyManager
 from .proxy_urls import normalize_proxy_url
@@ -79,6 +80,20 @@ class TokenManager:
                 debug_logger.log_warning(
                     f"[PROFILE_READY] Token {token_id}: {type(error).__name__}"
                 )
+
+    def _profile_interval(self):
+        return profile_policy(self.db)["refresh_interval_minutes"]
+
+    def _profile_background_enabled(self, token):
+        return profile_policy(self.db)["enabled"] and token.auto_refresh_enabled
+
+    async def _read_profile_policy(self):
+        reader = getattr(self.db, "get_profile_maintenance_config", None)
+        if inspect.iscoroutinefunction(reader):
+            result = await reader()
+            if isinstance(result, dict):
+                return result
+        return profile_policy(self.db)
 
     def _get_project_pool_size(self) -> int:
         """读取当前生效的单 Token 项目池大小配置。"""
@@ -658,19 +673,18 @@ class TokenManager:
             and token.browser_profile_source == "cloak"
             and any(
                 key in update_fields and update_fields[key] != getattr(token, key)
-                for key in ("auto_refresh_enabled", "refresh_interval_minutes")
+                for key in ("auto_refresh_enabled",)
             )
         )
         if profile_schedule_changed:
+            policy = await self._read_profile_policy()
             now = datetime.now(timezone.utc)
             enabled = update_fields.get("auto_refresh_enabled", token.auto_refresh_enabled)
             if "refresh_interval_minutes" in update_fields:
                 update_fields["refresh_interval_minutes"] = min(
                     1440, update_fields["refresh_interval_minutes"]
                 )
-            interval = self._normalize_refresh_interval(
-                update_fields.get("refresh_interval_minutes", token.refresh_interval_minutes)
-            )
+            interval = policy["refresh_interval_minutes"]
             usable_profile = (
                 token.browser_profile_status == "ready"
                 and token.refresh_status
@@ -680,7 +694,7 @@ class TokenManager:
                     "retrying",
                 }
             )
-            if not enabled:
+            if not enabled or not policy["enabled"]:
                 update_fields.update(next_refresh_at=None, browser_profile_next_at=None)
             elif usable_profile:
                 anchor = (
@@ -757,7 +771,10 @@ class TokenManager:
                     }
                 )
                 if not await self.db.update_token_if_credentials_match(
-                    token_id, expected, **update_fields
+                    token_id,
+                    expected,
+                    expected_profile_maintenance_revision=policy["revision"],
+                    **update_fields,
                 ):
                     raise ValueError("账号状态已变化，请刷新后重新保存维护设置")
             else:
@@ -829,14 +846,8 @@ class TokenManager:
                     browser_profile_error="",
                     browser_profile_verified_at=now,
                     browser_profile_failures=0,
-                    next_refresh_at=now
-                    + timedelta(
-                        minutes=self._normalize_refresh_interval(token.refresh_interval_minutes)
-                    ),
-                    browser_profile_next_at=now
-                    + timedelta(
-                        minutes=self._normalize_refresh_interval(token.refresh_interval_minutes)
-                    ),
+                    next_refresh_at=now + timedelta(minutes=self._profile_interval()),
+                    browser_profile_next_at=now + timedelta(minutes=self._profile_interval()),
                 )
                 if not await self.db.update_token_if_credentials_match(
                     token.id,
@@ -883,31 +894,12 @@ class TokenManager:
         if verified is None:
             return False
         now = datetime.now(timezone.utc)
-        interval = timedelta(
-            minutes=self._normalize_refresh_interval(token.refresh_interval_minutes)
-        )
+        interval = timedelta(minutes=self._profile_interval())
         return verified <= now and now - verified < interval
 
     def _profile_cycle_anchor_valid(self, token: Token) -> bool:
         """Persist one modern-cycle marker without moving the renewal clock on probes."""
-        anchor = self._as_utc(token.last_st_refresh_at)
-        due = self._as_utc(token.browser_profile_next_at)
-        return bool(
-            token.browser_profile_source == "cloak"
-            and token.last_st_refresh_result == "success"
-            and token.at is None
-            and token.at_expires is None
-            and anchor
-            and (
-                not token.auto_refresh_enabled
-                and due is None
-                or due
-                == anchor
-                + timedelta(
-                    minutes=self._normalize_refresh_interval(token.refresh_interval_minutes)
-                )
-            )
-        )
+        return cycle_anchor(token, profile_policy(self.db)) is not None
 
     @staticmethod
     def _profile_credential_updates(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -1359,6 +1351,12 @@ class TokenManager:
             token = await self.db.get_token(token_id)
             if not token:
                 return False
+            policy = (
+                await self._read_profile_policy()
+                if token.browser_profile_source == "cloak"
+                else None
+            )
+            policy_revision = policy["revision"] if policy is not None else None
             if getattr(token, "proxy_pool_id", None) is not None:
                 try:
                     await self.resolve_account_proxy(token)
@@ -1366,6 +1364,13 @@ class TokenManager:
                     return False
             now = datetime.now(timezone.utc)
             validation_only = bool(validation_only and token.browser_profile_source == "cloak")
+            if (
+                policy is not None
+                and not force
+                and not validation_only
+                and (not policy["enabled"] or not token.auto_refresh_enabled)
+            ):
+                return False
             repair_cycle = validation_only and (
                 not self._profile_cycle_anchor_valid(token)
                 or not self._profile_session_fresh(token)
@@ -1386,9 +1391,16 @@ class TokenManager:
                     and not token.is_active
                 ):
                     return False
+                next_due = token.next_refresh_at
+                if policy is not None and token.refresh_status not in {
+                    "retrying",
+                    "login_required",
+                    "config_error",
+                }:
+                    next_due = profile_schedule(token, policy, now).get("browser_profile_next_at")
                 if (
-                    token.next_refresh_at
-                    and self._as_utc(token.next_refresh_at) > now
+                    next_due
+                    and self._as_utc(next_due) > now
                     and (not validation_only or token.refresh_status == "retrying")
                 ):
                     return False
@@ -1401,6 +1413,11 @@ class TokenManager:
             if not await self.db.update_token_if_credentials_match(
                 token_id,
                 self._refresh_expected(token, token),
+                **(
+                    {"expected_profile_maintenance_revision": policy_revision}
+                    if policy_revision is not None
+                    else {}
+                ),
                 refresh_status="refreshing",
                 last_refresh_at=now,
             ):
@@ -1438,6 +1455,8 @@ class TokenManager:
                     for key in ("auto_refresh_enabled", "refresh_interval_minutes")
                 ):
                     return False
+                if policy is not None and profile_policy(self.db)["revision"] != policy_revision:
+                    return False
                 now = datetime.now(timezone.utc)
                 if token.browser_profile_source == "cloak":
                     if validation_only or browser_renewed is False:
@@ -1446,9 +1465,7 @@ class TokenManager:
                         due = self._as_utc(token.next_refresh_at)
                     else:
                         updates.update(last_st_refresh_at=now, last_st_refresh_result="success")
-                        due = now + timedelta(
-                            minutes=self._normalize_refresh_interval(token.refresh_interval_minutes)
-                        )
+                        due = now + timedelta(minutes=policy["refresh_interval_minutes"])
                 else:
                     due = updates["at_expires"] - timedelta(hours=1)
                     interval = self._normalize_refresh_interval(token.refresh_interval_minutes)
@@ -1483,8 +1500,10 @@ class TokenManager:
                 )
                 if token.browser_profile_source == "cloak":
                     updates.update(
-                        next_refresh_at=due if token.auto_refresh_enabled else None,
-                        browser_profile_next_at=due if token.auto_refresh_enabled else None,
+                        next_refresh_at=due if self._profile_background_enabled(token) else None,
+                        browser_profile_next_at=due
+                        if self._profile_background_enabled(token)
+                        else None,
                     )
                 if warning:
                     updates.update(
@@ -1508,7 +1527,14 @@ class TokenManager:
                     updates.update(is_active=True, ban_reason=None, banned_at=None)
                 expected = self._refresh_expected(token, latest)
                 if not await self.db.update_token_if_credentials_match(
-                    token_id, expected, **updates
+                    token_id,
+                    expected,
+                    **(
+                        {"expected_profile_maintenance_revision": policy_revision}
+                        if policy_revision is not None
+                        else {}
+                    ),
+                    **updates,
                 ):
                     return False
                 self._mark_at_valid(token_id, token=latest.model_copy(update=updates))
@@ -1542,6 +1568,8 @@ class TokenManager:
                     getattr(latest, key) != getattr(token, key)
                     for key in ("auto_refresh_enabled", "refresh_interval_minutes")
                 ):
+                    return False
+                if policy is not None and profile_policy(self.db)["revision"] != policy_revision:
                     return False
                 now = datetime.now(timezone.utc)
                 failures = latest.refresh_failures + 1
@@ -1600,7 +1628,7 @@ class TokenManager:
                         # Keep the last successful legacy timestamp from becoming the
                         # failed attempt time when a ready Profile predates this field.
                         updates["browser_profile_verified_at"] = token.last_refresh_at
-                    if not token.auto_refresh_enabled:
+                    if not self._profile_background_enabled(token):
                         updates["next_refresh_at"] = None
                     updates["browser_profile_next_at"] = updates["next_refresh_at"]
                 else:
@@ -1613,7 +1641,14 @@ class TokenManager:
                 # Only identity-verified rotations are attached to this exception.
                 updates.update(getattr(exc, "credential_updates", {}))
                 if not await self.db.update_token_if_credentials_match(
-                    token_id, expected, **updates
+                    token_id,
+                    expected,
+                    **(
+                        {"expected_profile_maintenance_revision": policy_revision}
+                        if policy_revision is not None
+                        else {}
+                    ),
+                    **updates,
                 ):
                     return False
                 record_token_refresh("at", "failure")
@@ -1686,10 +1721,13 @@ class TokenManager:
     async def run_protocol_refresh_once(self) -> None:
         """Renew expiring ATs and due STs, including accounts awaiting recovery."""
         refresh_config = await self.db.get_token_refresh_config()
+        policy = await self._read_profile_policy()
         tokens = await self.db.get_all_tokens()
         now = datetime.now(timezone.utc)
         profile_due, protocol_due = [], []
         for token in tokens:
+            if token.browser_profile_source == "cloak" and not policy["enabled"]:
+                continue
             if not token.auto_refresh_enabled or (
                 not token.is_active and token.ban_reason != "refresh_failed"
             ):
@@ -1703,7 +1741,14 @@ class TokenManager:
                 and token.next_refresh_at is None
             ):
                 continue
-            if token.next_refresh_at and self._as_utc(token.next_refresh_at) > now:
+            next_due = token.next_refresh_at
+            if token.browser_profile_source == "cloak" and token.refresh_status not in {
+                "retrying",
+                "config_error",
+                "login_required",
+            }:
+                next_due = profile_schedule(token, policy, now).get("browser_profile_next_at")
+            if next_due and self._as_utc(next_due) > now:
                 continue
             st_due = False
             if (

@@ -78,6 +78,7 @@ with contextlib.redirect_stdout(io.StringIO()), TestClient(app) as client:
         response = client.get(path, follow_redirects=False)
         assert response.status_code == 302 and response.headers["location"] == "/login", path
     assert client.get("/v1/models").status_code in (401, 403)
+    assert client.get("/api/profile-maintenance/config").status_code == 401
     vids_path = "/providers/vids/accounts/1/v1/models"
     assert client.get(vids_path).status_code == 401
     vids_missing = client.get(vids_path, headers={"Authorization":"Bearer smoke-api-key"})
@@ -91,6 +92,17 @@ with contextlib.redirect_stdout(io.StringIO()), TestClient(app) as client:
         assert client.post("/api/login", json={"username":"admin", "password":"admin"}).status_code == 401
     login = client.post("/api/login", json={"username":"admin", "password":"admin" if iteration == 0 else "smoke-updated-password"})
     assert login.status_code == 200 and login.json()["success"]
+    maintenance = client.get("/api/profile-maintenance/config").json()["config"]
+    assert maintenance["scope"] == "all_profile_accounts"
+    assert maintenance["enabled"] == (iteration == 0)
+    assert maintenance["refresh_interval_minutes"] == (30 if iteration == 0 else 45)
+    if iteration == 0:
+        changed = client.post("/api/profile-maintenance/config", json={"enabled":False, "refresh_interval_minutes":45})
+        assert changed.status_code == 200 and changed.json()["config"]["revision"] == 1
+    invalid = client.post("/api/profile-maintenance/config", json={"enabled":True, "refresh_interval_minutes":0})
+    assert invalid.status_code == 400
+    maintenance = client.get("/api/profile-maintenance/config").json()["config"]
+    assert maintenance["enabled"] is False and maintenance["refresh_interval_minutes"] == 45
     release = client.get("/api/admin/release")
     assert release.status_code == 200 and release.json()["version"] == API_VERSION
     assert release.json()["entries"], "Release changelog must ship with the runtime"

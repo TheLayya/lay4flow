@@ -17,6 +17,7 @@ from ...core.account_identity import same_google_identity
 from ...core.logger import debug_logger
 from ...core.models import Token
 from ..flow.google_cookies import GoogleCookieJar
+from ..profile_maintenance import profile_policy
 from ..proxy_manager import ProxyManager
 from .cloak_backend import CloakBrowserBackend
 from .environment import EnvironmentSnapshot
@@ -316,11 +317,12 @@ class ProfileTransfer:
                     "last_st_refresh_at": now,
                     "last_st_refresh_result": "success",
                     "browser_profile_next_at": now
-                    + timedelta(minutes=token.refresh_interval_minutes)
-                    if token.auto_refresh_enabled
+                    + timedelta(minutes=profile_policy(self.tokens.db)["refresh_interval_minutes"])
+                    if token.auto_refresh_enabled and profile_policy(self.tokens.db)["enabled"]
                     else None,
-                    "next_refresh_at": now + timedelta(minutes=token.refresh_interval_minutes)
-                    if token.auto_refresh_enabled
+                    "next_refresh_at": now
+                    + timedelta(minutes=profile_policy(self.tokens.db)["refresh_interval_minutes"])
+                    if token.auto_refresh_enabled and profile_policy(self.tokens.db)["enabled"]
                     else None,
                 }
                 if not await self.tokens.db.update_token_if_credentials_match(
@@ -835,12 +837,13 @@ class ProfileTransfer:
                 progress("finalize")
                 updates = {
                     "auto_refresh_enabled": account["auto_refresh_enabled"],
-                    "next_refresh_at": now + timedelta(minutes=token.refresh_interval_minutes)
-                    if account["auto_refresh_enabled"]
+                    "next_refresh_at": now
+                    + timedelta(minutes=profile_policy(self.tokens.db)["refresh_interval_minutes"])
+                    if account["auto_refresh_enabled"] and profile_policy(self.tokens.db)["enabled"]
                     else None,
                     "browser_profile_next_at": now
-                    + timedelta(minutes=token.refresh_interval_minutes)
-                    if account["auto_refresh_enabled"]
+                    + timedelta(minutes=profile_policy(self.tokens.db)["refresh_interval_minutes"])
+                    if account["auto_refresh_enabled"] and profile_policy(self.tokens.db)["enabled"]
                     else None,
                 }
                 if account["is_active"]:

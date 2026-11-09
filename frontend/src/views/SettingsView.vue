@@ -1,6 +1,6 @@
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
-import { RouterLink, useRoute } from 'vue-router'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
     Key,
@@ -15,6 +15,7 @@ import {
 } from '@element-plus/icons-vue'
 import { api, notifyError, parseDate } from '../lib/api'
 import { CAPTCHA_SERVICE_URL } from '../lib/captcha-service'
+import { clearAccountSnapshot } from '../lib/account-snapshot'
 
 const group = ref('general')
 const route = useRoute()
@@ -41,7 +42,7 @@ const settingCards = [
     {
         id: 'refresh',
         section: 'generation',
-        terms: 'Profile 登录态维护 每账号 自动维护 会话维护间隔 分钟 Google Cookie 后台浏览器',
+        terms: '账号会话维护 全局 自动维护 统一维护间隔 分钟 Google Cookie 后台浏览器',
     },
     {
         id: 'vidsConfig',
@@ -83,6 +84,9 @@ const admin = reactive({ admin_username: '', api_key: '', debug_enabled: false }
 const password = reactive({ username: '', old_password: '', new_password: '', confirm_password: '' })
 const newKey = ref('')
 const generation = reactive({ image_timeout: 300, video_timeout: 1500, max_retries: 20 })
+const maintenance = reactive({ enabled: true, refresh_interval_minutes: 30 })
+const maintenanceError = ref('')
+let settingsDisposed = false
 const defaultAccountErrorRules = [
     'PUBLIC_ERROR_MODEL_ACCESS_DENIED|LIMIT|0s',
     'PUBLIC_ERROR_USER_QUOTA_REACHED|LIMIT|24h',
@@ -137,6 +141,12 @@ const configSources = [
     },
     { id: 'generation', path: '/api/config/generation', target: generation, wrap: true },
     {
+        id: 'maintenance',
+        path: '/api/profile-maintenance/config',
+        target: maintenance,
+        map: (data) => maintenancePayload({ ...maintenance, ...data.config }),
+    },
+    {
         id: 'errorPolicy',
         path: '/api/account-error-policy',
         target: accountErrorPolicy,
@@ -184,12 +194,15 @@ function vidsConfigPayload(value = vidsConfig) {
         rules: value.rules,
     }
 }
-const tracked = (id, value) => id === 'errorPolicy' ? accountErrorPolicyPayload(value) : id === 'vidsConfig' ? vidsConfigPayload(value) : value
+const tracked = (id, value) => id === 'errorPolicy' ? accountErrorPolicyPayload(value) : id === 'vidsConfig' ? vidsConfigPayload(value) : id === 'maintenance' ? maintenancePayload(value) : value
 function markSnapshot(id, value) {
     snapshots[id] = string(tracked(id, value))
 }
 function dirty(id, value) {
     return snapshots[id] !== undefined && snapshots[id] !== string(tracked(id, value))
+}
+function maintenancePayload(value = maintenance) {
+    return { enabled: value.enabled, refresh_interval_minutes: value.refresh_interval_minutes }
 }
 const dirtyCount = computed(
     () =>
@@ -203,6 +216,7 @@ const dirtyCount = computed(
         ),
 )
 async function reloadSettings() {
+    if (busy.has('maintenance')) return ElMessage.warning('账号维护设置正在保存，请稍后重新读取')
     if (dirtyCount.value) {
         try {
             await ElMessageBox.confirm('重新读取会覆盖本页尚未保存的修改。', '重新读取设置', {
@@ -221,6 +235,32 @@ function ensure(result) {
     return result
 }
 const date = (value) => (value ? parseDate(value).toLocaleString('zh-CN', { hour12: false }) : '尚未检测')
+async function saveMaintenanceSettings() {
+    if (busy.has('maintenance') || !loaded.has('maintenance')) return
+    const submitted = maintenancePayload()
+    maintenanceError.value = ''
+    if (typeof submitted.enabled !== 'boolean' || !Number.isInteger(submitted.refresh_interval_minutes) ||
+        submitted.refresh_interval_minutes < 1 || submitted.refresh_interval_minutes > 1440) {
+        maintenanceError.value = '维护间隔需为 1–1440 分钟的整数'
+        return
+    }
+    busy.add('maintenance')
+    try {
+        ensure(await api.post('/api/profile-maintenance/config', submitted))
+        clearAccountSnapshot()
+        if (settingsDisposed) return
+        markSnapshot('maintenance', submitted)
+        savedAt.maintenance = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+        ElMessage.success('统一会话维护设置已保存')
+    } catch (error) {
+        if (!settingsDisposed) {
+            maintenanceError.value = error.message || '统一维护设置保存失败'
+            notifyError(error)
+        }
+    } finally {
+        busy.delete('maintenance')
+    }
+}
 async function load() {
     if (loadRequest) return loadRequest
     loadRequest = readSettings().finally(() => {
@@ -459,7 +499,19 @@ watch(
     },
     { immediate: true },
 )
+watch(
+    [() => route.query.section, () => route.query.account_id ?? route.query.account, loading],
+    async ([section, account, isLoading]) => {
+        if (isLoading || section !== 'generation') return
+        settingsQuery.value = ''
+        group.value = 'generation'
+        await nextTick()
+        if (account !== undefined) document.querySelector('[data-setting-card="refresh"]')?.scrollIntoView({ block: 'start' })
+    },
+    { immediate: true },
+)
 onMounted(load)
+onUnmounted(() => { settingsDisposed = true })
 </script>
 
 <template>
@@ -767,15 +819,25 @@ onMounted(load)
                             >
                                 <div class="card-heading">
                                     <div>
-                                        <h3>Profile 登录态维护</h3>
-                                        <p>按每个账号的自动维护开关和会话维护间隔执行，已有账号沿用各自设置。</p>
+                                        <h3>账号会话维护</h3>
+                                        <p>统一设置所有 Profile 账号的后台维护周期。</p>
                                     </div>
+                                    <el-tag v-if="dirty('maintenance', maintenance)" type="warning" size="small">未保存</el-tag>
                                 </div>
-                                <p class="field-note">新建 Profile 账号默认每 30 分钟维护一次；已有账号按各自保存的间隔执行。后台每分钟扫描到期账号。</p>
-                                <p class="field-note">日常优先通过 HTTP 校验会话；到维护时间后由后台无头浏览器访问 Flow 续期并正常关闭。Google 登录已失效时需重新登录。</p>
+                                <el-form label-position="top" @submit.prevent="saveMaintenanceSettings">
+                                    <div class="switch-row">
+                                        <div><strong>启用自动维护</strong><p>关闭后停止后台定时维护，生成前必要的身份校验和手动维护仍可执行。</p></div>
+                                        <el-switch v-model="maintenance.enabled" aria-label="启用统一账号自动维护" :disabled="!loaded.has('maintenance') || busy.has('maintenance')" />
+                                    </div>
+                                    <el-form-item label="统一维护间隔（分钟）" :error="maintenanceError">
+                                        <el-input-number v-model="maintenance.refresh_interval_minutes" :min="1" :max="1440" :precision="0" controls-position="right" :disabled="!loaded.has('maintenance') || busy.has('maintenance')" aria-label="统一维护间隔（分钟）" />
+                                        <span class="field-note">默认 30 分钟，对全部 Profile 账号生效；单个账号已关闭自动维护时继续跳过。</span>
+                                    </el-form-item>
+                                </el-form>
+                                <p class="field-note">保存后按各账号最近一次维护时间重算到期时间；后台每分钟扫描、按各自到期时间执行，避免同时启动一批浏览器。</p>
                                 <div class="save-row">
-                                    <span>在账号管理中修改单个账号的维护开关和间隔。</span>
-                                    <RouterLink to="/accounts" class="el-button">管理账号维护设置</RouterLink>
+                                    <span>{{ savedAt.maintenance ? '已保存于 ' + savedAt.maintenance : '日常优先 HTTP 校验，必要时后台浏览器维护；登录失效请重新登录。' }}</span>
+                                    <el-button type="primary" :loading="busy.has('maintenance')" :disabled="!loaded.has('maintenance') || !dirty('maintenance', maintenance)" @click="saveMaintenanceSettings">保存会话维护设置</el-button>
                                 </div>
                             </section>
                         </div>

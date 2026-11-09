@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from ...core.account_identity import same_google_identity
 from ...core.models import Token
 from ..flow.google_cookies import GoogleCookieJar
+from ..profile_maintenance import profile_policy
 from ..proxy_manager import ProxyManager
 from .profile_viewer import ViewerError
 from .token_account_probe import TokenManagerAccountProbe
@@ -379,7 +380,17 @@ class DirectProfileLogin:
             # Project preparation belongs to generation. A failure creating or
             # warming its pool must not invalidate this freshly verified login.
             now = datetime.now(timezone.utc)
-            due = now + timedelta(minutes=token.refresh_interval_minutes)
+            from inspect import iscoroutinefunction
+
+            read_policy = getattr(self.tokens.db, "get_profile_maintenance_config", None)
+            if iscoroutinefunction(read_policy):
+                await read_policy()
+            policy = profile_policy(self.tokens.db)
+            due = (
+                now + timedelta(minutes=policy["refresh_interval_minutes"])
+                if policy["enabled"]
+                else None
+            )
             if not await self.tokens.db.update_token_if_credentials_match(
                 token_id,
                 expected,

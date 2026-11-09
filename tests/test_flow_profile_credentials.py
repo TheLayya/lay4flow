@@ -21,6 +21,7 @@ class FlowProfileCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(directory.cleanup)
         self.db = Database(str(Path(directory.name) / "synthetic.db"))
         await self.db.init_db()
+        await self.db.update_profile_maintenance_config(True, 120)
         self.flow = SimpleNamespace(
             st_to_at=AsyncMock(side_effect=AssertionError("retired session endpoint called")),
             get_credits=AsyncMock(side_effect=AssertionError("legacy bearer request called")),

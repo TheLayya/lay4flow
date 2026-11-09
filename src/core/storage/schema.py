@@ -26,6 +26,11 @@ class SchemaManager:
             config_dict: Configuration dictionary from setting.toml (optional)
                         If None, use default values instead of reading from TOML.
         """
+        await db.execute("""CREATE TABLE IF NOT EXISTS profile_maintenance_config (
+            id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 1,
+            refresh_interval_minutes INTEGER NOT NULL DEFAULT 30, revision INTEGER NOT NULL DEFAULT 0
+        )""")
+        await db.execute("INSERT OR IGNORE INTO profile_maintenance_config(id) VALUES(1)")
         # Ensure admin_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM admin_config")
         count = await cursor.fetchone()
@@ -538,6 +543,11 @@ class SchemaManager:
         async with self._database._connect(write=True) as db:
             await db.execute("PRAGMA journal_mode = WAL")
             await db.execute("PRAGMA synchronous = NORMAL")
+            await db.execute("""CREATE TABLE IF NOT EXISTS profile_maintenance_config (
+                id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 1,
+                refresh_interval_minutes INTEGER NOT NULL DEFAULT 30, revision INTEGER NOT NULL DEFAULT 0
+            )""")
+            await db.execute("INSERT OR IGNORE INTO profile_maintenance_config(id) VALUES(1)")
             # Tokens table (lay4flow版本)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS tokens (

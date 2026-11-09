@@ -1051,11 +1051,11 @@ test('Flow and Vids protection have separate settings entries and ignore the leg
     assert.equal(s.dirtyCount.value, 1)
 })
 
-test('Profile maintenance is account-owned and never reads or writes legacy global ST settings', async () => {
+test('Profile maintenance uses one dedicated global policy and never legacy ST settings', async () => {
     const settings = view('Settings')
     assert.equal(settings.state.configSources.some((item) => item.path.startsWith('/api/token-refresh')), false)
     assert.equal('refreshConfig' in settings.state, false)
-    settings.state.settingsQuery.value = '会话维护间隔'
+    settings.state.settingsQuery.value = '统一维护间隔'
     assert.deepEqual(plain(settings.state.matchingCards.value.map((item) => item.id)), ['refresh'])
 
     const paths = []
@@ -1070,6 +1070,77 @@ test('Profile maintenance is account-owned and never reads or writes legacy glob
     assert.equal('protocolRefresh' in accounts.state, false)
     assert.equal('toggleRefresh' in accounts.state, false)
     assert.equal('refreshSaving' in accounts.state, false)
+})
+
+test('global maintenance loads one allowed policy without reading account credentials', async () => {
+    const reads = []
+    const fixture = view('Settings', { api: { get: async (path) => {
+        reads.push(path)
+        if (path === '/api/profile-maintenance/config') return { config: {
+            enabled: false, refresh_interval_minutes: 60, scope: 'profile_accounts', unknown_private: 'discard-me',
+        } }
+        return path === '/api/admin/release' ? { version: 'fixture' } : { config: {} }
+    } } })
+    const s = fixture.state
+    assert.deepEqual(plain(s.maintenance), { enabled: true, refresh_interval_minutes: 30 })
+    await s.readSettings()
+    assert.equal(reads.filter(path => path === '/api/profile-maintenance/config').length, 1)
+    assert.equal(reads.includes('/api/tokens'), false)
+    assert.equal(reads.some(path => path.startsWith('/api/token-refresh')), false)
+    assert.deepEqual(plain(s.maintenance), { enabled: false, refresh_interval_minutes: 60 })
+    assert.equal(s.loaded.has('maintenance'), true)
+    assert.equal(s.dirty('maintenance', s.maintenance), false)
+    assert.equal('maintenanceAccounts' in s, false)
+})
+
+test('global maintenance saves exactly two fields and keeps later edits dirty', async () => {
+    const response = deferred(), writes = []
+    let invalidated = 0
+    const fixture = view('Settings', { api: {
+        post: async (path, body) => { writes.push({ path, body: plain(body) }); return response.promise },
+    }, context: { clearAccountSnapshot: () => { invalidated++ } } })
+    const s = fixture.state
+    s.loaded.add('maintenance')
+    s.markSnapshot('maintenance', s.maintenance)
+    s.maintenance.refresh_interval_minutes = 60
+    assert.equal(s.dirtyCount.value, 1)
+    const saving = s.saveMaintenanceSettings()
+    s.maintenance.refresh_interval_minutes = 90
+    response.resolve({ success: true, config: { enabled: true, refresh_interval_minutes: 60, scope: 'profile_accounts' } })
+    await saving
+    assert.deepEqual(writes, [{ path: '/api/profile-maintenance/config', body: { enabled: true, refresh_interval_minutes: 60 } }])
+    assert.equal(invalidated, 1)
+    assert.equal(s.maintenance.refresh_interval_minutes, 90)
+    assert.equal(JSON.parse(s.snapshots.maintenance).refresh_interval_minutes, 60)
+    assert.equal(s.dirty('maintenance', s.maintenance), true)
+    assert.equal(s.busy.has('maintenance'), false)
+})
+
+test('global maintenance validates and retains rejected drafts or unread policy', async () => {
+    const writes = []
+    const fixture = view('Settings', { api: {
+        get: async (path) => { if (path === '/api/profile-maintenance/config') throw new Error('synthetic policy read failure'); return { config: {} } },
+        post: async (path, body) => { writes.push({ path, body: plain(body) }); throw new Error('synthetic save failure') },
+    } })
+    const s = fixture.state
+    await s.readSettings()
+    assert.equal(s.loaded.has('maintenance'), false)
+    await s.saveMaintenanceSettings()
+    assert.equal(writes.length, 0)
+    s.loaded.add('maintenance')
+    s.markSnapshot('maintenance', s.maintenance)
+    s.maintenance.refresh_interval_minutes = 0
+    await s.saveMaintenanceSettings()
+    assert.equal(writes.length, 0)
+    assert.ok(s.maintenanceError.value)
+    s.maintenance.refresh_interval_minutes = 45
+    s.maintenance.enabled = false
+    await s.saveMaintenanceSettings()
+    assert.equal(writes.length, 1)
+    assert.match(s.maintenanceError.value, /save failure/)
+    assert.deepEqual(plain(s.maintenance), { enabled: false, refresh_interval_minutes: 45 })
+    assert.equal(s.dirty('maintenance', s.maintenance), true)
+    assert.equal(s.busy.has('maintenance'), false)
 })
 
 test('editing an account preserves unchanged ST and blank password, and keeps rejection visible', async () => {
@@ -1230,14 +1301,12 @@ test('quick Cloak switching confirms before writing and cancellation keeps the c
     assert.equal(s.quickSavingId.value, null)
 })
 
-test('inline account settings write only changed common fields and preserve edits on failure', async () => {
-    let rejected = true
+test('removed expanded common settings cannot submit account or maintenance edits', async () => {
     const writes = []
     const fixture = view('Accounts', {
         api: {
             put: async (path, body) => {
                 writes.push({ path, body: plain(body) })
-                if (rejected) throw new Error('保存暂时失败')
                 return { success: true }
             },
         },
@@ -1257,15 +1326,12 @@ test('inline account settings write only changed common fields and preserve edit
     draft.remark = 'new note'
     draft.video_enabled = false
     await s.saveQuickAccount(row, 'settings')
-    assert.deepEqual(writes[0], { path: '/api/tokens/12', body: { remark: 'new note', video_enabled: false } })
+    assert.deepEqual(writes, [])
     assert.equal(s.accounts.value[0].remark, 'original')
     assert.equal(draft.remark, 'new note')
-    assert.equal(s.quickErrors[12], '保存暂时失败')
-    rejected = false
-    await s.saveQuickAccount(row, 'settings')
-    assert.equal(s.accounts.value[0].remark, 'new note')
+    assert.equal(s.quickErrors[12], undefined)
     assert.equal(s.accounts.value[0].st, 'leave-st-alone')
-    assert.equal(s.accounts.value[0].video_enabled, false)
+    assert.equal(s.accounts.value[0].video_enabled, true)
 })
 
 test('account proxy labels keep credentials and copies intact while quick drafts survive folding', async () => {
@@ -1631,7 +1697,7 @@ test('manual refresh and delete finish while older auxiliary requests remain pen
     auxiliary.resolve({ accounts: [], entries: [] })
 })
 
-test('quick settings invalidate delayed Vids summaries and keep shared capabilities current', async () => {
+test('main table capability writes invalidate delayed Vids summaries and keep capabilities current', async () => {
     const auxiliary = deferred()
     const account = { id: 1, email: 'synthetic@example.invalid', video_enabled: true, refresh_interval_minutes: 30 }
     const { state: s } = view('Accounts', { api: {
@@ -1640,8 +1706,7 @@ test('quick settings invalidate delayed Vids summaries and keep shared capabilit
     } })
     s.vids.value = [{ token_id: 1, video_enabled: true }]
     await s.load()
-    s.quickDraft(s.rows.value[0]).video_enabled = false
-    await s.saveQuickAccount(s.rows.value[0], 'settings')
+    await s.toggleAccountSetting(s.rows.value[0], 'video_enabled', false)
     assert.equal(s.accounts.value[0].video_enabled, false)
     assert.equal(s.vids.value[0].video_enabled, false)
     auxiliary.resolve({ accounts: [{ token_id: 1, video_enabled: true, runtime_error: 'old-error' }], entries: [] })
