@@ -4523,10 +4523,13 @@ class FlowClient:
     def _build_remote_browser_http_timeout(read_timeout: float) -> Any:
         read_value = max(3.0, float(read_timeout))
         write_value = min(10.0, max(3.0, read_value))
+        # TCP/TLS setup shares the configured request's bounded wait rather
+        # than failing every solve at 2.5s on a temporarily slow network.
+        connect_value = min(10.0, read_value)
         if httpx is None:
             return read_value
         return httpx.Timeout(
-            connect=2.5,
+            connect=connect_value,
             read=read_value,
             write=write_value,
             pool=2.5,
@@ -4582,8 +4585,8 @@ class FlowClient:
 
         try:
             status_code, text = await asyncio.to_thread(do_request)
-        except Exception as e:
-            raise RuntimeError(f"remote_browser 请求失败: {e}") from e
+        except Exception as error:
+            raise RemoteCaptchaError.from_transport(error) from None
 
         return status_code, FlowClient._parse_json_response_text(text), text
 
@@ -4626,8 +4629,8 @@ class FlowClient:
                     url=url,
                     **request_kwargs,
                 )
-        except Exception as e:
-            raise RuntimeError(f"remote_browser 请求失败: {e}") from e
+        except Exception as error:
+            raise RemoteCaptchaError.from_transport(error) from None
 
         status_code = int(getattr(response, "status_code", 0) or 0)
         text = response.text or ""
@@ -4654,6 +4657,7 @@ class FlowClient:
             body["type"] = "RecaptchaV3TaskProxyless"
             body["pageAction"] = body.get("action") or "IMAGE_GENERATION"
 
+        started = time.monotonic()
         try:
             status_code, payload, _ = await self._sync_json_http_request(
                 method=method,
@@ -4662,8 +4666,22 @@ class FlowClient:
                 payload=body,
                 timeout=effective_timeout,
             )
-        except Exception:
-            raise RemoteCaptchaError("TRANSPORT_ERROR") from None
+        except Exception as error:
+            failure = RemoteCaptchaError.from_transport(error)
+            # Only fixed operation names and typed reasons enter diagnostics.
+            # Never log URL/session identifiers, body, headers or exception text.
+            operation = (
+                "solve"
+                if path == "/api/v1/solve"
+                else "prefill"
+                if path == "/api/v1/prefill"
+                else "session_callback"
+            )
+            debug_logger.log_error(
+                f"[Remote captcha transport] operation={operation} reason={failure.reason} "
+                f"duration_ms={int((time.monotonic() - started) * 1000)}"
+            )
+            raise failure from None
         return check_remote_response(payload, status_code)
 
     async def prefill_remote_browser_pool(
@@ -4769,6 +4787,6 @@ class FlowClient:
         except Exception as error:
             self.clear_request_fingerprint()
             if not isinstance(error, RemoteCaptchaError):
-                error = RemoteCaptchaError("TRANSPORT_ERROR")
+                error = RemoteCaptchaError.from_transport(error)
             debug_logger.log_error(f"[Remote captcha] {error}")
             raise error from None

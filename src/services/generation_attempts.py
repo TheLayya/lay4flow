@@ -181,6 +181,17 @@ CURRENT_ATTEMPTS: ContextVar[GenerationAttempts | None] = ContextVar(
 )
 
 
+def is_confirmed_flow_rejection(error):
+    """Only trusted, rejected writes can return to configurable account retry."""
+    from .flow.flow_rpc import FlowRPCError
+
+    return (
+        isinstance(error, FlowRPCError)
+        and error.submission_rejected
+        and error.network_step in {"flow_generate_image", "flow_generate_video"}
+    )
+
+
 class AccountGenerationRetry(Exception):
     def __init__(self, error, token_id, decision):
         super().__init__(str(error))

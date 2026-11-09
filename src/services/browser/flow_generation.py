@@ -17,7 +17,7 @@ from ..flow.angular_images import (
 )
 from ..flow.flow_rpc import FlowRPCError, flow_rpc
 from ..flow.remote_captcha import RemoteCaptchaError
-from ..generation_attempts import CURRENT_ATTEMPTS
+from ..generation_attempts import CURRENT_ATTEMPTS, is_confirmed_flow_rejection
 from ..project_pool import flow_session_binding
 from .flow_session import account_http_session
 from .token_account_probe import TokenManagerAccountProbe
@@ -369,13 +369,7 @@ class FlowProfileGeneration:
                     # A typed RPC rejection without a success payload is known
                     # not to have accepted this write. Network timeouts and
                     # mixed/unknown outcomes must never submit another video.
-                    confirmed = (
-                        isinstance(error, FlowRPCError)
-                        and error.network_step == "flow_generate_video"
-                        and error.submission_rejected
-                        and error.public_error is not None
-                        and error.rpc_code is not None
-                    )
+                    confirmed = is_confirmed_flow_rejection(error)
                     if confirmed:
                         rejection_reason = (
                             "recaptcha_rejected"
@@ -387,10 +381,11 @@ class FlowProfileGeneration:
                             else "upstream_rejected"
                         )
                         delay = min(2 ** (attempt + 1), 10) + random.uniform(0, 1)
-                    # Configured account actions belong to the outer selector,
-                    # which can exclude this account and release all its leases.
+                    # Every confirmed rejection belongs to the outer policy,
+                    # even when no custom keyword matches: each failure must
+                    # advance account protection and the allocation budget.
                     policy = getattr(self.tokens, "generation_error_policy", None)
-                    if confirmed and policy is not None and await policy.match(error) is not None:
+                    if confirmed and policy is not None:
                         raise
                     retryable = error.retryable and (
                         isinstance(error, RemoteCaptchaError)

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import test_flow_profile_generation as fixtures
 
+from src.services.flow.flow_rpc import FlowRPCError
 from src.services.flow.remote_captcha import RemoteCaptchaError
 from src.services.generation_attempts import CURRENT_ATTEMPTS, GenerationAttempts
 
@@ -90,6 +91,86 @@ class FlowAttemptHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history["attempts"][1]["stage"], "submit")
         self.assertEqual(history["attempts"][1]["next_action"], "completed")
         self.assertTrue(all(row["duration_ms"] >= 0 for row in history["attempts"]))
+
+    async def test_confirmed_rejection_hands_off_to_policy_after_transport_failures(self):
+        for public_error in (
+            "PUBLIC_ERROR_UNUSUAL_ACTIVITY",
+            "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC",
+        ):
+            with self.subTest(public_error=public_error):
+                budget = GenerationAttempts(20)
+                budget.select_account(self.token)
+                self.tokens.generation_error_policy = SimpleNamespace(
+                    availability=AsyncMock(return_value=None)
+                )
+                self.client._get_recaptcha_token.reset_mock()
+                self.client._notify_browser_captcha_error.reset_mock()
+                self.client._get_video_submit_timeout = Mock(return_value=90)
+                self.client._get_recaptcha_token.side_effect = [
+                    *[RemoteCaptchaError("TRANSPORT_ERROR") for _ in range(10)],
+                    ("synthetic-captcha", "synthetic-lease"),
+                    ("must-not-be-requested", "unused-lease"),
+                ]
+                rejection = FlowRPCError(
+                    "transient_error",
+                    "flow_generate_video",
+                    rpc_code=7,
+                    public_error=public_error,
+                )
+                rejection.submission_rejected = True
+
+                async def rpc(context, rpcid, payload, **kwargs):
+                    if kwargs["network_step"] == "flow_generate_video":
+                        raise rejection
+                    return [9, 1, 2, 2] if rpcid == "nzlxg" else []
+
+                marker = CURRENT_ATTEMPTS.set(budget)
+                try:
+                    with (
+                        patch(
+                            "src.services.browser.token_account_probe.read_flow_session",
+                            AsyncMock(return_value={"email": self.token.email, "credits": 9}),
+                        ),
+                        patch(
+                            "src.services.browser.flow_generation.flow_rpc", side_effect=rpc
+                        ) as calls,
+                        patch(
+                            "src.services.flow.angular_video.resolve_video_usage",
+                            return_value="veo",
+                        ),
+                        patch(
+                            "src.services.browser.flow_generation.config",
+                            SimpleNamespace(flow_max_retries=20),
+                        ),
+                        patch(
+                            "src.services.browser.flow_generation.asyncio.sleep", AsyncMock()
+                        ) as sleep,
+                    ):
+                        with self.assertRaises(FlowRPCError) as caught:
+                            await self.generation().generate_video(
+                                "text", "project", "prompt", "veo", "16:9"
+                            )
+                    self.assertIs(caught.exception, rejection)
+                finally:
+                    CURRENT_ATTEMPTS.reset(marker)
+                self.assertEqual(self.client._get_recaptcha_token.await_count, 11)
+                self.assertEqual(
+                    sum(
+                        c.kwargs["network_step"] == "flow_generate_video"
+                        for c in calls.await_args_list
+                    ),
+                    1,
+                )
+                self.assertEqual(sleep.await_count, 10)
+                self.client._notify_browser_captcha_error.assert_awaited_once_with(
+                    "synthetic-lease", error_reason="recaptcha_rejected"
+                )
+                history = budget.snapshot()
+                self.assertEqual(history["limit"], 20)
+                self.assertEqual(history["total_attempts"], 11)
+                self.assertEqual(history["attempts"][-1]["stage"], "submit")
+                self.assertEqual(history["attempts"][-1]["error_code"], public_error)
+                self.assertEqual(history["attempts"][-1]["next_action"], "stop")
 
 
 if __name__ == "__main__":

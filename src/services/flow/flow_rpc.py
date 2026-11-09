@@ -138,7 +138,7 @@ class FlowRPCError(Exception):
             )
             else None
         )
-        # Only a fully decoded error-only RPC response proves a rejected write.
+        # The decoder or trusted direct HTTP denial can confirm a rejected write.
         self.submission_rejected = False
         self.retryable = reason not in {
             "login_required",
@@ -149,6 +149,8 @@ class FlowRPCError(Exception):
             or self.public_error in _RETRYABLE_PUBLIC_ERRORS
         )
         detail = f" (code={self.rpc_code})" if self.rpc_code is not None else ""
+        if type(self.http_status) is int:
+            detail += f" (HTTP {self.http_status})"
         if self.public_error:
             detail += f" {self.public_error}"
         if self.rpc_code == 8:
@@ -243,7 +245,15 @@ def _check_response(response: Any, step: str) -> None:
         # A bare HTTP 403 may be an access/risk rejection, not a signed-out
         # Google session. Only explicit authentication evidence can require
         # another login; retain the status for bounded retry diagnostics.
-        raise FlowRPCError("transient_error", step, status)
+        error = FlowRPCError("transient_error", step, status)
+        # A direct trusted Flow 403/429 response denies this write. This is
+        # distinct from a transport timeout, redirect, untrusted origin or
+        # decoded response carrying both a payload and an error.
+        error.submission_rejected = status in {403, 429} and step in {
+            "flow_generate_image",
+            "flow_generate_video",
+        }
+        raise error
 
 
 def _bootstrap(html: str) -> dict[str, Any]:

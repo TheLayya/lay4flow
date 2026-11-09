@@ -217,18 +217,27 @@ class FlowRPCTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(error.submission_rejected)
                 self.assertEqual(context.request.post.await_count, posts)
 
-    async def test_http_forbidden_write_is_not_replayed_or_reported_as_confirmed_rejection(self):
-        context = self.context()
-        context.flow_bootstrap_cache = {}
-        context.request.post.side_effect = None
-        context.request.post.return_value = response(status=403, url=RPC_URL)
-        with self.assertRaises(FlowRPCError) as caught:
-            await flow_rpc(context, "ogiZ0b", ["synthetic-write"], expected_email=EMAIL)
-        self.assertEqual(caught.exception.reason, "transient_error")
-        self.assertEqual(caught.exception.http_status, 403)
-        self.assertFalse(caught.exception.submission_rejected)
-        context.request.post.assert_awaited_once()
-        self.assertEqual(context.flow_bootstrap_cache, {})
+    async def test_trusted_http_forbidden_and_rate_limit_handoff_without_transport_replay(self):
+        for status in (403, 429):
+            with self.subTest(status=status):
+                context = self.context()
+                context.flow_bootstrap_cache = {}
+                context.request.post.side_effect = None
+                context.request.post.return_value = response(status=status, url=RPC_URL)
+                with self.assertRaises(FlowRPCError) as caught:
+                    await flow_rpc(
+                        context,
+                        "ogiZ0b",
+                        ["synthetic-write"],
+                        expected_email=EMAIL,
+                        network_step="flow_generate_image",
+                    )
+                self.assertEqual(caught.exception.reason, "transient_error")
+                self.assertEqual(caught.exception.http_status, status)
+                self.assertIn(f"HTTP {status}", str(caught.exception))
+                self.assertTrue(caught.exception.submission_rejected)
+                context.request.post.assert_awaited_once()
+                self.assertEqual(context.flow_bootstrap_cache, {})
 
     async def test_forbidden_response_from_untrusted_origin_is_not_a_session_signal(self):
         context = self.context()

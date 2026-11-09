@@ -20,6 +20,7 @@ from src.services.account_error_policy import (
     PolicyValidationError,
     parse_rules,
 )
+from src.services.flow.flow_rpc import FlowRPCError
 
 
 class AccountRuleParserTests(unittest.TestCase):
@@ -77,6 +78,20 @@ class AccountErrorPolicyTests(unittest.IsolatedAsyncioTestCase):
             Token(st="synthetic-session", email="account@example.invalid", is_active=True)
         )
         self.policy = AccountErrorPolicy(self.db)
+
+    async def test_resource_exhaustion_rule_cools_only_failed_account_for_five_seconds(self):
+        error = FlowRPCError("transient_error", "flow_generate_video", rpc_code=8)
+        error.submission_rejected = True
+        self.assertIn("RESOURCE_EXHAUSTED", str(error))
+        with patch("src.services.account_error_policy.time.time", return_value=1000):
+            decision = await self.policy.record_failure(self.token_id, error)
+            self.assertEqual((decision["action"], decision["seconds"]), ("LIMIT", 5))
+            self.assertEqual(decision["keyword"], "RESOURCE_EXHAUSTED")
+            self.assertIsNotNone(await self.policy.availability(self.token_id))
+        self.assertTrue((await self.db.get_token(self.token_id)).is_active)
+        self.assertEqual((await self.db.get_token_stats(self.token_id)).consecutive_error_count, 1)
+        with patch("src.services.account_error_policy.time.time", return_value=1005):
+            self.assertIsNone(await self.policy.availability(self.token_id))
 
     async def test_default_quota_and_custom_first_match_override_are_literal(self):
         defaults = await self.policy.get_config()

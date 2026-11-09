@@ -376,7 +376,7 @@ class FlowProfileGenerationTests(unittest.IsolatedAsyncioTestCase):
             "transient_error",
             "flow_generate_video",
             rpc_code=7,
-            public_error="PUBLIC_ERROR_UNUSUAL_ACTIVITY",
+            public_error="PUBLIC_ERROR_HIGH_TRAFFIC",
         )
         rejection.submission_rejected = True
         payloads = []
@@ -393,7 +393,7 @@ class FlowProfileGenerationTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(delay, 2)
             self.assertLessEqual(delay, 3)
             self.client._notify_browser_captcha_error.assert_awaited_once_with(
-                "lease1", error_reason="recaptcha_rejected"
+                "lease1", error_reason="upstream_rejected"
             )
             self.client._notify_browser_captcha_request_finished.assert_not_awaited()
 

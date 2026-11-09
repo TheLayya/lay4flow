@@ -41,6 +41,7 @@ from .generation_attempts import (
     AccountGenerationRetry,
     GenerationAttempts,
     GenerationBudgetExceeded,
+    is_confirmed_flow_rejection,
 )
 from .proxy_manager import AccountProxyUnavailable, ProxyManager
 
@@ -998,6 +999,19 @@ class GenerationHandler:
             ):
                 failure_recorded = True
                 decision = await policy.record_failure(token.id, e, model=model)
+                if (
+                    decision is None
+                    and is_confirmed_flow_rejection(e)
+                    and (e.retryable or e.http_status in {403, 429} or e.rpc_code == 8)
+                ):
+                    # No implicit persistent keyword rule. Skip the rejected
+                    # account for this request only; the configured failure
+                    # threshold above can still supersede this with cooldown.
+                    decision = {
+                        "action": "LIMIT",
+                        "seconds": 0,
+                        "keyword": "本次提交被明确拒绝",
+                    }
                 safe_replay = (
                     not generation_started
                     or isinstance(e, FlowRPCError)
@@ -1008,6 +1022,15 @@ class GenerationHandler:
                         in {"flow_bootstrap", "flow_identity", "flow_models", "flow_credits"}
                     )
                 ) and not generation_result.get("upstream_accepted")
+                if (
+                    matched is None
+                    and is_confirmed_flow_rejection(e)
+                    and not (e.retryable or e.http_status in {403, 429} or e.rpc_code == 8)
+                ):
+                    # Reaching the failure threshold may protect the account,
+                    # but does not turn a permanent request rejection into a
+                    # retry. An explicit matching administrator rule still wins.
+                    safe_replay = False
                 if attempts is not None and decision is not None:
                     attempts.decision(decision, retry=False)
                 if decision is not None and safe_replay and not video_media_id:
@@ -1110,6 +1133,8 @@ class GenerationHandler:
             return False
         if isinstance(error, AccountProxyUnavailable):
             return False
+        if is_confirmed_flow_rejection(error):
+            return True
         if ProxyManager.is_submission_transport_error(error):
             return False
         if not error_text:
