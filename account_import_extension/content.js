@@ -1,5 +1,5 @@
 (() => {
-  const managementPaths = ["/", "/manage", "/vids-accounts", "/vids/accounts"];
+  const managementPaths = ["/", "/login", "/manage", "/test", "/vids", "/vids-accounts", "/vids/accounts", "/api-guide", "/vids-api-guide", "/vids/api-guide"];
   if (!managementPaths.includes(location.pathname)) return;
   if (window.__lay4flowImportBridgeInstalled || window.__flow2apiImportBridgeInstalled) return;
   window.__lay4flowImportBridgeInstalled = true;
@@ -16,7 +16,7 @@
     if (msg.extension_id && msg.extension_id !== chrome.runtime.id) return;
     replySource = msg.source === LEGACY_SOURCE ? "flow2api-import-extension" : "lay4flow-import-extension";
     if (msg.type === "import.hello") {
-      post("import.ready", {version: "1.8.0"});
+      post("import.ready", {version: "1.8.4"});
       if (msg.session_id) chrome.runtime.sendMessage({type: "import.status", session_id: msg.session_id, admin_origin: location.origin}, response => {
         if (!chrome.runtime.lastError && response?.type === "import.status") post("import.status", response);
       });
@@ -55,8 +55,8 @@
         chrome.runtime.sendMessage({type: "import.submit.result", session_id: message.session_id, ok: false, status: 0});
         return;
       }
-      // The background retries delivery after 30s. Keep one HTTP request until
-      // it settles, including while the server creates the browser Profile.
+      // Keep one HTTP request until it settles. A late response must not cause
+      // duplicate delivery or a second server-side Profile verification.
       if (pendingSubmissions.has(message.session_id)) return;
       pendingSubmissions.add(message.session_id);
       fetch(target.href, {
@@ -82,9 +82,9 @@
     if (message?.type === "import.result") post("import.result", { ...message, success: message.state === "succeeded", result: { email: message.email || "", action: message.action || "" } });
     if (message?.type === "import.error" || message?.type === "import.progress") post(message.type, message);
   });
-  post("import.ready", {version: "1.8.0"});
+  post("import.ready", {version: "1.8.4"});
   // Cached management pages may have sent hello before this bridge was installed.
   replySource = "flow2api-import-extension";
-  post("import.ready", {version: "1.8.0"});
+  post("import.ready", {version: "1.8.4"});
   replySource = "lay4flow-import-extension";
 })();

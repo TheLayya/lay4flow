@@ -6,16 +6,19 @@ import json
 import math
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from ...core.account_identity import same_google_identity
+from ...core.logger import debug_logger
 from ...core.models import Token
 from ..flow.google_cookies import GoogleCookieJar
 from ..proxy_manager import ProxyManager
+from .cloak_backend import CloakBrowserBackend
 from .environment import EnvironmentSnapshot
 from .profiles import ProfileNotReadyError
 from .token_account_probe import TokenManagerAccountProbe
@@ -76,8 +79,6 @@ TRANSFER_STAGES = {
     "open_profile": "启动目标浏览器",
     "restore_state": "恢复登录态",
     "flow_verification": "Flow 登录态校验",
-    "cold_check_1": "首次重开校验",
-    "cold_check_2": "再次重开校验",
     "save_account": "保存账号",
     "prepare_workspace": "准备账号工作区",
     "finalize": "完成账号配置",
@@ -210,6 +211,161 @@ class ProfileTransfer:
     def __init__(self, token_manager: Any):
         self.tokens = token_manager
         self._import_lock = asyncio.Lock()
+
+    async def existing_account(self, email):
+        matches = [
+            token
+            for token in await self.tokens.db.get_all_tokens()
+            if same_google_identity(token.email, email)
+        ]
+        if len(matches) > 1:
+            raise ProfileTransferError(
+                "ambiguous_account", "同一邮箱存在多条账号，请先整理账号记录", 409
+            )
+        return matches[0] if matches else None
+
+    async def update_existing(self, token, cookies, *, on_stage=None):
+        """Replace only login material on the original identity and fixed exit."""
+        from .profile_update import update_profile_login
+
+        if token.browser_profile_source != "cloak":
+            raise ProfileTransferError(
+                "profile_required", "已有账号不是 Cloak Profile，请在账号页处理", 409
+            )
+        manager = self.refresher.manager
+        proxy = await self.refresher._proxy_url(token)
+        refresh_lock = await self.tokens._get_token_lock(
+            self.tokens._refresh_locks, self.tokens._refresh_lock_guard, token.id
+        )
+        cookie_lock = await self.tokens._get_token_lock(
+            self.tokens._profile_cookie_locks, self.tokens._refresh_lock_guard, token.id
+        )
+        pending = self.tokens._refresh_futures.get(token.id)
+        if refresh_lock.locked() or cookie_lock.locked() or (pending and not pending.done()):
+            raise ProfileTransferError("account_busy", "账号正在刷新或使用，请稍后再导入", 409)
+        maintenance = getattr(self.tokens, "account_login_maintenance", None)
+        if maintenance is None:
+            maintenance = self.tokens.account_proxy_maintenance
+        lease = maintenance(token, proxy) if maintenance is not None else nullcontext()
+
+        @asynccontextmanager
+        async def reserved():
+            try:
+                async with lease:
+                    yield
+            except ValueError as error:
+                if isinstance(error, ProfileTransferError):
+                    raise
+                raise ProfileTransferError(
+                    "account_busy", "账号有进行中的任务或维护操作，请结束后再更新登录态", 409
+                ) from None
+
+        async with refresh_lock, cookie_lock, reserved():
+            latest = await self.tokens.db.get_token(token.id)
+            if latest is None or latest.model_dump() != token.model_dump():
+                raise ProfileTransferError("account_changed", "账号配置已变化，请刷新后再导入", 409)
+            stage = "open_profile"
+
+            def progress(value):
+                nonlocal stage
+                stage = value
+                if on_stage:
+                    on_stage(value)
+
+            async def validate(staged_manager, context):
+                progress("restore_state")
+                # Validate the submitted login itself, never fall back to old
+                # cookies already present in the retained Profile.
+                await context.clear_cookies()
+                await context.add_cookies(cookies)
+                progress("flow_verification")
+                probe = TokenManagerAccountProbe(self.tokens, token)
+                probe.set_context(context)
+                result = await self.refresher.verifier.verify_account(token.email, probe)
+                if result.reason != "account_ready" or not probe.validated_session:
+                    error = ProfileNotReadyError(token.email, result.reason)
+                    error.profile_network_step = probe.network_step
+                    raise error
+                values = {
+                    **probe.validated_session,
+                    "google_cookies": json.dumps(GoogleCookieJar(await context.cookies()).export()),
+                }
+                return values
+
+            async def commit(validated):
+                progress("save_account")
+                if await self.refresher._proxy_url(token) != proxy:
+                    raise ProfileTransferError(
+                        "account_changed", "账号固定代理已变化，更新已回滚", 409
+                    )
+                now = datetime.now(timezone.utc)
+                values = {
+                    **validated,
+                    "browser_profile_epoch": uuid.uuid4().hex,
+                    "browser_profile_status": "ready",
+                    "browser_profile_error": "",
+                    "browser_profile_verified_at": now,
+                    "browser_profile_failures": 0,
+                    "refresh_status": "ready",
+                    "refresh_error": "",
+                    "refresh_reason": "",
+                    "refresh_stage": "",
+                    "refresh_network_step": "",
+                    "refresh_failures": 0,
+                    "last_refresh_at": now,
+                    "last_st_refresh_at": now,
+                    "last_st_refresh_result": "success",
+                    "browser_profile_next_at": now
+                    + timedelta(minutes=token.refresh_interval_minutes)
+                    if token.auto_refresh_enabled
+                    else None,
+                    "next_refresh_at": now + timedelta(minutes=token.refresh_interval_minutes)
+                    if token.auto_refresh_enabled
+                    else None,
+                }
+                if not await self.tokens.db.update_token_if_credentials_match(
+                    token.id,
+                    token.model_dump(exclude={"id"}),
+                    expected_proxy_binding=(token.proxy_pool_id, token.proxy_url)
+                    if token.proxy_pool_id is not None
+                    else None,
+                    **values,
+                ):
+                    raise ProfileTransferError("account_changed", "账号设置已变化，更新已回滚", 409)
+                # The database commit is final. A local cache failure must not
+                # roll the filesystem back to the preceding login afterwards.
+                try:
+                    self.tokens._clear_at_validation_cache(token.id)
+                    self.tokens.mark_profile_validated(token.model_copy(update=values))
+                except Exception:
+                    debug_logger.log_warning("[PROFILE_IMPORT] Validation cache refresh deferred")
+
+            try:
+                progress("open_profile")
+                await update_profile_login(
+                    manager, token.email, proxy, self.refresher.verifier, validate, commit
+                )
+            except BaseException as error:
+                error.transfer_stage = stage
+                if isinstance(error, ValueError) and not isinstance(error, ProfileTransferError):
+                    failure = ProfileTransferError(
+                        "profile_update_unavailable",
+                        "原 Profile 正在使用或身份配置无法确认，请关闭账号浏览器后再导入；原登录态已保留",
+                        409,
+                    )
+                    failure.transfer_stage = stage
+                    raise failure from None
+                raise
+        return {
+            "success": True,
+            "token_id": token.id,
+            "email": token.email,
+            "action": "updated",
+            "added": 0,
+            "updated": 1,
+            "is_active": token.is_active,
+            "validation": {"flow_session_verified": True, "identity_verified": True},
+        }
 
     @property
     def refresher(self):
@@ -355,30 +511,38 @@ class ProfileTransfer:
         if reason != "environment_stable":
             raise ProfileNotReadyError(token.email, reason)
 
-    async def _cold_check(self, token):
-        async with self.refresher.manager.session(
-            token.email, proxy_url=token.proxy_url
-        ) as context:
-            await self._check_context(context, token)
-            probe = TokenManagerAccountProbe(self.tokens, token)
-            probe.set_context(context)
-            result = await self.refresher.verifier.verify_account(token.email, probe)
-            if result.reason != "account_ready" or not probe.validated_session:
-                error = ProfileNotReadyError(token.email, result.reason)
-                if probe.network_step in PROFILE_NETWORK_STEPS:
-                    error.profile_network_step = probe.network_step
-                raise error
-            rows = []
-            for cookie in await context.cookies():
-                row = dict(cookie)
-                row["hostOnly"] = not str(row.get("domain", "")).startswith(".")
-                if row.get("expires", -1) > 0:
-                    row["expirationDate"] = row["expires"]
-                rows.append(row)
-            return {
-                **probe.validated_session,
-                "google_cookies": json.dumps(GoogleCookieJar(rows).export()),
-            }
+    @staticmethod
+    def _ensure_third_party_cookies(profile_dir: Any) -> None:
+        """Allow Google's cross-site auth cookies so refreshes don't drop login.
+
+        Chromium 146 blocks third-party cookies by default (Tracking Protection /
+        3PCD). An extension-imported session spans accounts.google.com and
+        flow.google.com, so without this exception the first auto-refresh redirects
+        to accounts.google.com and the account reports ``login_required``.
+        """
+        pref = Path(profile_dir) / "Default" / "Preferences"
+        if not pref.is_file():
+            return
+        try:
+            data = json.loads(pref.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        profile = data.setdefault("profile", {})
+        profile["cookie_controls_mode"] = 0
+        exceptions = profile.setdefault("content_settings", {}).setdefault("exceptions", {})
+        # Chrome ignores content-setting exceptions without a last_modified
+        # timestamp. Use a permanent allow (expiration "0") for google.com in a
+        # third-party context, mirroring the browser's "允许第三方 Cookie" action.
+        chrome_now = str(int((time.time() + 11644473600) * 1_000_000))
+        exceptions.setdefault("cookies", {})["*,https://[*.]google.com"] = {
+            "setting": 1,
+            "last_modified": chrome_now,
+            "expiration": "0",
+        }
+        try:
+            pref.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
 
     @staticmethod
     def _transfer_binding(email, seed, browser, proxy_url, proxy_pool_id):
@@ -401,12 +565,16 @@ class ProfileTransfer:
                 not isinstance(metadata, dict)
                 or metadata.get("account_key") != normalized
                 or metadata.get("fingerprint_seed") != seed
-                or metadata.get("state") != "blocked"
-                or metadata.get("last_error") != "transfer_failed"
             ):
                 raise ValueError
+            failed = (
+                metadata.get("state") in {"blocked", "stopped", "error"}
+                and metadata.get("last_error") == "transfer_failed"
+            )
             transfer_path = profile_dir / "profile_transfer.json"
             if not transfer_path.exists():
+                if not failed:
+                    raise ValueError
                 # Legacy failures have no sidecar. The existing launch hash
                 # proves their exact identity options and fixed proxy before
                 # we resume their persistent state without injecting it again.
@@ -425,9 +593,35 @@ class ProfileTransfer:
                 not isinstance(transfer, dict)
                 or transfer.get("binding_sha256") not in {binding, legacy_binding}
                 or not isinstance(transfer.get("state_imported"), bool)
-                or transfer.get("transfer_failure_reason")
-                not in FAILURE_REASONS | {"transfer_error", "cancelled"}
+                or ("completed" in transfer and transfer["completed"] is not False)
             ):
+                raise ValueError
+            reason = transfer.get("transfer_failure_reason")
+            if reason in FAILURE_REASONS | {"transfer_error", "cancelled"}:
+                if not failed:
+                    raise ValueError
+            elif reason is None:
+                # A process can stop after restoring state, before its failure
+                # handler runs. The incomplete transfer's exact identity/exit
+                # binding proves ownership; ordinary initialized Profiles never
+                # acquire this sidecar and cannot enter this recovery path.
+                if (
+                    metadata.get("state") not in {"starting", "stopped", "error", "blocked"}
+                    or metadata.get("last_verified_at") is not None
+                ):
+                    raise ValueError
+                manager = self.refresher.manager
+                manager._existing_spec(normalized)
+                EnvironmentSnapshot.from_json(
+                    (profile_dir / "environment_snapshot.json").read_text(encoding="utf-8")
+                )
+                if not (profile_dir / "launch_settings.sha256").is_file():
+                    raise ValueError
+                backend = manager.backend
+                backend._check_launch_settings(
+                    profile_dir, backend._launch_options(profile_dir, proxy_url)
+                )
+            else:
                 raise ValueError
             return {**transfer, "binding_sha256": binding}
         except (OSError, TypeError, ValueError, AttributeError):
@@ -444,6 +638,7 @@ class ProfileTransfer:
         *,
         proxy_pool_id: int | None = None,
         on_stage: Callable[[str], None] | None = None,
+        repair_existing_login: bool = False,
     ) -> dict[str, Any]:
         stage = "queued"
 
@@ -454,15 +649,23 @@ class ProfileTransfer:
                 on_stage(value)
 
         account, browser, seed, state = self._validate(bundle)
+        # Retired Labs session cookies never enter a new or repaired Profile.
+        state["cookies"] = [
+            row
+            for row in state["cookies"]
+            if not (
+                str(row["domain"]).lstrip(".") == "labs.google"
+                and (
+                    row["name"] == "__Secure-next-auth.session-token"
+                    or row["name"].startswith("__Secure-next-auth.session-token.")
+                )
+            )
+        ]
         async with self._import_lock:
             email = account["email"].strip()
-            if any(
-                same_google_identity(token.email, email)
-                for token in await self.tokens.db.get_all_tokens()
-            ):
-                raise ProfileTransferError(
-                    "account_exists", "目标服务器已有同一账号，现有登录态已保留", 409
-                )
+            existing = await self.existing_account(email)
+            if existing is not None:
+                return await self.update_existing(existing, state["cookies"], on_stage=on_stage)
             manager = self.refresher.manager
             normalized = manager._normalize_account_key(email)
             profile_dir = manager.root_dir / normalized
@@ -540,9 +743,11 @@ class ProfileTransfer:
                             "fingerprint_seed": seed,
                         },
                     )
+                    CloakBrowserBackend.prepare_session_restore(profile_dir)
                 manager._write_metadata_file(transfer_path, transfer)
                 async with manager.session(email, proxy_url=token.proxy_url) as context:
                     await self._check_context(context, token)
+                    retained_login = resumed and transfer.get("state_imported") is True
                     # Restore only portable state; admission uses the current
                     # Flow identity and credits RPCs in this fixed-proxy context.
                     if not transfer.get("state_imported"):
@@ -551,32 +756,36 @@ class ProfileTransfer:
                             raise ProfileTransferError(
                                 "native_state_unavailable", "请升级 Playwright 后再迁移", 503
                             )
-                        state["cookies"] = [
-                            row
-                            for row in state["cookies"]
-                            if not (
-                                str(row["domain"]).lstrip(".") == "labs.google"
-                                and (
-                                    row["name"] == "__Secure-next-auth.session-token"
-                                    or row["name"].startswith("__Secure-next-auth.session-token.")
-                                )
-                            )
-                        ]
                         await context.set_storage_state(state)
                         transfer["state_imported"] = True
                         manager._write_metadata_file(transfer_path, transfer)
                     progress("flow_verification")
+                    if repair_existing_login and retained_login:
+                        # The extension already verified this fresh capture on
+                        # the retained fixed exit. Apply it before the single
+                        # Profile check instead of trying stale login first.
+                        add_cookies = getattr(context, "add_cookies", None)
+                        if not callable(add_cookies):
+                            raise ProfileTransferError(
+                                "native_state_unavailable", "浏览器无法更新保留的登录态", 503
+                            ) from None
+                        progress("restore_state")
+                        await add_cookies(state["cookies"])
+                        transfer["login_repaired"] = True
+                        manager._write_metadata_file(transfer_path, transfer)
+                        progress("flow_verification")
                     renewed = await self.refresher.refresh_in_context(token, context, force=True)
                     if not renewed.get("_validated_session"):
                         raise ProfileTransferError(
                             "renewal_unverified", "迁移 Flow 登录态未通过校验", 422
                         )
-                # Native state is injected once. Both reopen checks read only
-                # the persistent target Profile after normal close and slimming.
-                progress("cold_check_1")
-                validated = await self._cold_check(token)
-                progress("cold_check_2")
-                validated = await self._cold_check(token)
+                self._ensure_third_party_cookies(profile_dir)
+                # Import performs one fixed-proxy identity, Flow and credits
+                # check. Runtime refresh/error handling remains authoritative.
+                validated = {
+                    **renewed["_validated_session"],
+                    "google_cookies": renewed.get("google_cookies") or "[]",
+                }
                 progress("save_account")
                 now = datetime.now(timezone.utc)
                 token = Token(
@@ -620,17 +829,19 @@ class ProfileTransfer:
                 token = await self.tokens.db.get_token(token_id)
                 expected = self.tokens._refresh_expected(token, token)
                 expected.update(auto_refresh_enabled=False, banned_at=token.banned_at)
-                # Workspace HTTP calls may rotate the same login's Cookie jar.
-                expected.pop("google_cookies", None)
-                if account["is_active"]:
-                    progress("prepare_workspace")
-                    await self.tokens._flow_call_for_token(
-                        token, lambda: self.tokens.ensure_project_exists(token_id)
-                    )
+                # Account admission is complete after identity verification and
+                # normal close. Project creation belongs to generation:
+                # an unrelated workspace outage must not quarantine this login.
                 progress("finalize")
                 updates = {
                     "auto_refresh_enabled": account["auto_refresh_enabled"],
-                    "next_refresh_at": now + timedelta(minutes=token.refresh_interval_minutes),
+                    "next_refresh_at": now + timedelta(minutes=token.refresh_interval_minutes)
+                    if account["auto_refresh_enabled"]
+                    else None,
+                    "browser_profile_next_at": now
+                    + timedelta(minutes=token.refresh_interval_minutes)
+                    if account["auto_refresh_enabled"]
+                    else None,
                 }
                 if account["is_active"]:
                     updates.update(is_active=True, ban_reason=None, banned_at=None)
@@ -645,27 +856,31 @@ class ProfileTransfer:
                     raise ProfileTransferError(
                         "account_changed", "账号配置已变化，已保留当前设置", 409
                     )
+                self.tokens.mark_profile_validated(token.model_copy(update=updates))
                 self.tokens.notify_profile_ready(token_id)
-                self.tokens.mark_profile_validated(await self.tokens.db.get_token(token_id))
-                manager._write_metadata_file(
-                    transfer_path,
-                    {
-                        "binding_sha256": binding,
-                        "state_imported": True,
-                        "completed": True,
-                        "elapsed_seconds": round(time.monotonic() - started, 1),
-                    },
-                )
+                try:
+                    manager._write_metadata_file(
+                        transfer_path,
+                        {
+                            "binding_sha256": binding,
+                            "state_imported": True,
+                            "completed": True,
+                            "elapsed_seconds": round(time.monotonic() - started, 1),
+                        },
+                    )
+                except OSError as error:
+                    # The verified account is already committed. A diagnostic
+                    # sidecar cannot roll back its login or refresh settings.
+                    debug_logger.log_warning(
+                        f"[PROFILE_TRANSFER] Token {token_id}: completion record "
+                        f"could not be written ({type(error).__name__})"
+                    )
                 return {
                     "success": True,
                     "token_id": token_id,
                     "email": email,
                     "is_active": account["is_active"],
-                    "validation": {
-                        "flow_session_verified": True,
-                        "cold_reopens": 2,
-                        "identity_verified": True,
-                    },
+                    "validation": {"flow_session_verified": True, "identity_verified": True},
                 }
             except BaseException as error:
                 if token_id is not None:

@@ -1,5 +1,6 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 import { api } from './lib/api'
+import { clearAccountSnapshot } from './lib/account-snapshot'
 
 const initialPath = () => {
   const profile = window.location.pathname.match(/^\/api\/profile-browser\/([1-9]\d*)$/)
@@ -69,6 +70,7 @@ const router = createRouter({
 let sessionValid = false
 export function resetSession() {
   sessionValid = false
+  clearAccountSnapshot()
 }
 export function acceptSession() {
   sessionValid = true

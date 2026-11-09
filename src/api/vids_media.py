@@ -4,13 +4,18 @@ import base64
 import json
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from starlette.datastructures import UploadFile
 
 from ..core.auth import verify_openai_api_key
 from ..services.vids.client import PRESET_VOICES, VidsProtocolError, VidsTransportError
 from ..services.vids.dispatcher import VidsPoolDispatcher
 from ..services.vids.gateway import GatewayError, VidsGateway
+from ..services.vids.media_cleanup import (
+    MediaBusyError,
+    VidsFileResponse as FileResponse,
+    media_lease,
+)
 from .openai_common import (
     APIError,
     OpenAIRoute,
@@ -116,10 +121,12 @@ def image_generation_body(body, source=None):
 def image_result_item(path, mime, size, response_format, url):
     """Verify each downloaded image before returning its bytes or authenticated URL."""
     try:
-        with path.open("rb") as handle:
+        with media_lease(path), path.open("rb") as handle:
             data = handle.read(IMAGE_LIMIT + 1)
     except FileNotFoundError:
         raise APIError(410, "Generation content is unavailable", "expired") from None
+    except MediaBusyError:
+        raise APIError(429, "Media cleanup is active; retry the original request", "busy") from None
     except OSError:
         raise APIError(502, "Image content could not be read", "image_content_failed") from None
     actual = image_dimensions(data)
@@ -202,6 +209,7 @@ def create_vids_media_router(
             result["retry_download_url"] = (
                 result["receipt_url"] + "/download"
                 if record["status"] in {"received", "download_failed"}
+                or record.get("media_expired")
                 else None
             )
         account_prefix = prefix.format(token_id=token_id)
@@ -209,7 +217,8 @@ def create_vids_media_router(
             if result.get(field):
                 result[field] = account_prefix + result[field]
         for output in result.get("outputs", []):
-            output["content_url"] = account_prefix + output["content_url"]
+            if output.get("content_url"):
+                output["content_url"] = account_prefix + output["content_url"]
         return result
 
     def get(token_id, identifier, *, video=False):

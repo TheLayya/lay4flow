@@ -7,8 +7,11 @@ import logging
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import stat
+import subprocess
+import sys
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -30,11 +33,51 @@ PROFILE_CACHE_PATHS = (
 _logger = logging.getLogger(__name__)
 
 
-def _prune_closed_profile_cache(profile_dir: Path, root_dir: Path) -> None:
+def _plain_directory(path: Path) -> bool:
+    """Reject links/junctions at every ancestor, including the configured root."""
+    try:
+        for item in (path.absolute(), *path.absolute().parents):
+            value = item.lstat()
+            if not stat.S_ISDIR(value.st_mode) or (
+                getattr(value, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                return False
+        return True
+    except OSError:
+        return False
+
+
+def _regular_file(path: Path, *, missing=False) -> bool:
+    try:
+        value = path.lstat()
+        return (
+            stat.S_ISREG(value.st_mode)
+            and value.st_nlink == 1
+            and not getattr(value, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        )
+    except FileNotFoundError:
+        return missing
+    except OSError:
+        return False
+
+
+def _cache_bytes(path: Path) -> int:
+    total = 0
+    for here, directories, files in os.walk(path, followlinks=False):
+        directories[:] = [name for name in directories if _plain_directory(Path(here, name))]
+        for name in files:
+            item = Path(here, name)
+            if _regular_file(item):
+                total += item.stat().st_size
+    return total
+
+
+def _prune_closed_profile_cache(profile_dir: Path, root_dir: Path) -> dict[str, int]:
     """Called only after browser close, while the account file lock is held."""
     root = root_dir.absolute()
     profile = profile_dir.absolute()
     failures = 0
+    paths_removed = bytes_reclaimed = 0
     for relative in PROFILE_CACHE_PATHS:
         try:
             if profile.parent != root:
@@ -56,7 +99,10 @@ def _prune_closed_profile_cache(profile_dir: Path, root_dir: Path) -> None:
                     raise ValueError("linked or non-directory cache ancestor")
             if not target.resolve().is_relative_to(profile.resolve()):
                 raise ValueError("cache location changed")
+            size = _cache_bytes(target)
             shutil.rmtree(target)
+            paths_removed += 1
+            bytes_reclaimed += size
         except FileNotFoundError:
             continue
         except (OSError, ValueError):
@@ -64,6 +110,184 @@ def _prune_closed_profile_cache(profile_dir: Path, root_dir: Path) -> None:
     if failures:
         # Deliberately omit account names, paths, exception text and credentials.
         _logger.warning("Profile cache cleanup incomplete: %d cache paths skipped", failures)
+    return {
+        "paths_removed": paths_removed,
+        "bytes_reclaimed": bytes_reclaimed,
+        "failures": failures,
+    }
+
+
+def _profile_argument(arguments: list[str]) -> str | None:
+    result = None
+    for index, argument in enumerate(arguments):
+        if argument.startswith("--user-data-dir="):
+            value = argument.split("=", 1)[1]
+        elif argument == "--user-data-dir":
+            if index + 1 >= len(arguments):
+                raise ValueError("Incomplete browser profile argument")
+            value = arguments[index + 1]
+        else:
+            continue
+        if not value or not Path(value).is_absolute():
+            raise ValueError("Uncertain browser profile argument")
+        if result is not None:
+            raise ValueError("Multiple browser profile arguments")
+        result = os.path.normcase(str(Path(value).resolve()))
+    return result
+
+
+def _browser_profile_processes() -> set[str] | None:
+    """Return profile directories used by browsers, or None if ownership is unknown.
+
+    Command lines are inspected only in memory and never included in logs/results.
+    Missing permissions or unsupported platforms fail closed for the whole sweep.
+    """
+    result = set()
+    browser_name = re.compile(r"(?:chrome|chromium|msedge|cloakbrowser)(?:\.exe)?$", re.I)
+    try:
+        if sys.platform.startswith("linux"):
+            for process in Path("/proc").iterdir():
+                if not process.name.isdecimal():
+                    continue
+                try:
+                    name = (process / "comm").read_text(encoding="utf-8").strip()
+                    try:
+                        raw = (process / "cmdline").read_bytes()
+                    except PermissionError:
+                        if browser_name.fullmatch(name):
+                            return None
+                        continue
+                    arguments = [part.decode("utf-8") for part in raw.split(b"\0") if part]
+                    if not arguments:
+                        if not browser_name.fullmatch(name):
+                            continue
+                        # A zombie cannot own an active browser profile.
+                        status = (process / "status").read_text(encoding="utf-8")
+                        if re.search(r"^State:\s+Z\b", status, re.M):
+                            continue
+                        return None
+                    profile = _profile_argument(arguments)
+                    if profile is not None:
+                        result.add(profile)
+                except FileNotFoundError:
+                    continue  # A process can exit while /proc is enumerated.
+        elif os.name == "nt":
+            # Fixed PowerShell code; no paths or account data become shell code.
+            command = (
+                "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+                "@(Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' OR Name='chromium.exe' OR Name='msedge.exe' OR Name='cloakbrowser.exe'\" "
+                "| Select-Object Name,CommandLine) | ConvertTo-Json -Compress"
+            )
+            completed = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8-sig",
+                timeout=15,
+                check=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            rows = json.loads(completed.stdout or "[]")
+            rows = [rows] if isinstance(rows, dict) else rows
+            if not isinstance(rows, list):
+                return None
+            import ctypes
+            from ctypes import wintypes
+
+            parser = ctypes.windll.shell32.CommandLineToArgvW
+            parser.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+            parser.restype = ctypes.POINTER(wintypes.LPWSTR)
+            free = ctypes.windll.kernel32.LocalFree
+            free.argtypes = [ctypes.c_void_p]
+            free.restype = ctypes.c_void_p
+            for row in rows:
+                if (
+                    not isinstance(row, dict)
+                    or not isinstance(row.get("CommandLine"), str)
+                    or not row["CommandLine"].strip()
+                ):
+                    return None
+                count = ctypes.c_int()
+                arguments = parser(row["CommandLine"], ctypes.byref(count))
+                if not arguments:
+                    return None
+                try:
+                    profile = _profile_argument([arguments[index] for index in range(count.value)])
+                finally:
+                    free(arguments)
+                if profile is not None:
+                    result.add(profile)
+        else:
+            return None
+    except (OSError, ValueError, TypeError, UnicodeError, subprocess.SubprocessError):
+        return None
+    return result
+
+
+def _cache_recovery_spec(root: Path, directory: Path) -> "ProfileSpec | None":
+    """Validate existing identity/seed registration without creating or editing it."""
+    try:
+        if directory.absolute().parent != root.absolute() or not _plain_directory(directory):
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}-[a-f0-9]{12}", directory.name):
+            return None
+        for name in ("metadata.json", "environment_snapshot.json", "launch_settings.sha256"):
+            if not _regular_file(directory / name):
+                return None
+        metadata = directory / "metadata.json"
+        if metadata.stat().st_size > 65536 or not _plain_directory(directory / "Default"):
+            return None
+        values = json.loads(metadata.read_text(encoding="utf-8"))
+        seed = values.get("fingerprint_seed")
+        if (
+            values.get("account_key") != directory.name
+            or type(seed) is not int
+            or not 10000 <= seed <= 99999
+            or (
+                values.get("profile_dir")
+                and Path(values["profile_dir"]).resolve() != directory.resolve()
+            )
+        ):
+            return None
+        registry = root / "fingerprint_seeds.sqlite3"
+        if not _regular_file(registry):
+            return None
+        database = sqlite3.connect(registry.resolve().as_uri() + "?mode=ro", uri=True, timeout=0)
+        try:
+            registered = database.execute(
+                "SELECT seed FROM seeds WHERE account_key=?", (directory.name,)
+            ).fetchone()
+        finally:
+            database.close()
+        if registered != (seed,):
+            return None
+        return ProfileSpec(directory.name, directory, seed)
+    except (OSError, ValueError, TypeError, AttributeError, sqlite3.Error):
+        return None
+
+
+def _recover_profile_cache(spec: "ProfileSpec", root: Path) -> dict[str, int] | None:
+    """Runs with both manager/file locks held; never opens Chromium."""
+    if _cache_recovery_spec(root, spec.profile_dir) != spec:
+        return None
+    if not any((spec.profile_dir / name).exists() for name in PROFILE_CACHE_PATHS):
+        return {"paths_removed": 0, "bytes_reclaimed": 0, "failures": 0}
+    busy = _browser_profile_processes()
+    if busy is None or os.path.normcase(str(spec.profile_dir.resolve())) in busy:
+        return None
+    if any(os.path.lexists(spec.profile_dir / name) for name in _SINGLETON_NAMES):
+        if not _archive_stale_chromium_lock(spec, root):
+            return None
+    # Recheck immediately before deletion. In-process launches cannot proceed
+    # under the held account/file locks; uncertain external ownership is skipped.
+    busy = _browser_profile_processes()
+    if (
+        busy is None
+        or os.path.normcase(str(spec.profile_dir.resolve())) in busy
+        or any(os.path.lexists(spec.profile_dir / name) for name in _SINGLETON_NAMES)
+    ):
+        return None
+    return _prune_closed_profile_cache(spec.profile_dir, root)
 
 
 class ProfileBackend(Protocol):
@@ -95,6 +319,165 @@ class ProfileStatus:
     last_verified_at: float | None = None
     last_error: str = ""
     fingerprint_seed: int | None = None
+
+
+_SINGLETON_NAMES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
+
+
+def _linux_boot_id() -> str | None:
+    try:
+        value = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    except OSError:
+        return None
+    return value if re.fullmatch(r"[a-f0-9-]{36}", value) else None
+
+
+def _linux_pid_namespace() -> str | None:
+    try:
+        value = os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return None
+    return value if re.fullmatch(r"pid:\[[0-9]+\]", value) else None
+
+
+def _singleton_snapshot(profile_dir: Path) -> dict[str, str] | None:
+    """Accept Chromium's POSIX symlinks only; never inspect their target data."""
+    snapshot = {}
+    try:
+        for name in _SINGLETON_NAMES:
+            path = profile_dir / name
+            if not stat.S_ISLNK(path.lstat().st_mode):
+                return None
+            target = os.readlink(path)
+            if not target or len(target) > 4096 or any(ord(char) < 32 for char in target):
+                return None
+            snapshot[name] = target
+    except OSError:
+        return None
+    if not re.fullmatch(r"[^/\\]+-[1-9][0-9]*", snapshot["SingletonLock"]):
+        return None
+    if not snapshot["SingletonCookie"].isdecimal():
+        return None
+    target = Path(snapshot["SingletonSocket"])
+    if not target.is_absolute() or target.name != "SingletonSocket" or ".." in target.parts:
+        return None
+    return snapshot
+
+
+def _remember_chromium_owner(spec: ProfileSpec) -> None:
+    """Record provenance only after this manager successfully opened Chromium."""
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        snapshot = _singleton_snapshot(spec.profile_dir)
+        boot_id = _linux_boot_id()
+        pid_namespace = _linux_pid_namespace()
+        if snapshot is None or boot_id is None or pid_namespace is None:
+            return
+        host, _ = snapshot["SingletonLock"].rsplit("-", 1)
+        if host != socket.gethostname():
+            return
+        target = spec.profile_dir / ".chromium-owner.json"
+        temporary = target.with_suffix(".json.tmp")
+        if target.is_symlink() or temporary.is_symlink():
+            return
+        temporary.write_text(
+            json.dumps(
+                {
+                    "account_key": spec.account_key,
+                    "fingerprint_seed": spec.fingerprint_seed,
+                    "boot_id": boot_id,
+                    "pid_namespace": pid_namespace,
+                    "singleton": snapshot,
+                }
+            ),
+            encoding="utf-8",
+        )
+        temporary.replace(target)
+    except OSError:
+        # A diagnostic sidecar cannot turn an opened browser into a login error.
+        _logger.warning("Chromium ownership provenance could not be recorded")
+
+
+def _archive_stale_chromium_lock(spec: ProfileSpec, root_dir: Path) -> bool:
+    """Called under the Profile file lock; preserve every uncertain singleton."""
+    if not sys.platform.startswith("linux"):
+        return False
+    profile = spec.profile_dir
+    try:
+        if (
+            profile.is_symlink()
+            or root_dir.is_symlink()
+            or profile.absolute().parent != root_dir.absolute()
+            or profile.resolve().parent != root_dir.resolve()
+        ):
+            return False
+        snapshot = _singleton_snapshot(profile)
+        if snapshot is None:
+            return False
+        # A live socket or even a dangling object at that path keeps ownership.
+        socket_path = Path(snapshot["SingletonSocket"])
+        try:
+            socket_path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            return False
+        host, raw_pid = snapshot["SingletonLock"].rsplit("-", 1)
+        provenance_path = profile / ".chromium-owner.json"
+        if provenance_path.is_symlink() or provenance_path.stat().st_size > 16384:
+            return False
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+        boot_id = _linux_boot_id()
+        pid_namespace = _linux_pid_namespace()
+        # Hostnames and PIDs can repeat across containers. A foreign namespace
+        # is never enough evidence that its browser exited, even after a reboot.
+        if (
+            host != socket.gethostname()
+            or boot_id is None
+            or pid_namespace is None
+            or not isinstance(provenance, dict)
+            or provenance.get("account_key") != spec.account_key
+            or provenance.get("fingerprint_seed") != spec.fingerprint_seed
+            or provenance.get("singleton") != snapshot
+            or provenance.get("boot_id") != boot_id
+            or provenance.get("pid_namespace") != pid_namespace
+        ):
+            return False
+        try:
+            os.kill(int(raw_pid), 0)
+        except ProcessLookupError:
+            pass
+        else:
+            return False
+        # Check again immediately before archiving; source paths are moved as
+        # links, never followed. The original Profile and site state stay put.
+        if _singleton_snapshot(profile) != snapshot:
+            return False
+        if os.path.lexists(socket_path):
+            return False
+        recovery = profile / ".singleton-recovery"
+        if recovery.is_symlink() or (recovery.exists() and not recovery.is_dir()):
+            return False
+        recovery.mkdir(exist_ok=True)
+        destination = recovery / str(time.time_ns())
+        destination.mkdir()
+        moved = []
+        try:
+            for name in _SINGLETON_NAMES:
+                if os.readlink(profile / name) != snapshot[name]:
+                    raise ValueError("Chromium singleton ownership changed")
+                (profile / name).rename(destination / name)
+                moved.append(name)
+        except (OSError, ValueError):
+            for name in reversed(moved):
+                if not os.path.lexists(profile / name):
+                    (destination / name).rename(profile / name)
+            raise
+        _logger.info("Archived stale Chromium singleton markers for an exclusively owned Profile")
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 @dataclass
@@ -187,6 +570,75 @@ class ProfileManager:
         # Keep ownership if a backend cannot confirm that its browser closed.
         self._failed_handles: dict[str, _WarmHandle] = {}
         self._proxy_switch_failed_stages: list["ProfileManager"] = []
+        self._cache_recovery_lock = asyncio.Lock()
+
+    async def prune_idle_caches(self) -> dict[str, int]:
+        """Reclaim orphan caches only when profile ownership can be proved idle."""
+        result = {"scanned": 0, "cleaned": 0, "skipped": 0, "bytes_reclaimed": 0}
+        if self._cache_recovery_lock.locked():
+            return result
+        async with self._cache_recovery_lock:
+            if not _plain_directory(self.root_dir):
+                return result
+
+            def candidates():
+                return [
+                    spec
+                    for item in self.root_dir.iterdir()
+                    if (spec := _cache_recovery_spec(self.root_dir, item)) is not None
+                ]
+
+            listing = asyncio.create_task(asyncio.to_thread(candidates))
+            try:
+                specs = await asyncio.shield(listing)
+            except asyncio.CancelledError:
+                await self._wait_uninterrupted(listing)
+                raise
+            for spec in specs:
+                result["scanned"] += 1
+                key = spec.account_key
+                account_lock = await self._account_lock(key)
+                if account_lock.locked():
+                    result["skipped"] += 1
+                    continue
+                # No suspension between the locked check and acquisition.
+                await account_lock.acquire()
+                file_lock = _ProfileFileLock(spec.profile_dir / ".profile.lock", timeout=0)
+                try:
+                    if (
+                        key in self._warm_handles
+                        or key in self._warm_opening
+                        or key in self._warm_sessions
+                        or key in self._failed_handles
+                        or not _plain_directory(spec.profile_dir)
+                        or not _regular_file(file_lock.path, missing=True)
+                    ):
+                        result["skipped"] += 1
+                        continue
+                    try:
+                        await file_lock.acquire()
+                    except (TimeoutError, OSError):
+                        result["skipped"] += 1
+                        continue
+                    cleanup = asyncio.create_task(
+                        asyncio.to_thread(_recover_profile_cache, spec, self.root_dir)
+                    )
+                    try:
+                        outcome = await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        # Worker deletion must finish before a browser can acquire
+                        # either lock and resume writing this persistent Profile.
+                        await self._wait_uninterrupted(cleanup)
+                        raise
+                    if outcome is None or outcome["failures"]:
+                        result["skipped"] += 1
+                    if outcome is not None:
+                        result["cleaned"] += bool(outcome["paths_removed"])
+                        result["bytes_reclaimed"] += outcome["bytes_reclaimed"]
+                finally:
+                    file_lock.release()
+                    account_lock.release()
+        return result
 
     async def switch_proxy(
         self, account_key, old_proxy_url, new_proxy_url, verifier, validate, commit
@@ -700,6 +1152,7 @@ class ProfileManager:
                 validated = True
             if reset_state:
                 self._reset_browser_state(spec.profile_dir)
+            _archive_stale_chromium_lock(spec, self.root_dir)
             await self._write_status(spec, state="starting", last_started_at=time.time())
             launch = asyncio.create_task(
                 self._open_backend(spec.profile_dir, proxy_url, interactive=interactive)
@@ -709,6 +1162,7 @@ class ProfileManager:
             except asyncio.CancelledError:
                 context = await self._wait_uninterrupted(launch)
                 raise
+            _remember_chromium_owner(spec)
             return _WarmHandle(spec, context, file_lock, proxy_url, time.monotonic(), interactive)
         except BaseException as error:
             try:
@@ -953,7 +1407,12 @@ class ProfileManager:
     def _reset_browser_state(profile_dir: Path) -> None:
         """Remove stale browser state while retaining identity-owned settings."""
         for child in profile_dir.iterdir():
-            if child.name in {"metadata.json", "launch_settings.sha256", ".profile.lock"}:
+            if child.name in {
+                "metadata.json",
+                "launch_settings.sha256",
+                "session_restore.json",
+                ".profile.lock",
+            }:
                 continue
             if child.is_dir():
                 shutil.rmtree(child)

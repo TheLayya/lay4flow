@@ -46,6 +46,7 @@ class FlowHTTPSessionTests(unittest.IsolatedAsyncioTestCase):
             spec=AsyncMock(return_value=SimpleNamespace(profile_dir=self.root)),
             credential_session=self.browser_open,
             mark_blocked=AsyncMock(),
+            mark_verified=AsyncMock(),
         )
         self.refresher = ProfileSessionRefresher(self.manager, ProfileVerifier(), self.tokens)
         self.tokens.profile_refresher = self.refresher
@@ -274,9 +275,16 @@ class FlowHTTPSessionTests(unittest.IsolatedAsyncioTestCase):
         self.browser_open.assert_not_called()
 
     async def test_auth_failure_requests_only_one_browser_recovery(self):
+        page = SimpleNamespace(goto=AsyncMock(), close=AsyncMock())
+        context = SimpleNamespace(
+            cookies=AsyncMock(return_value=[cookie("SID", "recovered")]),
+            add_cookies=AsyncMock(),
+            new_page=AsyncMock(return_value=page),
+        )
+
         @asynccontextmanager
         async def recovery(*args, **kwargs):
-            yield SimpleNamespace(cookies=AsyncMock(return_value=[cookie("SID", "recovered")]))
+            yield context
 
         self.manager.credential_session = Mock(side_effect=recovery)
         with patch(
@@ -291,6 +299,146 @@ class FlowHTTPSessionTests(unittest.IsolatedAsyncioTestCase):
             result = await self.refresher.refresh(self.token)
         self.manager.credential_session.assert_called_once()
         self.assertIn("recovered", result["google_cookies"])
+        self.assertTrue(result["_browser_renewed"])
+        self.manager.mark_verified.assert_awaited_once_with(self.token.email)
+        page.goto.assert_awaited_once_with(
+            "https://flow.google.com/", wait_until="domcontentloaded", timeout=30000
+        )
+        page.close.assert_awaited_once()
+
+    async def test_scheduled_browser_renewal_syncs_latest_cookies_after_expiry_and_closes(self):
+        await self.db.update_token(
+            self.token.id,
+            google_cookies=json.dumps([cookie("SID", "latest-http-rotation")]),
+        )
+        page = SimpleNamespace(goto=AsyncMock(), close=AsyncMock())
+        context = SimpleNamespace(
+            cookies=AsyncMock(return_value=[cookie("SID", "browser-renewed")]),
+            add_cookies=AsyncMock(),
+            new_page=AsyncMock(return_value=page),
+        )
+        closed = False
+
+        @asynccontextmanager
+        async def recovery(email, verifier, *, proxy_url):
+            nonlocal closed
+            self.assertEqual(email, self.token.email)
+            self.assertEqual(proxy_url, "")
+            yield context
+            closed = True
+
+        self.manager.credential_session = Mock(side_effect=recovery)
+        with patch(
+            "src.services.browser.token_account_probe.read_flow_session",
+            AsyncMock(
+                side_effect=[
+                    FlowRPCError("login_required", "flow_bootstrap"),
+                    {"email": self.token.email, "credits": 9},
+                ]
+            ),
+        ):
+            result = await self.refresher.refresh(self.token, renew_browser=True)
+        self.assertTrue(closed)
+        self.manager.mark_verified.assert_awaited_once_with(self.token.email)
+        self.assertTrue(result["_browser_renewed"])
+        self.assertIn("browser-renewed", result["google_cookies"])
+        context.add_cookies.assert_awaited_once()
+        self.assertEqual(context.add_cookies.await_args.args[0][0]["value"], "latest-http-rotation")
+        self.assertEqual(
+            self.token.google_cookies,
+            (await self.db.get_token(self.token.id)).google_cookies,
+            "commit must use the synchronized Cookie snapshot, not the stale pre-lease value",
+        )
+        page.goto.assert_awaited_once()
+        page.close.assert_awaited_once()
+        self.assertEqual(self.opened, 0, "renewal must not stop after a read-only HTTP probe")
+
+    async def test_scheduled_browser_renewal_retains_valid_profile_cookies(self):
+        page = SimpleNamespace(goto=AsyncMock(), close=AsyncMock())
+        context = SimpleNamespace(
+            cookies=AsyncMock(return_value=[cookie("SID", "fresh-viewer-login")]),
+            add_cookies=AsyncMock(),
+            new_page=AsyncMock(return_value=page),
+        )
+
+        @asynccontextmanager
+        async def recovery(*args, **kwargs):
+            yield context
+
+        self.manager.credential_session = Mock(side_effect=recovery)
+        with patch(
+            "src.services.browser.token_account_probe.read_flow_session",
+            AsyncMock(return_value={"email": self.token.email, "credits": 9}),
+        ):
+            result = await self.refresher.refresh(self.token, renew_browser=True)
+        self.assertIn("fresh-viewer-login", result["google_cookies"])
+        self.assertTrue(result["_browser_renewed"])
+        context.add_cookies.assert_not_awaited()
+        page.goto.assert_awaited_once()
+        page.close.assert_awaited_once()
+        self.manager.mark_verified.assert_awaited_once_with(self.token.email)
+
+    async def test_browser_renewal_preserves_manual_credentials_and_fixed_proxy_changes(self):
+        context = SimpleNamespace(add_cookies=AsyncMock(), new_page=AsyncMock())
+
+        @asynccontextmanager
+        async def recovery(*args, **kwargs):
+            yield context
+
+        self.manager.credential_session = Mock(side_effect=recovery)
+        for field, value in (
+            ("browser_profile_epoch", "new-login"),
+            ("proxy_url", "http://changed.invalid:8080"),
+            ("email", "changed@example.invalid"),
+        ):
+            await self.db.update_token(self.token.id, **{field: value})
+            with self.subTest(field=field), self.assertRaises(ProfileNotReadyError) as caught:
+                await self.refresher.refresh(self.token, renew_browser=True)
+            self.assertEqual(caught.exception.reason, "account_changed")
+            await self.db.update_token(self.token.id, **{field: getattr(self.token, field)})
+        context.add_cookies.assert_not_awaited()
+        context.new_page.assert_not_awaited()
+
+    async def test_failed_renewal_navigation_closes_owned_page_without_claiming_success(self):
+        page = SimpleNamespace(goto=AsyncMock(side_effect=TimeoutError()), close=AsyncMock())
+        context = SimpleNamespace(
+            cookies=AsyncMock(return_value=[cookie("SID", "before")]),
+            add_cookies=AsyncMock(),
+            new_page=AsyncMock(return_value=page),
+        )
+
+        @asynccontextmanager
+        async def recovery(*args, **kwargs):
+            yield context
+
+        self.manager.credential_session = Mock(side_effect=recovery)
+        with self.assertRaises(TimeoutError):
+            await self.refresher.refresh(self.token, renew_browser=True)
+        page.close.assert_awaited_once()
+        self.manager.mark_verified.assert_not_awaited()
+
+    async def test_failed_profile_close_never_marks_browser_renewal_ready(self):
+        page = SimpleNamespace(goto=AsyncMock(), close=AsyncMock())
+        context = SimpleNamespace(
+            cookies=AsyncMock(return_value=[cookie("SID", "renewed")]),
+            add_cookies=AsyncMock(),
+            new_page=AsyncMock(return_value=page),
+        )
+
+        @asynccontextmanager
+        async def recovery(*args, **kwargs):
+            yield context
+            raise RuntimeError("synthetic browser close failed")
+
+        self.manager.credential_session = Mock(side_effect=recovery)
+        with patch(
+            "src.services.browser.token_account_probe.read_flow_session",
+            AsyncMock(return_value={"email": self.token.email, "credits": 9}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "close"):
+                await self.refresher.refresh(self.token, renew_browser=True)
+        page.close.assert_awaited_once()
+        self.manager.mark_verified.assert_not_awaited()
 
     async def test_cookie_merge_preserves_parallel_rotations_deletions_and_new_login(self):
         before = self.token.google_cookies

@@ -141,7 +141,7 @@ try {
         await page.locator('.accounts-view h1').waitFor()
         if (shell) {
             await page.locator('.page-actions').getByRole('button', { name: '扩展登录', exact: true }).click()
-            const extension = page.getByRole('dialog', { name: '扩展登录 · 指纹浏览器' })
+            const extension = page.getByRole('dialog', { name: '扩展登录 · 本机浏览器' })
             await extension.waitFor()
             assert.equal(await extension.getByLabel('本机管理地址').inputValue(), `${base}/#/accounts`)
             assert.equal(await extension.getByRole('button', { name: '检测扩展', exact: true }).count(), 0)

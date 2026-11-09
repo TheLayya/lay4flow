@@ -26,6 +26,8 @@ def create_token_router(
     async def get_tokens(token: str = Depends(verify_token)):
         """Get all tokens with statistics"""
         token_rows = await get_database().get_all_tokens_with_stats()
+        policy = getattr(get_token_manager(), "generation_error_policy", None)
+        protection = await policy.public_states() if policy is not None else {}
 
         def to_iso(value):
             return value.isoformat() if hasattr(value, "isoformat") else value
@@ -119,6 +121,7 @@ def create_token_router(
                 else None,
                 "ban_reason": row.get("ban_reason"),
                 "banned_at": to_iso(row.get("banned_at")) if row.get("banned_at") else None,
+                "generation_protection": protection.get(row.get("id")),
             }
             for row in token_rows
         ]  # 直接返回数组,兼容前端

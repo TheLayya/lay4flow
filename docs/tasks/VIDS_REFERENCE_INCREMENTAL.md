@@ -1,0 +1,14 @@
+# VIDS-REFERENCE-INCREMENTAL
+
+- State: done
+- Owner: Codex
+- Requirement: Apply first useful Vids2API deltas identified in docs/VIDS2API_COMPARISON.md: current video feature flags, safe video downloads/read retries, quota-aware new-account selection.
+- Scope: Vids client only for feature fallback and read-only transport; shared quota observations/admission for fresh known-zero skipping; tests/docs/build/local delivery. Background keepalive, durable settlement/logs,15-second video and automated credential login are subsequent slices.
+- Preserve: fixed proxy chain; identity validation; Cookie scope; existing receipt/source-account affinity; paid generation submits once, unknown outcomes never replay; no repeated import/cold-reopen checks.
+- Acceptance: modern split video flags choose374/375/376; legacy feature precedence unchanged; safe read operations retry within bounded budget; paid POST/upload/save writes never replay; validated HTTPS redirect destinations only, no generation headers on media; pending/cancellation and cookie checkpoints keep existing semantics; new pool keys skip fresh known-zero quota while stale/unknown accounts can recover; original receipt/source account stays fixed.
+- Gates: synthetic protocol/download/dispatcher/API tests including cancellation/security/freshness/races/replay; required python scripts/check.py/npm frontend tests/build; independent review; final image offline acceptance and healthy local38001 delivery. Real network generation is separate.
+
+- Implemented: split video flags374/375/376; free HTTP reads configurable1..5 total attempts(default3), cancellable backoff; validated video media redirects<=5 and scoped cookies/no generation headers; dispatcher shares fresh quota observations from admin and generation preflight, skips fresh knownzero for new keys, retains receipt/source ownership. Session/client/feature/identity drift invalidates routing observations and old read results cannot erase newer observations.
+- Verification: python scripts/check.py1724 tests pass(one expected skip), CJS/offline package first-start/cold-restart pass; npm frontend174/174 and build pass. Added31 mocked client/quota tests. Targeted53 combined tests and final image68 tests pass with network disabled and temporary synthetic state.
+- Review: independent review resolved session cache invalidation, old-read race, malformed quota handling and read-budget configuration. Final hardening also excludes identity drift from public quota snapshots. No live provider generation, import changes or production credentials modified. MIT2026 notice retained for adapted source.
+- Delivery: final verified image vids-read-quota-20261109 deployed to existing local Compose app38001, health200/container healthy; runtime/frontend hashes match verified files. Previous override retained locally. Remaining proposed slices stay explicit in scope above.

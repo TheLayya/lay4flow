@@ -259,8 +259,33 @@ internal sealed class MainForm : Form
         try
         {
             using var payload = JsonDocument.Parse(args.WebMessageAsJson);
-            if (!payload.RootElement.TryGetProperty("type", out var type) || type.GetString() != "apply-update") return;
+            if (!payload.RootElement.TryGetProperty("type", out var type)) return;
             if (browser.CoreWebView2 is null || !options.IsAppUrl(args.Source) || !options.IsAppUrl(browser.Source.AbsoluteUri)) return;
+            if (type.GetString() == "desktop.openLoginBrowser")
+            {
+                var requestId = payload.RootElement.TryGetProperty("requestId", out var requestNode)
+                    && requestNode.ValueKind == JsonValueKind.String ? requestNode.GetString() : "";
+                if (requestId is null || requestId.Length is < 1 or > 128) return;
+                try
+                {
+                    LoginBrowser.Open(options);
+                    browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new
+                    {
+                        type = "desktop.loginBrowser.status", requestId, state = "opened",
+                        message = "已打开本机浏览器。安装扩展并允许无痕运行后，即可开始登录。"
+                    }));
+                }
+                catch (Exception error)
+                {
+                    Log("Login browser: " + error.GetType().Name);
+                    browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new
+                    {
+                        type = "desktop.loginBrowser.status", requestId, state = "failed", message = error.Message
+                    }));
+                }
+                return;
+            }
+            if (type.GetString() != "apply-update") return;
             if (Interlocked.Exchange(ref updateRunning, 1) != 0)
             {
                 PostUpdateStatus("running", "更新正在进行中，请稍候…");

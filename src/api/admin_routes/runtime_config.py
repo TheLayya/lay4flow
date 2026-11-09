@@ -13,24 +13,31 @@ def create_runtime_config_router(
 ):
     router = APIRouter()
 
-    @router.get("/api/token-refresh/config")
-    async def get_token_refresh_config(token: str = Depends(verify_token)):
-        """Get AT/protocol refresh configuration."""
-        refresh_config = await get_database().get_token_refresh_config()
+    def refresh_payload(refresh_config):
         return {
             "success": True,
             "config": {
                 "at_auto_refresh_enabled": True,
                 "protocol_refresh_enabled": refresh_config.enabled,
                 "refresh_interval_minutes": refresh_config.refresh_interval_minutes,
+                "scope": "legacy_protocol_accounts",
+                "profile_maintenance": "per_account",
+                "profile_default_interval_minutes": 30,
+                "scheduler_scan_seconds": 60,
             },
         }
+
+    @router.get("/api/token-refresh/config")
+    async def get_token_refresh_config(token: str = Depends(verify_token)):
+        """Legacy non-Cloak ST settings; Profile scheduling is per-account."""
+        refresh_config = await get_database().get_token_refresh_config()
+        return refresh_payload(refresh_config)
 
     @router.post("/api/token-refresh/enabled")
     async def update_token_refresh_enabled(
         request: Optional[dict] = None, token: str = Depends(verify_token)
     ):
-        """Update protocol ST refresh enabled; AT refresh remains always enabled."""
+        """Compatibility switch for old non-Cloak protocol accounts only."""
         enabled = (request or {}).get("enabled")
         if enabled is not None:
             await get_database().update_token_refresh_config(enabled=bool(enabled))
@@ -44,14 +51,7 @@ def create_runtime_config_router(
             enabled=request.enabled,
             refresh_interval_minutes=request.refresh_interval_minutes,
         )
-        return {
-            "success": True,
-            "config": {
-                "at_auto_refresh_enabled": True,
-                "protocol_refresh_enabled": refresh_config.enabled,
-                "refresh_interval_minutes": refresh_config.refresh_interval_minutes,
-            },
-        }
+        return refresh_payload(refresh_config)
 
     @router.get("/api/cache/config")
     async def get_cache_config(token: str = Depends(verify_token)):

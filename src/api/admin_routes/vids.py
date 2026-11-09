@@ -4,19 +4,20 @@ import asyncio
 import time
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 from fastapi.responses import JSONResponse
 
+from ...services.account_error_policy import PolicyValidationError
 from ...services.vids.bindings import read_bindings
 from ...services.vids.client import VidsProtocolError, VidsTransportError
 from ...services.vids.deletion_markers import is_deleted
-from ...services.vids.dispatcher import VidsDispatchError
+from ...services.vids.dispatcher import QUOTA_FRESHNESS_SECONDS, VidsDispatchError
 from ...services.vids.gateway import GatewayError
 
 KINDS = ("image", "video")
 # Quota is an observation, not a heartbeat.  Keep automatic reads sparse so
 # opening several console pages cannot turn into a steady upstream poll.
-QUOTA_REFRESH_SECONDS = 15 * 60
+QUOTA_REFRESH_SECONDS = QUOTA_FRESHNESS_SECONDS
 QUOTA_RETRY_MAX_SECONDS = 60 * 60
 
 
@@ -35,7 +36,13 @@ def empty_quota():
 
 
 def create_vids_admin_router(
-    dispatcher, authenticate, *, get_settings=None, runtime=None, repair_session=None
+    dispatcher,
+    authenticate,
+    *,
+    get_settings=None,
+    runtime=None,
+    repair_session=None,
+    get_maintenance=None,
 ):
     router = APIRouter(dependencies=[Depends(authenticate)], tags=["Vids console"])
     # ponytail: process-local quota cache; restart explicitly returns "not queried".
@@ -54,6 +61,14 @@ def create_vids_admin_router(
 
     def observed_quota(token_id):
         now = datetime.now(timezone.utc)
+        values = dict(quota_cache.get(token_id, empty_quota()))
+        for kind in KINDS:
+            latest = dispatcher.quota_snapshot(token_id, kind)
+            if latest is not None and (
+                values[kind]["queried_at"] is None
+                or latest["queried_at"] > values[kind]["queried_at"]
+            ):
+                values[kind] = latest
         return {
             kind: {
                 **value,
@@ -62,7 +77,7 @@ def create_vids_admin_router(
                 and (now - datetime.fromisoformat(value["queried_at"])).total_seconds()
                 >= QUOTA_REFRESH_SECONDS,
             }
-            for kind, value in quota_cache.get(token_id, empty_quota()).items()
+            for kind, value in values.items()
         }
 
     def configured_ids():
@@ -94,17 +109,24 @@ def create_vids_admin_router(
 
     async def detail_rows():
         bound = {row["token_id"]: row for row in await dispatcher.public_accounts()}
+        identifiers = configured_ids() | set(bound)
+        switches = await dispatcher.account_switches(identifiers - set(bound))
+        policy = getattr(dispatcher, "account_policy", None)
+        protection = await policy.public_states() if policy is not None else {}
+        stats = await policy.account_stats_many(identifiers) if policy is not None else {}
+        maintenance = get_maintenance() if get_maintenance is not None else None
+        maintenance_states = maintenance.public_states() if maintenance is not None else {}
         result = []
-        for token_id in sorted(configured_ids() | set(bound)):
+        for token_id in sorted(identifiers):
             row = bound.get(token_id)
             if row is None:
-                token = await dispatcher.db.get_token(token_id)
                 row = {
                     "token_id": token_id,
-                    "email": getattr(token, "email", ""),
-                    "enabled": bool(token and token.is_active),
-                    "image_enabled": bool(token and getattr(token, "image_enabled", False)),
-                    "video_enabled": bool(token and getattr(token, "video_enabled", False)),
+                    "email": "",
+                    "enabled": False,
+                    "image_enabled": False,
+                    "video_enabled": False,
+                    **switches.get(token_id, {}),
                     "ready": False,
                 }
             gateway_identity = None
@@ -138,6 +160,9 @@ def create_vids_admin_router(
                     "session_state": session_state,
                     "runtime_error": error,
                     "last_quota": observed_quota(token_id),
+                    "protection": protection.get(token_id),
+                    "maintenance": maintenance_states.get(token_id),
+                    "stats": stats.get(token_id, {}),
                 }
             )
         return result
@@ -160,6 +185,45 @@ def create_vids_admin_router(
             {"accounts": await dispatcher.public_accounts()},
             headers={"Cache-Control": "no-store"},
         )
+
+    @router.get("/api/admin/vids/config")
+    async def vids_config():
+        policy = getattr(dispatcher, "account_policy", None)
+        if policy is None:
+            return JSONResponse(
+                {"success": False, "message": "Vids policy is unavailable"}, status_code=503
+            )
+        return JSONResponse(
+            {"config": await policy.get_config()}, headers={"Cache-Control": "no-store"}
+        )
+
+    @router.post("/api/admin/vids/config")
+    async def save_vids_config(values: dict = Body(...)):
+        policy = getattr(dispatcher, "account_policy", None)
+        if policy is None:
+            return JSONResponse(
+                {"success": False, "message": "Vids policy is unavailable"}, status_code=503
+            )
+        try:
+            saved = await policy.save_config(values)
+        except (PolicyValidationError, ValueError):
+            return JSONResponse(
+                {"success": False, "message": "Vids 配置无效，请检查规则及数值范围"},
+                status_code=422,
+            )
+        return JSONResponse({"success": True, "config": saved})
+
+    @router.post("/api/admin/vids/accounts/{token_id}/protection/clear")
+    async def clear_vids_protection(token_id: int):
+        policy = getattr(dispatcher, "account_policy", None)
+        if policy is None:
+            return JSONResponse(
+                {"success": False, "message": "Vids policy is unavailable"}, status_code=503
+            )
+        if await dispatcher.db.get_token(token_id) is None:
+            return JSONResponse({"success": False, "message": "账号不存在"}, status_code=404)
+        await policy.clear(token_id)
+        return JSONResponse({"success": True})
 
     @router.get("/api/admin/vids/accounts/detail")
     async def vids_accounts_detail(refresh: bool = False):
@@ -185,7 +249,7 @@ def create_vids_admin_router(
             try:
                 account = dispatcher._account(token_id, network=True)
                 try:
-                    quota = await account.gateway.quota(kind)
+                    quota = await dispatcher.read_quota(token_id, kind)
                 except VidsProtocolError as error:
                     if error.status in {401, 403}:
                         account.gateway.client.initialization_valid = False
@@ -199,7 +263,7 @@ def create_vids_admin_router(
                     await repair_session(token_id)
                     repaired = True
                     account = dispatcher._account(token_id, network=True)
-                    quota = await account.gateway.quota(kind)
+                    quota = await dispatcher.read_quota(token_id, kind)
                 values[kind] = {
                     "total": int(quota["total"]),
                     "available": int(quota["available"]),
@@ -336,6 +400,7 @@ def create_vids_admin_router(
                     kind: sum(
                         row["ready"]
                         and row["enabled"]
+                        and not row["protection"]
                         and (kind == "speech" or row[kind + "_enabled"])
                         for row in accounts
                     )

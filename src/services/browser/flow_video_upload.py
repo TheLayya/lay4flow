@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
 from ..flow.flow_rpc import FLOW_ORIGIN, FlowRPCError, _bootstrap, _check_response
-from ..flow.video_edit import validate_video_trim
+from ..flow.video_edit import validate_video_upload_range
 
 
 def _upload_url(value: Any, base: str) -> str:
@@ -69,9 +69,11 @@ async def upload_profile_video(
     mime_type: str,
     trim_start_ms: int,
     trim_end_ms: int,
+    *,
+    max_duration_ms: int = 10000,
 ) -> str:
     """Start and finalize once in the existing account Cookie/fixed proxy context."""
-    validate_video_trim(trim_start_ms, trim_end_ms)
+    validate_video_upload_range(trim_start_ms, trim_end_ms, max_duration_ms=max_duration_ms)
     project = str(project_id or "").strip().removeprefix("projects/")
     if not re.fullmatch(r"[A-Za-z0-9_-]+", project):
         raise ValueError("project_id is invalid")

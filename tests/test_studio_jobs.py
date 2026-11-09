@@ -205,6 +205,43 @@ class StudioJobTests(unittest.IsolatedAsyncioTestCase):
             )
             await service.close()
 
+    async def test_completed_receipt_refresh_tracks_expiry_without_resubmitting_or_changing_outcome(
+        self,
+    ):
+        calls = 0
+        expired = False
+
+        async def execute(*_):
+            nonlocal calls
+            calls += 1
+            yield {"status": "completed", "receipt": "vids_" + "a" * 64}
+
+        def refresh(item):
+            return {
+                "status": "completed",
+                "vids_receipt": {
+                    "id": item["receipt"],
+                    "status": "completed",
+                    "media_expired": expired,
+                    "content_url": None if expired else "/synthetic-content",
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = StudioGenerationJobs(execute, Path(directory) / "jobs.json", refresh=refresh)
+            job = await service.submit(
+                "vids", {}, 1, "expiry", "http://test", kind="image", model="a", prompt="x"
+            )
+            await service._queues["vids"].join()
+            self.assertFalse(service.get(job["id"])["items"][0]["vids_receipt"]["media_expired"])
+            expired = True
+            result = service.get(job["id"])
+            self.assertEqual(result["state"], "completed")
+            self.assertTrue(result["items"][0]["vids_receipt"]["media_expired"])
+            self.assertIsNone(result["items"][0]["vids_receipt"]["content_url"])
+            self.assertEqual(calls, 1)
+            await service.close()
+
     async def test_storage_failure_does_not_kill_worker_or_leak_queue_capacity(self):
         calls = 0
 

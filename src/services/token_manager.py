@@ -33,13 +33,17 @@ class TokenManager:
     """Token lifecycle manager with AT auto-refresh"""
 
     def __init__(self, db: Database, flow_client: FlowClient, profile_refresher: Any = None):
+        from .account_error_policy import AccountErrorPolicy
+
         self.db = db
+        self.generation_error_policy = AccountErrorPolicy(db)
         self.flow_client = flow_client
         self.profile_refresher = profile_refresher
         self.profile_ready_callback = None
         self.profile_delete_handler = None
         self.account_delete_handler = None
         self.account_proxy_maintenance = None
+        self.account_login_maintenance = None
         self._refresh_lock_guard = asyncio.Lock()
         self._project_lock_guard = asyncio.Lock()
         self._refresh_locks: dict[int, asyncio.Lock] = {}
@@ -380,6 +384,7 @@ class TokenManager:
             raise ValueError("账号状态已变化，请稍后重试")
         # Reset error count when enabling (only reset total error_count, keep today_error_count)
         await self.db.reset_error_count(token_id)
+        await self.generation_error_policy.clear(token_id)
 
     async def disable_token(self, token_id: int, reason: str = "manual"):
         """Disable a token"""
@@ -648,6 +653,53 @@ class TokenManager:
         ):
             raise ValueError("Cloak Profile must be initialized through direct browser login")
 
+        profile_schedule_changed = bool(
+            token
+            and token.browser_profile_source == "cloak"
+            and any(
+                key in update_fields and update_fields[key] != getattr(token, key)
+                for key in ("auto_refresh_enabled", "refresh_interval_minutes")
+            )
+        )
+        if profile_schedule_changed:
+            now = datetime.now(timezone.utc)
+            enabled = update_fields.get("auto_refresh_enabled", token.auto_refresh_enabled)
+            if "refresh_interval_minutes" in update_fields:
+                update_fields["refresh_interval_minutes"] = min(
+                    1440, update_fields["refresh_interval_minutes"]
+                )
+            interval = self._normalize_refresh_interval(
+                update_fields.get("refresh_interval_minutes", token.refresh_interval_minutes)
+            )
+            usable_profile = (
+                token.browser_profile_status == "ready"
+                and token.refresh_status
+                not in {
+                    "config_error",
+                    "login_required",
+                    "retrying",
+                }
+            )
+            if not enabled:
+                update_fields.update(next_refresh_at=None, browser_profile_next_at=None)
+            elif usable_profile:
+                anchor = (
+                    self._as_utc(token.last_st_refresh_at)
+                    if self._profile_cycle_anchor_valid(token)
+                    else self._as_utc(token.browser_profile_verified_at)
+                    or (
+                        self._as_utc(token.last_refresh_at)
+                        if token.refresh_status == "ready"
+                        else None
+                    )
+                )
+                due = min(anchor, now) + timedelta(minutes=interval) if anchor else now
+                update_fields.update(next_refresh_at=max(now, due), browser_profile_next_at=due)
+            if token.refresh_status == "refreshing":
+                # The in-flight response carries the previous settings and may
+                # no longer commit. Do not leave its transient status behind.
+                update_fields["refresh_status"] = "ready" if usable_profile else "idle"
+
         # 检查token是否因429被禁用，如果是且未过期，则清空429状态
         refresh_material = (
             "st",
@@ -690,7 +742,26 @@ class TokenManager:
         if update_fields:
             if any(key in update_fields for key in ("st", "at", "at_expires")):
                 self._clear_at_validation_cache(token_id)
-            await self.db.update_token(token_id, **update_fields)
+            if profile_schedule_changed:
+                expected = self._refresh_expected(token, token)
+                expected.update(
+                    {
+                        key: getattr(token, key)
+                        for key in (
+                            "refresh_status",
+                            "last_st_refresh_at",
+                            "browser_profile_verified_at",
+                            "next_refresh_at",
+                            "browser_profile_next_at",
+                        )
+                    }
+                )
+                if not await self.db.update_token_if_credentials_match(
+                    token_id, expected, **update_fields
+                ):
+                    raise ValueError("账号状态已变化，请刷新后重新保存维护设置")
+            else:
+                await self.db.update_token(token_id, **update_fields)
 
     async def _switch_profile_proxy(self, token, selected_id, selected_url, update_fields):
         """Finish validation and rollback even if the initiating HTTP request disconnects."""
@@ -827,10 +898,15 @@ class TokenManager:
             and token.at is None
             and token.at_expires is None
             and anchor
-            and due
-            and due
-            == anchor
-            + timedelta(minutes=self._normalize_refresh_interval(token.refresh_interval_minutes))
+            and (
+                not token.auto_refresh_enabled
+                and due is None
+                or due
+                == anchor
+                + timedelta(
+                    minutes=self._normalize_refresh_interval(token.refresh_interval_minutes)
+                )
+            )
         )
 
     @staticmethod
@@ -1023,6 +1099,11 @@ class TokenManager:
             )
         }
         expected.update(is_active=latest.is_active, ban_reason=latest.ban_reason)
+        if token.browser_profile_source == "cloak":
+            expected.update(
+                auto_refresh_enabled=token.auto_refresh_enabled,
+                refresh_interval_minutes=token.refresh_interval_minutes,
+            )
         return expected
 
     @staticmethod
@@ -1126,18 +1207,21 @@ class TokenManager:
             return await self._try_protocol_refresh_st(token_id, token)
         raise RefreshFailure("ST 已失效，需要重新登录并同步 Cookie 或新的 ST", "login_required")
 
-    async def _try_profile_refresh(self, token: Token, *, force: bool = False) -> Dict[str, Any]:
+    async def _try_profile_refresh(
+        self, token: Token, *, force: bool = False, renew_browser: bool = False
+    ) -> Dict[str, Any]:
         from .browser.profiles import ProfileNotReadyError
 
         if self.profile_refresher is None:
             raise RefreshFailure("Cloak Profile 未配置", "config_error")
         try:
-            if force:
-                result = await asyncio.wait_for(
-                    self.profile_refresher.refresh(token, force=True), 90
-                )
-            else:
-                result = await asyncio.wait_for(self.profile_refresher.refresh(token), 90)
+            options = {"force": True} if force else {}
+            if (
+                renew_browser
+                and "renew_browser" in inspect.signature(self.profile_refresher.refresh).parameters
+            ):
+                options["renew_browser"] = True
+            result = await asyncio.wait_for(self.profile_refresher.refresh(token, **options), 90)
             result["_profile_used"] = True
             return result
         except RefreshFailure:
@@ -1171,10 +1255,17 @@ class TokenManager:
             raise RefreshFailure("Cloak Profile 恢复异常", "transient_error") from exc
 
     async def _refresh_credentials(
-        self, token: Token, refresh_st: bool, *, force: bool = False
+        self,
+        token: Token,
+        refresh_st: bool,
+        *,
+        force: bool = False,
+        renew_browser: bool = False,
     ) -> Dict[str, Any]:
         if token.browser_profile_source == "cloak":
-            result = await self._try_profile_refresh(token, force=force)
+            result = await self._try_profile_refresh(
+                token, force=force, renew_browser=renew_browser
+            )
             updates = self._profile_credential_updates(result)
             if result.get("google_cookies"):
                 updates["google_cookies"] = result["google_cookies"]
@@ -1186,6 +1277,8 @@ class TokenManager:
                 last_st_refresh_at=datetime.now(timezone.utc),
                 last_st_refresh_result="success",
             )
+            if "_browser_renewed" in result:
+                updates["_browser_renewed"] = result["_browser_renewed"] is True
             return updates
         if not refresh_st:
             try:
@@ -1257,7 +1350,12 @@ class TokenManager:
         validation_only: bool = False,
     ) -> bool:
         lock = await self._get_token_lock(self._refresh_locks, self._refresh_lock_guard, token_id)
-        async with lock:
+        cookie_lock = await self._get_token_lock(
+            self._profile_cookie_locks, self._refresh_lock_guard, token_id
+        )
+        # HTTP generation can rotate the same account's jar. Its cookie merge
+        # waits until browser renewal and the final credential CAS both finish.
+        async with lock, cookie_lock:
             token = await self.db.get_token(token_id)
             if not token:
                 return False
@@ -1308,12 +1406,17 @@ class TokenManager:
             ):
                 return False
             try:
+                refresh_options = {"force": force}
+                if token.browser_profile_source == "cloak" and not validation_only:
+                    refresh_options["renew_browser"] = True
                 updates = await asyncio.wait_for(
-                    self._refresh_credentials(token, refresh_st, force=force), 120
+                    self._refresh_credentials(token, refresh_st, **refresh_options),
+                    120,
                 )
                 latest = await self.db.get_token(token_id)
                 if not latest:
                     return False
+                browser_renewed = updates.pop("_browser_renewed", None)
                 # Discard an in-flight response if someone replaced its credentials.
                 if any(
                     getattr(latest, key) != getattr(token, key)
@@ -1330,9 +1433,14 @@ class TokenManager:
                     )
                 ):
                     return False
+                if token.browser_profile_source == "cloak" and any(
+                    getattr(latest, key) != getattr(token, key)
+                    for key in ("auto_refresh_enabled", "refresh_interval_minutes")
+                ):
+                    return False
                 now = datetime.now(timezone.utc)
                 if token.browser_profile_source == "cloak":
-                    if validation_only:
+                    if validation_only or browser_renewed is False:
                         updates.pop("last_st_refresh_at", None)
                         updates.pop("last_st_refresh_result", None)
                         due = self._as_utc(token.next_refresh_at)
@@ -1374,7 +1482,10 @@ class TokenManager:
                     next_refresh_at=max(now + timedelta(minutes=5), due) if due else None,
                 )
                 if token.browser_profile_source == "cloak":
-                    updates.update(next_refresh_at=due, browser_profile_next_at=due)
+                    updates.update(
+                        next_refresh_at=due if token.auto_refresh_enabled else None,
+                        browser_profile_next_at=due if token.auto_refresh_enabled else None,
+                    )
                 if warning:
                     updates.update(
                         refresh_status="config_error"
@@ -1427,6 +1538,11 @@ class TokenManager:
                     )
                 ):
                     return False
+                if token.browser_profile_source == "cloak" and any(
+                    getattr(latest, key) != getattr(token, key)
+                    for key in ("auto_refresh_enabled", "refresh_interval_minutes")
+                ):
+                    return False
                 now = datetime.now(timezone.utc)
                 failures = latest.refresh_failures + 1
                 code = getattr(exc, "code", "transient_error")
@@ -1437,6 +1553,18 @@ class TokenManager:
                     "config_error": "config_error",
                     "login_required": "login_required",
                 }.get(code, "retrying")
+                profile_recovery = (
+                    token.browser_profile_source == "cloak"
+                    and code == "login_required"
+                    and latest.browser_profile_verified_at is not None
+                    and latest.auto_refresh_enabled
+                    and failures < 3
+                )
+                if profile_recovery:
+                    # One rejected probe must not permanently stop an enabled
+                    # account's renewal. Pause new work, then confirm with the
+                    # same Profile and fixed proxy under bounded backoff.
+                    status = "retrying"
                 # Bounded backoff survives restarts; per-account offset spreads retries.
                 delay = min(3600, 60 * 2 ** min(failures - 1, 6)) + token_id % 30
                 error = self._safe_refresh_error(exc)
@@ -1472,6 +1600,8 @@ class TokenManager:
                         # Keep the last successful legacy timestamp from becoming the
                         # failed attempt time when a ready Profile predates this field.
                         updates["browser_profile_verified_at"] = token.last_refresh_at
+                    if not token.auto_refresh_enabled:
+                        updates["next_refresh_at"] = None
                     updates["browser_profile_next_at"] = updates["next_refresh_at"]
                 else:
                     unusable = (
@@ -1656,19 +1786,8 @@ class TokenManager:
             await self.db.increment_token_stats(token_id, "image")
 
     async def record_error(self, token_id: int):
-        """Record token error and auto-disable if threshold reached"""
-        await self.db.increment_token_stats(token_id, "error")
-
-        # Check if should auto-disable token (based on consecutive errors)
-        stats = await self.db.get_token_stats(token_id)
-        admin_config = await self.db.get_admin_config()
-
-        if stats and stats.consecutive_error_count >= admin_config.error_ban_threshold:
-            debug_logger.log_warning(
-                f"[TOKEN_BAN] Token {token_id} consecutive error count ({stats.consecutive_error_count}) "
-                f"reached threshold ({admin_config.error_ban_threshold}), auto-disabling"
-            )
-            await self.disable_token(token_id, reason="error_threshold")
+        """Compatibility entry point for the single generation protection policy."""
+        return await self.generation_error_policy.record_failure(token_id, "generation_failed")
 
     async def record_success(self, token_id: int):
         """Record successful request (reset consecutive error count)

@@ -8,9 +8,6 @@ import {
     Download,
     Picture,
     VideoCamera,
-    Clock,
-    CircleCheck,
-    Warning,
     CopyDocument,
     View,
     Link,
@@ -27,7 +24,7 @@ const status = ref('all')
 const operation = ref('all')
 const timeRange = ref(null)
 const page = ref(1)
-const pageSize = ref(10)
+const pageSize = ref(20)
 const tableSort = reactive({ prop: 'duration', order: null })
 const autoRefresh = ref(false)
 const detailOpen = ref(false)
@@ -62,28 +59,43 @@ const stages = {
     completed: '已完成',
     failed: '生成失败',
     processing: '处理中',
+    retrying_account: '正在重试',
     upsampling_2k: '正在放大至 2K',
     upsampling_4k: '正在放大至 4K',
     upsampling_1080p: '正在放大至 1080p',
+    pending: '等待生成结果',
+    generating: '正在生成',
+    received: '已受理，等待作品',
+    unknown: '受理结果待确认',
+    download_failed: '作品下载待恢复',
+    no_result: '未返回作品',
+    specification_mismatch: '作品规格不符',
 }
 const classify = (row) =>
-    Number(row.status_code) >= 400 || row.status_text === 'failed'
-        ? 'failed'
-        : Number(row.status_code) === 200 || row.status_text === 'completed'
-          ? 'success'
-          : Number(row.status_code) === 102
-            ? 'processing'
-            : 'other'
+    ['unknown', 'download_failed'].includes(row.status_text)
+        ? 'attention'
+        : ['retrying_account', 'pending', 'generating', 'received'].includes(row.status_text)
+        ? 'processing'
+        : Number(row.status_code) >= 400 || ['failed', 'no_result', 'specification_mismatch'].includes(row.status_text)
+          ? 'failed'
+          : Number(row.status_code) === 200 || row.status_text === 'completed'
+            ? 'success'
+            : Number(row.status_code) === 102
+              ? 'processing'
+              : 'other'
 const statusLabel = (row) =>
     stages[row.status_text] ||
-    { failed: '生成失败', success: '已完成', processing: '处理中', other: row.status_text || '已记录' }[classify(row)]
+    { failed: '生成失败', success: '已完成', processing: '处理中', attention: '需要关注', other: row.status_text || '已记录' }[classify(row)]
 const statusType = (row) =>
-    ({ failed: 'danger', success: 'success', processing: 'warning', other: 'info' })[classify(row)]
+    ({ failed: 'danger', success: 'success', processing: 'warning', attention: 'warning', other: 'info' })[classify(row)]
 const operationLabel = (row) =>
     ({
         generate_image: '图片生成',
         generate_video: '视频生成',
         generate_speech: '语音生成',
+        vids_generate_image: 'Vids 图片生成',
+        vids_generate_video: 'Vids 视频生成',
+        vids_generate_speech: 'Vids 语音生成',
         chat_completion: '对话请求',
     })[row.operation] ||
     row.operation ||
@@ -137,6 +149,7 @@ const stats = computed(() => {
         total: logs.value.length,
         processing: logs.value.filter((row) => classify(row) === 'processing').length,
         failed: logs.value.filter((row) => classify(row) === 'failed').length,
+        attention: logs.value.filter((row) => classify(row) === 'attention').length,
         success: success.length,
         average: success.length
             ? duration(success.reduce((sum, row) => sum + Number(row.duration || 0), 0) / success.length)
@@ -180,6 +193,68 @@ function pretty(raw) {
 const response = computed(() => parse(detail.value?.response_body))
 const request = computed(() => parse(detail.value?.request_body))
 const performance = computed(() => response.value?.performance || response.value?.timings || null)
+function recordedCount(value) {
+    return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null
+}
+function attemptSummary(row, history = row?.attempt_history) {
+    const attempts = recordedCount(row?.attempt_count) ?? recordedCount(history?.total_attempts)
+    return {
+        attempts,
+        retries:
+            recordedCount(row?.retry_count) ??
+            recordedCount(history?.retry_count) ??
+            (attempts === null ? null : Math.max(0, attempts - 1)),
+        accounts: recordedCount(row?.account_count) ?? recordedCount(history?.account_count),
+    }
+}
+const attemptHistory = computed(() => detail.value?.attempt_history || response.value?.attempt_history || null)
+const attemptRows = computed(() =>
+    Array.isArray(attemptHistory.value?.attempts)
+        ? attemptHistory.value.attempts.filter((item) => item && typeof item === 'object').slice(0, 100)
+        : [],
+)
+const detailAttempts = computed(() => attemptSummary(detail.value, attemptHistory.value))
+const attemptStatus = (item) =>
+    ({ success: '成功', accepted: '已受理', failed: '失败', in_progress: '进行中', cancelled: '已取消' })[
+        item.status
+    ] || '结果未记录'
+const attemptType = (item) =>
+    ({ success: 'success', accepted: 'success', failed: 'danger', in_progress: 'warning', cancelled: 'info' })[
+        item.status
+    ] || 'info'
+const attemptStage = (item) =>
+    ({ captcha: '验证码获取', submit: '生成提交', preflight: '生成前检查', polling: '等待生成结果' })[item.stage] ||
+    stages[item.stage] ||
+    item.stage ||
+    '阶段未记录'
+const attemptAction = (item) =>
+    ({
+        switch_account: '跳过该账号，切换账号',
+        retry_same_account: '使用同一账号重试',
+        retry: '重新分配账号后重试',
+        delay: '延时后重试',
+        stop: '停止重试',
+        completed: '请求完成',
+        polling: '已受理，等待生成结果',
+    })[item.next_action] || ''
+const ruleAction = (item) =>
+    ({ LIMIT: '限速冷却', DEACTIVE: '标记异常', RETRY: '直接重试', DISABLE: '停用账号', DELAY: '延时重试' })[
+        item.rule_action
+    ] ||
+    item.rule_action ||
+    ''
+function ruleEffect(item) {
+    const seconds = item.rule_seconds
+    if (item.rule_action !== 'LIMIT' || recordedCount(seconds) === null) return ''
+    if (seconds === 0) return '仅在本次请求中跳过该账号'
+    const time =
+        seconds % 3600 === 0 ? `${seconds / 3600} 小时` : seconds % 60 === 0 ? `${seconds / 60} 分钟` : `${seconds} 秒`
+    return `账号冷却 ${time}`
+}
+const attemptDuration = (item) =>
+    typeof item.duration_ms === 'number' && Number.isFinite(item.duration_ms) && item.duration_ms >= 0
+        ? duration(item.duration_ms / 1000)
+        : '耗时未记录'
 const requestPrompt = computed(
     () =>
         request.value?.prompt ||
@@ -231,7 +306,9 @@ const media = computed(() => {
     return found
 })
 function outcome(row) {
-    return classify(row) === 'failed'
+    return classify(row) === 'attention'
+        ? row.error_summary || (row.status_text === 'download_failed' ? '作品已生成，等待恢复下载' : '受理结果尚待确认，保留原任务记录')
+        : classify(row) === 'failed'
         ? row.error_summary || '上游请求返回错误，点击详情查看响应'
         : classify(row) === 'success'
           ? '创作结果已返回'
@@ -336,7 +413,18 @@ function download(value, name) {
     URL.revokeObjectURL(url)
 }
 function exportLogs() {
-    download(filtered.value, `lay4flow-logs-${new Date().toISOString().slice(0, 10)}.json`)
+    download(
+        filtered.value.map((row) => {
+            const counts = attemptSummary(row)
+            return {
+                ...row,
+                attempt_count: counts.attempts,
+                retry_count: counts.retries,
+                account_count: counts.accounts,
+            }
+        }),
+        `lay4flow-logs-${new Date().toISOString().slice(0, 10)}.json`,
+    )
     ElMessage.success(`已导出 ${filtered.value.length} 条日志摘要`)
 }
 async function copy(raw) {
@@ -355,69 +443,31 @@ onUnmounted(() => {
 </script>
 
 <template>
-    <div class="logs-view">
+    <div class="logs-view management-view">
         <header class="page-heading">
             <div>
-                <h1>创作记录</h1>
-                <p>跟随每一次请求，看看灵感如何成为作品。</p>
+                <h1>请求日志</h1>
             </div>
             <div class="page-actions">
                 <el-button :icon="Download" :disabled="!filtered.length" @click="exportLogs">导出记录</el-button>
                 <el-button type="primary" :icon="Refresh" :loading="loading" @click="load()">同步日志</el-button>
             </div>
         </header>
-        <div class="log-metrics">
-            <article>
-                <span class="metric-icon pink">
-                    <el-icon><Document /></el-icon>
-                </span>
-                <div>
-                    <span>最近请求</span>
-                    <strong>{{ stats.total }}</strong>
-                </div>
-                <small>最近 100 条</small>
-            </article>
-            <article>
-                <span class="metric-icon green">
-                    <el-icon><CircleCheck /></el-icon>
-                </span>
-                <div>
-                    <span>已完成</span>
-                    <strong>{{ stats.success }}</strong>
-                </div>
-                <small>{{ stats.total ? ((100 * stats.success) / stats.total).toFixed(1) : '0' }}% 成功率</small>
-            </article>
-            <article>
-                <span class="metric-icon blue">
-                    <el-icon><Clock /></el-icon>
-                </span>
-                <div>
-                    <span>处理中</span>
-                    <strong>{{ stats.processing }}</strong>
-                </div>
-                <small>平均 {{ stats.average }}</small>
-            </article>
-            <article>
-                <span class="metric-icon amber">
-                    <el-icon><Warning /></el-icon>
-                </span>
-                <div>
-                    <span>需要关注</span>
-                    <strong>{{ stats.failed }}</strong>
-                </div>
-                <small>查看详情排查原因</small>
-            </article>
-        </div>
         <el-alert v-if="loadError" :title="loadError" type="error" show-icon :closable="false" class="logs-alert" />
-        <section class="surface logs-surface">
-            <div class="section-heading">
-                <div>
-                    <h2>请求时间线</h2>
-                    <p>筛选与分页应用于最近 100 条请求记录</p>
+        <section class="surface logs-surface management-surface">
+            <div class="section-heading management-summary-row">
+                <div class="management-summary" aria-label="请求日志统计">
+                    <span>最近 <strong>{{ stats.total }}</strong> 条</span>
+                    <span class="summary-success">完成 <strong>{{ stats.success }}</strong></span>
+                    <span>处理中 <strong>{{ stats.processing }}</strong></span>
+                    <span class="summary-danger">失败 <strong>{{ stats.failed }}</strong></span>
+                    <span v-if="stats.attention">需关注 <strong>{{ stats.attention }}</strong></span>
+                    <span>成功率 <strong>{{ stats.total ? ((100 * stats.success) / stats.total).toFixed(1) : '0' }}%</strong></span>
+                    <span>平均耗时 <strong>{{ stats.average }}</strong></span>
                 </div>
                 <div class="logs-options">
                     <span>实时同步</span>
-                    <el-switch v-model="autoRefresh" />
+                    <el-switch v-model="autoRefresh" aria-label="实时同步日志" size="small" />
                     <el-tooltip content="清空全部历史日志">
                         <el-button
                             text
@@ -430,7 +480,7 @@ onUnmounted(() => {
                     </el-tooltip>
                 </div>
             </div>
-            <div class="log-filters">
+            <div class="log-filters management-toolbar">
                 <el-input
                     v-model="search"
                     placeholder="搜索账号、请求 ID 或错误内容"
@@ -443,6 +493,7 @@ onUnmounted(() => {
                     <el-option label="已完成" value="success" />
                     <el-option label="处理中" value="processing" />
                     <el-option label="生成失败" value="failed" />
+                    <el-option label="需要关注" value="attention" />
                 </el-select>
                 <el-select v-model="operation" aria-label="筛选请求类型">
                     <el-option label="全部类型" value="all" />
@@ -468,30 +519,31 @@ onUnmounted(() => {
                 v-else
                 :data="paginated"
                 row-key="id"
-                class="logs-table"
+                class="logs-table management-table"
+                size="small"
+                :max-height="'calc(100dvh - 300px)'"
                 @sort-change="Object.assign(tableSort, $event)"
                 @row-dblclick="(row) => openDetail(row)"
             >
-                <el-table-column label="创作请求" min-width="180">
+                <el-table-column label="请求 ID" width="108" fixed="left">
+                    <template #default="{ row }">
+                        <button type="button" class="request-id-link" @click="openDetail(row)">REQUEST #{{ row.id }}</button>
+                    </template>
+                </el-table-column>
+                <el-table-column label="类型" width="134">
                     <template #default="{ row }">
                         <div class="operation-cell">
-                            <span class="operation-icon" :class="{ video: String(row.operation).includes('video') }">
-                                <el-icon><component :is="operationIcon(row)" /></el-icon>
-                            </span>
-                            <div>
-                                <strong>{{ operationLabel(row) }}</strong>
-                                <small>REQUEST #{{ row.id }}</small>
-                            </div>
+                            <el-icon><component :is="operationIcon(row)" /></el-icon>
+                            <span>{{ operationLabel(row) }}</span>
                         </div>
                     </template>
                 </el-table-column>
-                <el-table-column label="创作成员" min-width="185">
+                <el-table-column label="账号" min-width="215" show-overflow-tooltip>
                     <template #default="{ row }">
                         <span class="account-label">{{ row.token_email || row.token_username || '未分配账号' }}</span>
-                        <small class="cell-note">{{ row.token_id ? '成员 #' + row.token_id : '暂无' }}</small>
                     </template>
                 </el-table-column>
-                <el-table-column label="进度与状态" min-width="150">
+                <el-table-column label="状态" width="134">
                     <template #default="{ row }">
                         <el-tag :type="statusType(row)" effect="light" size="small">{{ statusLabel(row) }}</el-tag>
                         <el-progress
@@ -500,10 +552,12 @@ onUnmounted(() => {
                             :stroke-width="4"
                             class="inline-progress"
                         />
-                        <span v-else class="status-code">HTTP {{ row.status_code ?? '暂无' }}</span>
                     </template>
                 </el-table-column>
-                <el-table-column label="结果摘要" min-width="235">
+                <el-table-column label="HTTP" width="72" align="center">
+                    <template #default="{ row }">{{ row.status_code ?? '—' }}</template>
+                </el-table-column>
+                <el-table-column label="结果 / 错误" min-width="270">
                     <template #default="{ row }">
                         <el-tooltip :content="outcome(row)" placement="top">
                             <span class="outcome-text" :class="{ failed: classify(row) === 'failed' }">
@@ -511,6 +565,24 @@ onUnmounted(() => {
                             </span>
                         </el-tooltip>
                     </template>
+                </el-table-column>
+                <el-table-column label="尝试与重试" width="160">
+                    <template #default="{ row }">
+                        <button
+                            v-if="attemptSummary(row).attempts !== null"
+                            type="button"
+                            class="attempt-summary-cell"
+                            :aria-label="`查看请求 #${row.id} 的尝试记录`"
+                            @click="openDetail(row)"
+                        >
+                            <span>尝试 {{ attemptSummary(row).attempts }} 次</span>
+                            <span class="retry-count">重试 {{ attemptSummary(row).retries }} 次</span>
+                        </button>
+                        <span v-else class="cell-note attempt-unrecorded">次数未记录</span>
+                    </template>
+                </el-table-column>
+                <el-table-column label="使用账号" width="90" align="center">
+                    <template #default="{ row }">{{ attemptSummary(row).accounts ?? '—' }}</template>
                 </el-table-column>
                 <el-table-column label="耗时" width="95" sortable="custom" prop="duration">
                     <template #default="{ row }">
@@ -561,10 +633,13 @@ onUnmounted(() => {
                 />
             </footer>
         </section>
-        <p class="logs-footnote">每一次生成都值得记录。列表仅加载轻量摘要，完整请求与响应在详情中按需读取。</p>
+        <p class="logs-footnote">
+            尝试次数包含首次提交；点击次数或详情可查看每次使用的账号、错误和后续处理。历史日志缺少记录时显示「次数未记录」。
+        </p>
         <el-drawer
             v-model="detailOpen"
-            :size="'min(790px, 100vw)'"
+            class="log-detail-drawer"
+            :size="'min(1180px, 100vw)'"
             :title="'创作请求 #' + (activeId || '')"
             @closed="detailSequence++"
         >
@@ -604,27 +679,67 @@ onUnmounted(() => {
                     class="detail-alert"
                 />
                 <el-alert
-                    v-else-if="classify(detail) === 'success'"
-                    title="创作完成，结果已经返回"
-                    type="success"
-                    :closable="false"
-                    show-icon
-                    class="detail-alert"
+                    v-if="classify(detail) === 'attention'"
+                    :title="outcome(detail)"
+                    type="warning" :closable="false" show-icon class="detail-alert"
                 />
-                <el-timeline class="detail-timeline">
-                    <el-timeline-item :timestamp="date(detail.created_at)" placement="top" color="#d792af">
-                        <strong>请求已进入工作室</strong>
-                        <p>成员 #{{ detail.token_id || '暂无' }} · {{ operationLabel(detail) }}</p>
-                    </el-timeline-item>
-                    <el-timeline-item
-                        :timestamp="date(detail.updated_at || detail.created_at)"
-                        placement="top"
-                        :type="statusType(detail)"
-                    >
-                        <strong>{{ statusLabel(detail) }}</strong>
-                        <p>{{ outcome(detail) }}</p>
-                    </el-timeline-item>
-                </el-timeline>
+                <div class="detail-date-row">
+                    <span>开始时间 <strong>{{ date(detail.created_at) }}</strong></span>
+                    <span>更新时间 <strong>{{ date(detail.updated_at || detail.created_at) }}</strong></span>
+                    <span>账号 ID <strong>{{ detail.token_id || '未分配' }}</strong></span>
+                </div>
+                <section class="attempt-section" aria-label="尝试记录">
+                    <div class="detail-section-heading">
+                        <h3>尝试记录</h3>
+                        <span v-if="detailAttempts.attempts !== null">
+                            尝试 {{ detailAttempts.attempts }} 次 · 重试 {{ detailAttempts.retries }} 次
+                            <template v-if="detailAttempts.accounts !== null">
+                                · {{ detailAttempts.accounts }} 个账号
+                            </template>
+                        </span>
+                        <span v-else>次数未记录</span>
+                    </div>
+                    <p v-if="attemptHistory && recordedCount(attemptHistory.limit) !== null" class="attempt-budget">
+                        本次生成尝试上限 {{ attemptHistory.limit }} 次（含首次）
+                        <template v-if="Number(attemptHistory.accounts_limit) > 0">
+                            · 账号分配上限 {{ attemptHistory.accounts_limit }} 次（含同账号重新分配）
+                        </template>
+                    </p>
+                    <div v-if="attemptRows.length" class="attempt-table-scroll" tabindex="0" aria-label="横向滚动尝试记录">
+                        <table class="attempt-table">
+                            <thead><tr><th>尝试</th><th>账号</th><th>阶段</th><th>结果</th><th>耗时</th><th>错误 / 命中规则</th><th>后续处理</th><th>开始时间</th></tr></thead>
+                            <tbody>
+                                <tr v-for="(item, index) in attemptRows" :key="`${item.attempt || index}-${item.started_at || ''}`" class="attempt-item">
+                                    <td class="attempt-number">第 {{ item.attempt || index + 1 }} 次尝试</td>
+                                    <td><span class="attempt-account-label">{{ item.account_email || (item.account_id ? '成员 #' + item.account_id : '未分配账号') }}</span><small v-if="item.account_email && item.account_id">成员 #{{ item.account_id }}</small></td>
+                                    <td>{{ attemptStage(item) }}</td>
+                                    <td><el-tag :type="attemptType(item)" effect="light" size="small">{{ attemptStatus(item) }}</el-tag></td>
+                                    <td class="attempt-time">{{ attemptDuration(item) }}</td>
+                                    <td class="attempt-evidence">
+                                        <code v-if="item.error_code">{{ item.error_code }}</code>
+                                        <p v-if="item.error">{{ item.error }}</p>
+                                        <div v-if="item.rule_action || item.rule_keyword" class="attempt-rule-evidence">
+                                            命中规则 <code v-if="item.rule_keyword">{{ item.rule_keyword }}</code>
+                                            <strong v-if="item.rule_action">{{ ruleAction(item) }} · {{ item.rule_action }}</strong>
+                                            <span v-if="ruleEffect(item)">{{ ruleEffect(item) }}</span>
+                                        </div>
+                                        <span v-if="!item.error && !item.error_code && !item.rule_action">—</span>
+                                    </td>
+                                    <td><span>{{ attemptAction(item) || '—' }}</span><small v-if="Number(item.delay_seconds) > 0">等待 {{ item.delay_seconds }} 秒</small></td>
+                                    <td class="attempt-time">{{ item.started_at ? shortDate(item.started_at) : '未记录' }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p v-else class="attempt-empty">
+                        {{
+                            detailAttempts.attempts === 0
+                                ? '尚未开始生成尝试。'
+                                : '这条日志未记录逐次尝试信息，无法还原每次重试情况。'
+                        }}
+                        <template v-if="detailAttempts.attempts === null">历史日志不会推测尝试次数。</template>
+                    </p>
+                </section>
                 <section v-if="requestPrompt" class="prompt-preview">
                     <span>这次的灵感</span>
                     <p>{{ typeof requestPrompt === 'string' ? requestPrompt : JSON.stringify(requestPrompt) }}</p>
@@ -873,6 +988,39 @@ onUnmounted(() => {
     display: block;
     margin-top: 5px;
 }
+.attempt-summary-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 5px;
+    padding: 5px 0;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+}
+.attempt-summary-cell strong {
+    font-size: 13px;
+    font-weight: 600;
+}
+.attempt-summary-cell small {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.6;
+}
+.attempt-summary-cell:hover strong {
+    color: var(--accent);
+}
+.attempt-summary-cell:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 4px;
+    border-radius: 4px;
+}
+.attempt-unrecorded {
+    margin-top: 0;
+}
 .status-code {
     font-size: 13px;
     color: var(--muted);
@@ -1008,6 +1156,112 @@ onUnmounted(() => {
 }
 .detail-timeline :deep(.el-timeline-item__timestamp) {
     font-size: 13px;
+}
+.attempt-section {
+    margin-bottom: 28px;
+}
+.attempt-section .detail-section-heading {
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 8px 15px;
+}
+.attempt-budget,
+.attempt-empty {
+    margin: 0 0 15px;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.8;
+}
+.attempt-empty {
+    background: var(--surface-soft);
+    padding: 16px;
+    border-radius: 12px;
+}
+.attempt-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 12px;
+}
+.attempt-item {
+    min-width: 0;
+    border: 1px solid var(--el-border-color-lighter);
+    border-radius: 12px;
+    padding: 16px;
+}
+.attempt-item-heading {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 10px;
+}
+.attempt-item-heading strong {
+    font-size: 14px;
+}
+.attempt-duration {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+.attempt-account {
+    color: var(--ink);
+    font-size: 13px;
+    margin: 12px 0 5px;
+    overflow-wrap: anywhere;
+}
+.attempt-account span,
+.attempt-meta {
+    color: var(--muted);
+    font-size: 12px;
+}
+.attempt-meta {
+    margin: 0;
+    line-height: 1.7;
+}
+.attempt-error {
+    margin-top: 12px;
+    background: var(--el-color-danger-light-9);
+    color: var(--el-color-danger);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.8;
+    overflow-wrap: anywhere;
+}
+.attempt-error code {
+    display: block;
+    font-weight: 600;
+}
+.attempt-error p {
+    margin: 3px 0 0;
+    white-space: pre-wrap;
+}
+.attempt-rule {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 5px 8px;
+    margin: 11px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.8;
+    overflow-wrap: anywhere;
+}
+.attempt-rule code {
+    max-width: 100%;
+    color: var(--ink);
+}
+.attempt-rule strong {
+    font-weight: 500;
+    color: var(--accent);
+}
+.attempt-next-action {
+    color: var(--accent);
+    font-size: 12px;
+    line-height: 1.8;
+    margin: 10px 0 0;
 }
 .prompt-preview {
     padding: 20px;
@@ -1308,6 +1562,210 @@ html.dark .metric-icon.amber {
         grid-template-columns: 34px minmax(0, 1fr);
         padding: 17px 13px;
         column-gap: 10px;
+    }
+}
+.logs-view.management-view .log-filters {
+    display: flex;
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    gap: 8px;
+}
+.logs-view.management-view .log-search {
+    flex: 1 1 240px;
+    min-width: 180px;
+    max-width: 380px;
+}
+.logs-view.management-view .log-filters > .el-select {
+    width: 120px;
+}
+.logs-view.management-view .log-filters > .date-filter {
+    width: 300px;
+    min-width: 240px;
+    flex: 0 1 300px;
+}
+.logs-view.management-view .logs-options {
+    gap: 8px;
+    font-size: 12px;
+}
+.logs-view.management-view .operation-cell {
+    gap: 6px;
+    white-space: nowrap;
+    font-size: 12px;
+}
+.request-id-link {
+    padding: 0;
+    border: 0;
+    color: var(--accent);
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    white-space: nowrap;
+}
+.request-id-link:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+}
+.logs-view.management-view .outcome-text {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 20px;
+    font-size: 12px;
+}
+.logs-view.management-view .attempt-summary-cell {
+    flex-direction: row;
+    gap: 8px;
+    padding: 0;
+    white-space: nowrap;
+    font-size: 12px;
+    line-height: 20px;
+}
+.logs-view.management-view .retry-count {
+    color: var(--muted);
+}
+.logs-view.management-view .inline-progress {
+    margin: 2px 0 0;
+}
+.logs-view.management-view .date-text,
+.logs-view.management-view .duration {
+    white-space: nowrap;
+    font-size: 12px;
+}
+.logs-view.management-view .logs-footnote {
+    margin: 8px 2px 0;
+    font-size: 12px;
+    color: var(--muted);
+}
+.attempt-table-scroll {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+}
+.attempt-table {
+    width: 100%;
+    min-width: 1050px;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: 12px;
+    line-height: 1.6;
+}
+.attempt-table th {
+    padding: 8px;
+    text-align: left;
+    font-weight: 600;
+    color: var(--muted);
+    background: var(--surface-soft);
+}
+.attempt-table td {
+    padding: 8px;
+    border-top: 1px solid var(--line);
+    vertical-align: top;
+    overflow-wrap: anywhere;
+}
+.attempt-table th:nth-child(1) { width: 95px; }
+.attempt-table th:nth-child(2) { width: 190px; }
+.attempt-table th:nth-child(3) { width: 100px; }
+.attempt-table th:nth-child(4) { width: 70px; }
+.attempt-table th:nth-child(5) { width: 75px; }
+.attempt-table th:nth-child(6) { width: 280px; }
+.attempt-table th:nth-child(7) { width: 150px; }
+.attempt-table th:nth-child(8) { width: 130px; }
+.attempt-table tr.attempt-item {
+    background: transparent;
+}
+.attempt-table td small {
+    display: block;
+    color: var(--muted);
+    font-size: 11px;
+}
+.attempt-table .attempt-evidence > code,
+.attempt-rule-evidence strong,
+.attempt-rule-evidence span {
+    display: block;
+}
+.attempt-table .attempt-evidence > code {
+    color: var(--el-color-danger);
+}
+.attempt-evidence p {
+    margin: 3px 0;
+}
+.attempt-rule-evidence {
+    margin-top: 5px;
+    color: var(--muted);
+}
+.attempt-time {
+    font-variant-numeric: tabular-nums;
+}
+.log-detail-drawer .log-detail-heading {
+    gap: 10px;
+    margin-bottom: 12px;
+}
+.log-detail-drawer .log-detail-heading h2 {
+    font-size: 16px;
+}
+.log-detail-drawer .log-detail-heading p {
+    margin-top: 2px;
+    font-size: 12px;
+}
+.log-detail-drawer .operation-icon.large {
+    width: 34px;
+    height: 34px;
+    border-radius: 6px;
+    font-size: 18px;
+}
+.log-detail-drawer .detail-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 28px;
+    padding: 9px 12px;
+    margin-bottom: 10px;
+    border-radius: 5px;
+}
+.log-detail-drawer .detail-summary > div {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.log-detail-drawer .detail-summary strong {
+    margin: 0;
+    font-size: 14px;
+}
+.log-detail-drawer .detail-summary span {
+    font-size: 12px;
+}
+.detail-date-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px 24px;
+    margin: 0 0 18px;
+    font-size: 12px;
+    color: var(--muted);
+}
+.detail-date-row strong {
+    color: var(--ink);
+    font-weight: 400;
+    margin-left: 5px;
+}
+.log-detail-drawer .detail-section-heading {
+    margin-bottom: 8px;
+}
+.log-detail-drawer .attempt-budget {
+    margin: 0 0 8px;
+    font-size: 12px;
+}
+@media (max-width: 700px) {
+    .logs-view.management-view .log-filters > .log-search,
+    .logs-view.management-view .log-filters > .date-filter {
+        flex-basis: 100%;
+        width: 100%;
+        min-width: 0;
+        max-width: none;
+    }
+    .logs-view.management-view .logs-options {
+        margin-left: auto;
     }
 }
 </style>

@@ -58,7 +58,7 @@ function view(name, overrides = {}) {
         throw new Error('Unexpected fixture request: ' + path)
     }
     const api = {
-        get: rejectNetwork,
+        get: async (path, body) => path === '/api/plugin/import/jobs' ? { success: true, jobs: [] } : rejectNetwork(path, body),
         post: rejectNetwork,
         put: rejectNetwork,
         delete: rejectNetwork,
@@ -92,6 +92,10 @@ function view(name, overrides = {}) {
         api,
         notifyError: (error) => errors.push(error),
         parseDate,
+        accountSnapshotEpoch: () => 0,
+        readAccountSnapshot: () => null,
+        writeAccountSnapshot: () => {},
+        clearAccountSnapshot: () => {},
         ElMessage: message,
         ElMessageBox: { confirm: async () => {}, alert: async () => {} },
         URL,
@@ -143,8 +147,8 @@ function accountReads(accounts) {
     return async (path) =>
         path === '/api/tokens'
             ? accounts
-            : path === '/api/token-refresh/config'
-              ? { config: { protocol_refresh_enabled: false } }
+            : path === '/api/plugin/import/jobs'
+              ? { success: true, jobs: [] }
               : { accounts: [] }
 }
 
@@ -205,18 +209,19 @@ test('settings overview searches field labels without changing drafts and counts
     assert.equal(s.cardVisible('plugin'), false)
     assert.equal(s.generation.image_timeout, 480)
     s.settingsQuery.value = ''
-    assert.equal(s.matchingCards.value.length, 10)
+    assert.equal(s.matchingCards.value.length, 11)
     assert.equal(s.dirtyCount.value, 3)
     assert.equal(s.sectionVisible('general'), true)
-    assert.equal(s.sectionVisible('generation'), true)
+    assert.equal(s.sectionVisible('generation'), false)
+    assert.equal(s.group.value, 'general')
     s.jumpToSection('generation')
     assert.equal(s.sectionVisible('general'), false)
     assert.equal(s.sectionVisible('generation'), true)
     assert.equal(s.generation.image_timeout, 480)
     assert.equal(s.newKey.value, 'fixture-new-key')
-    s.jumpToSection('all')
+    s.jumpToSection('general')
     assert.equal(s.sectionVisible('general'), true)
-    assert.equal(s.sectionVisible('generation'), true)
+    assert.equal(s.sectionVisible('generation'), false)
 })
 
 test('release information is local on load and checks online versions only on request', async () => {
@@ -247,6 +252,208 @@ test('release information is local on load and checks online versions only on re
     assert.equal(s.release.entries[0].items[0], '合成更新记录')
     s.settingsQuery.value = 'Windows'
     assert.deepEqual(plain(s.matchingCards.value.map((card) => card.id)), ['release'])
+})
+
+test('account error policy loads separately and is searchable without losing rule drafts', async () => {
+    const fixture = view('Settings', {
+        api: {
+            get: async (path) => {
+                if (path === '/api/account-error-policy') return {
+                    success: true,
+                    config: {
+                        rules: 'synthetic quota|LIMIT|24h',
+                        consecutive_failure_threshold: 4,
+                        failure_cooldown_seconds: 120,
+                        max_account_attempts: 5,
+                        builtin_rules: 'PUBLIC_ERROR_USER_QUOTA_REACHED|LIMIT|24h',
+                    },
+                }
+                if (path === '/api/admin/release') return { version: 'fixture' }
+                return { config: {} }
+            },
+        },
+    })
+    const s = fixture.state
+    await s.readSettings()
+    assert.equal(s.loaded.has('errorPolicy'), true)
+    assert.equal(s.accountErrorPolicy.rules, 'synthetic quota|LIMIT|24h')
+    assert.equal(s.accountErrorPolicy.max_account_attempts, 5)
+    assert.equal(s.dirty('errorPolicy', s.accountErrorPolicy), false)
+    s.accountErrorPolicy.rules = 'another synthetic failure|RETRY'
+    s.settingsQuery.value = 'RESOURCE_EXHAUSTED'
+    assert.deepEqual(plain(s.matchingCards.value.map((card) => card.id)), ['errorPolicy'])
+    assert.equal(s.sectionVisible('rules'), true)
+    assert.equal(s.dirty('errorPolicy', s.accountErrorPolicy), true)
+    s.settingsQuery.value = ''
+    assert.equal(s.accountErrorPolicy.rules, 'another synthetic failure|RETRY')
+})
+
+test('account error policy saves only editable fields and snapshots submitted rules while later edits stay dirty', async () => {
+    const response = deferred()
+    const writes = []
+    const fixture = view('Settings', {
+        api: {
+            post: async (path, body) => {
+                writes.push({ path, body: plain(body) })
+                return response.promise
+            },
+        },
+    })
+    const s = fixture.state
+    s.loaded.add('errorPolicy')
+    s.markSnapshot('errorPolicy', s.accountErrorPolicy)
+    s.accountErrorPolicy.rules = 'synthetic quota|LIMIT|24h\nsynthetic delay|DELAY|10s'
+    s.accountErrorPolicy.consecutive_failure_threshold = 5
+    const saving = s.saveAccountErrorPolicy()
+    s.accountErrorPolicy.rules = 'later edit|DISABLE'
+    response.resolve({ success: true, config: { builtin_rules: 'upstream default|LIMIT|1s' } })
+    await saving
+    assert.deepEqual(writes, [{
+        path: '/api/account-error-policy',
+        body: {
+            rules: 'synthetic quota|LIMIT|24h\nsynthetic delay|DELAY|10s',
+            consecutive_failure_threshold: 5,
+            failure_cooldown_seconds: 300,
+            max_account_attempts: 3,
+        },
+    }])
+    assert.equal(JSON.parse(s.snapshots.errorPolicy).rules, writes[0].body.rules)
+    assert.equal(s.accountErrorPolicy.rules, 'later edit|DISABLE')
+    assert.equal('builtin_rules' in s.accountErrorPolicy, false)
+    assert.equal(s.dirty('errorPolicy', s.accountErrorPolicy), true)
+    assert.equal(s.busy.has('errorPolicy'), false)
+})
+
+test('account error policy shows server rule line errors and preserves the rejected draft', async () => {
+    const writes = []
+    const fixture = view('Settings', {
+        api: {
+            post: async (path, body) => {
+                writes.push({ path, body: plain(body) })
+                throw new Error('第 2 行：DELAY 需要 s、m 或 h 时间')
+            },
+        },
+    })
+    const s = fixture.state
+    s.loaded.add('errorPolicy')
+    s.markSnapshot('errorPolicy', s.accountErrorPolicy)
+    s.accountErrorPolicy.rules = 'synthetic quota|LIMIT|24h\ninvalid delay|DELAY'
+    await s.saveAccountErrorPolicy()
+    assert.equal(writes.length, 1)
+    assert.equal(s.accountErrorPolicyError.value, '第 2 行：DELAY 需要 s、m 或 h 时间')
+    assert.equal(s.dirty('errorPolicy', s.accountErrorPolicy), true)
+    assert.equal(s.accountErrorPolicy.rules, writes[0].body.rules)
+    assert.equal(fixture.errors.length, 1)
+    s.accountErrorPolicy.max_account_attempts = 0
+    await s.saveAccountErrorPolicy()
+    assert.equal(writes.length, 1)
+    assert.match(s.accountErrorPolicyError.value, /最多账号尝试次数/)
+    assert.equal(s.busy.has('errorPolicy'), false)
+})
+
+test('the editable rule list can be cleared, saved and restored as an intentionally empty list', async () => {
+    const writes = []
+    const fixture = view('Settings', {
+        api: {
+            get: async (path) => path === '/api/account-error-policy'
+                ? { success: true, config: { rules: '', consecutive_failure_threshold: 3, failure_cooldown_seconds: 300, max_account_attempts: 3 } }
+                : { config: {} },
+            post: async (path, body) => {
+                writes.push({ path, body: plain(body) })
+                return { success: true, config: plain(body) }
+            },
+        },
+    })
+    const s = fixture.state
+    assert.match(s.accountErrorPolicy.rules, /PUBLIC_ERROR_USER_QUOTA_REACHED\|LIMIT\|24h/)
+    await s.readSettings()
+    assert.equal(s.accountErrorPolicy.rules, '')
+    s.fillAccountRuleExamples()
+    assert.match(s.accountErrorPolicy.rules, /RESOURCE_EXHAUSTED\|LIMIT\|5s/)
+    s.accountErrorPolicy.rules = ''
+    await s.saveAccountErrorPolicy()
+    assert.equal(writes[0].body.rules, '')
+    assert.equal(s.accountErrorPolicy.rules, '')
+    assert.equal(s.dirty('errorPolicy', s.accountErrorPolicy), false)
+})
+
+test('Vids config loads independently and saves a submitted snapshot without changing Flow drafts', async () => {
+    const response = deferred()
+    const writes = []
+    const fixture = view('Settings', { api: {
+        get: async (path) => path === '/api/admin/vids/config'
+            ? { config: { keepalive_enabled: false, keepalive_interval_minutes: 15, repair_cooldown_seconds: 60,
+                consecutive_failure_threshold: 4, failure_cooldown_seconds: 120, rules: '' } }
+            : { config: {} },
+        post: async (path, body) => { writes.push({ path, body: plain(body) }); return response.promise },
+    } })
+    const s = fixture.state
+    await s.readSettings()
+    assert.equal(s.loaded.has('vidsConfig'), true)
+    assert.equal(s.vidsConfig.keepalive_enabled, false)
+    assert.equal(s.vidsConfig.rules, '')
+    s.accountErrorPolicy.rules = 'Flow draft|RETRY'
+    s.vidsConfig.rules = 'synthetic failure|LIMIT|5m'
+    const saving = s.saveVidsConfig()
+    s.vidsConfig.keepalive_interval_minutes = 20
+    response.resolve({ success: true })
+    await saving
+    assert.deepEqual(writes, [{ path: '/api/admin/vids/config', body: {
+        keepalive_enabled: false, keepalive_interval_minutes: 15, repair_cooldown_seconds: 60,
+        consecutive_failure_threshold: 4, failure_cooldown_seconds: 120, rules: 'synthetic failure|LIMIT|5m',
+    } }])
+    assert.equal(s.dirty('vidsConfig', s.vidsConfig), true)
+    assert.equal(JSON.parse(s.snapshots.vidsConfig).keepalive_interval_minutes, 15)
+    assert.equal(s.accountErrorPolicy.rules, 'Flow draft|RETRY')
+    assert.equal(s.busy.has('vidsConfig'), false)
+})
+
+test('Vids config failures disable only its save and server validation retains the rule draft', async () => {
+    const fixture = view('Settings', { api: {
+        get: async (path) => {
+            if (path === '/api/admin/vids/config') throw new Error('synthetic unavailable')
+            return { config: {} }
+        },
+        post: async () => { throw new Error('第 1 行：Vids 仅支持 LIMIT、DEACTIVE、DISABLE') },
+    } })
+    const s = fixture.state
+    await s.readSettings()
+    assert.equal(s.loaded.has('vidsConfig'), false)
+    assert.equal(s.loaded.has('errorPolicy'), true)
+    await s.saveVidsConfig()
+    assert.equal(fixture.errors.length, 0)
+    s.loaded.add('vidsConfig')
+    s.markSnapshot('vidsConfig', s.vidsConfig)
+    s.vidsConfig.rules = 'synthetic failure|RETRY'
+    await s.saveVidsConfig()
+    assert.match(s.vidsConfigError.value, /第 1 行/)
+    assert.equal(s.vidsConfig.rules, 'synthetic failure|RETRY')
+    assert.equal(s.dirty('vidsConfig', s.vidsConfig), true)
+    s.vidsConfig.repair_cooldown_seconds = 0
+    await s.saveVidsConfig()
+    assert.match(s.vidsConfigError.value, /修复退避时间/)
+    assert.equal(fixture.errors.length, 1)
+})
+
+test('Vids health exposes independent maintenance and protection while clear preserves manual disable', async () => {
+    const writes = []
+    const fixture = view('Accounts', { api: {
+        get: accountReads([]),
+        post: async (path, body) => { writes.push({ path, body: plain(body) }); return { success: true } },
+    } })
+    const s = fixture.state
+    const vids = { ready: true, identity_verified: true, enabled: true,
+        maintenance: { status: 'retry_wait', last_probe_at: '2026-11-09T03:00:00Z', next_probe_at: '2026-11-09T03:10:00Z', last_error: 'transport_failed' },
+        protection: { status: 'cooldown', reason: 'upstream_http_429', until: '2026-11-09T03:15:00Z' } }
+    assert.equal(s.vidsState(vids), '生成冷却中')
+    assert.equal(s.vidsAttention(vids), true)
+    assert.match(s.vidsSessionTitle(vids), /上次维护.*下次维护.*transport_failed.*upstream_http_429/)
+    assert.equal(s.vidsState({ ...vids, enabled: false }), '已暂停')
+    const row = { id: 81, is_active: false, vids }
+    await s.clearVidsProtection(row)
+    assert.deepEqual(writes, [{ path: '/api/admin/vids/accounts/81/protection/clear', body: {} }])
+    assert.equal(row.is_active, false)
+    assert.match(fixture.notices.at(-1).value, /仍保持手动停用/)
 })
 
 test('release check failures retain the local version and changelog', async () => {
@@ -761,6 +968,22 @@ test('failed settings saves preserve dirty drafts and unloaded groups make no re
     assert.equal(s.busy.size, 0)
 })
 
+test('shared media retention remains editable and saves when Flow URL caching is disabled', async () => {
+    const writes = []
+    const { state: s } = view('Settings', { api: { post: async (path, body) => {
+        writes.push({ path, body: plain(body) }); return { success: true }
+    } } })
+    s.loaded.add('cache')
+    s.cache.enabled = false
+    s.cache.timeout = 0
+    await s.saveCache()
+    assert.deepEqual(writes, [{ path: '/api/cache/config', body: { enabled: false, timeout: 0, base_url: '' } }])
+    const source = readFileSync(new URL('../src/views/SettingsView.vue', import.meta.url), 'utf8')
+    const field = source.slice(source.indexOf('<el-form-item label="缓存保留时间（秒）">'), source.indexOf('<el-form-item label="公开访问地址">'))
+    assert.doesNotMatch(field, /:disabled="!cache.enabled"/)
+    assert.match(field, /Vids 已完成媒体/)
+})
+
 test('a settings save snapshots the submitted value while later edits remain dirty', async () => {
     const response = deferred()
     let received
@@ -782,11 +1005,61 @@ test('a settings save snapshots the submitted value while later edits remain dir
     assert.equal(received.image_timeout, 400)
     assert.equal(JSON.parse(s.snapshots.generation).image_timeout, 400)
     assert.equal(s.dirty('generation', s.generation), true)
-    s.markSnapshot('admin', s.admin)
-    s.admin.error_ban_threshold = 7
+    s.markSnapshot('errorPolicy', s.accountErrorPolicy)
+    s.accountErrorPolicy.consecutive_failure_threshold = 7
     s.loaded.add('debug')
     await s.save('debug', '/api/admin/debug', { enabled: true })
-    assert.equal(s.dirty('admin', s.admin), true)
+    assert.equal(s.dirty('errorPolicy', s.accountErrorPolicy), true)
+})
+
+test('Flow and Vids protection have separate settings entries and ignore the legacy admin threshold', async () => {
+    const fixture = view('Settings', {
+        api: {
+            get: async (path) => {
+                if (path === '/api/admin/config') return {
+                    admin_username: 'fixture-admin', api_key: 'fixture-key',
+                    error_ban_threshold: 99, debug_enabled: false,
+                }
+                if (path === '/api/account-error-policy') return { config: {
+                    rules: 'fixture|LIMIT|3s', consecutive_failure_threshold: 4,
+                    failure_cooldown_seconds: 120, max_account_attempts: 2,
+                } }
+                if (path === '/api/admin/release') return { version: 'fixture' }
+                return { config: {} }
+            },
+        },
+    })
+    const s = fixture.state
+    await s.readSettings()
+    assert.equal('error_ban_threshold' in s.admin, false)
+    assert.equal(s.accountErrorPolicy.consecutive_failure_threshold, 4)
+    assert.equal(s.cardVisible('health'), false)
+    s.settingsQuery.value = '连续失败'
+    assert.deepEqual(plain(s.matchingCards.value.map((item) => item.id)), ['errorPolicy', 'vidsConfig'])
+    assert.equal(s.dirtyCount.value, 0)
+    s.accountErrorPolicy.consecutive_failure_threshold = 6
+    assert.equal(s.dirtyCount.value, 1)
+})
+
+test('Profile maintenance is account-owned and never reads or writes legacy global ST settings', async () => {
+    const settings = view('Settings')
+    assert.equal(settings.state.configSources.some((item) => item.path.startsWith('/api/token-refresh')), false)
+    assert.equal('refreshConfig' in settings.state, false)
+    settings.state.settingsQuery.value = '会话维护间隔'
+    assert.deepEqual(plain(settings.state.matchingCards.value.map((item) => item.id)), ['refresh'])
+
+    const paths = []
+    const accounts = view('Accounts', { api: { get: async (path) => {
+        paths.push(path)
+        if (path === '/api/tokens') return []
+        if (path === '/api/proxy/pool') return { entries: [] }
+        return { accounts: [] }
+    } } })
+    await accounts.state.load(true)
+    assert.equal(paths.some((path) => path.startsWith('/api/token-refresh')), false)
+    assert.equal('protocolRefresh' in accounts.state, false)
+    assert.equal('toggleRefresh' in accounts.state, false)
+    assert.equal('refreshSaving' in accounts.state, false)
 })
 
 test('editing an account preserves unchanged ST and blank password, and keeps rejection visible', async () => {
@@ -1043,6 +1316,32 @@ test('list capability toggles save only the clicked field, suppress duplicate wr
     assert.equal(s.accountSettingBusy(row), false)
 })
 
+test('inline refresh and remark save only their own field and retain unrelated drafts', async () => {
+    const writes = []
+    const { state: s } = view('Accounts', {
+        api: { put: async (path, body) => { writes.push({ path, body: plain(body) }); return { success: true } } },
+    })
+    const row = { id: 12, remark: 'original', auto_refresh_enabled: true, image_enabled: true }
+    s.accounts.value = [row]
+    s.vids.value = [{ token_id: 12, enabled: true }]
+    const draft = s.quickDraft(row)
+    draft.remark = 'unfinished remark'
+    draft.image_enabled = false
+    await s.toggleAccountSetting(row, 'auto_refresh_enabled', false)
+    assert.equal(s.accounts.value[0].auto_refresh_enabled, false)
+    assert.equal(draft.remark, 'unfinished remark')
+    assert.equal(draft.image_enabled, false)
+    assert.equal(s.vids.value[0].auto_refresh_enabled, undefined)
+    await s.saveInlineRemark(s.accounts.value[0])
+    assert.equal(s.accounts.value[0].remark, 'unfinished remark')
+    assert.equal(s.accounts.value[0].image_enabled, true)
+    await s.saveInlineRemark(s.accounts.value[0])
+    assert.deepEqual(writes, [
+        { path: '/api/tokens/12', body: { auto_refresh_enabled: false } },
+        { path: '/api/tokens/12', body: { remark: 'unfinished remark' } },
+    ])
+})
+
 test('list status toggle uses validated enable and disable routes and retains state after rejection', async () => {
     const writes = []
     let rejectEnable = true
@@ -1267,21 +1566,99 @@ test('overlapping account polls share requests and a mutation reload waits for f
             get: async (path) => {
                 requests.push(path)
                 if (path === '/api/tokens') return ++tokenReads === 1 ? old.promise : [{ id: 1, credits: 900 }]
-                return path === '/api/token-refresh/config'
-                    ? { config: { protocol_refresh_enabled: true } }
-                    : { accounts: [] }
+                return { accounts: [] }
             },
         },
     })
     const first = s.load(true)
     const overlapping = s.load(true)
-    assert.equal(requests.length, 5)
+    assert.equal(requests.length, 4)
     const fresh = s.load(true, true)
     const otherFresh = s.load(true, true)
     old.resolve([{ id: 1, credits: 100 }])
     await Promise.all([first, overlapping, fresh, otherFresh])
     assert.equal(tokenReads, 2)
     assert.equal(s.accounts.value[0].credits, 900)
+})
+
+test('account rows and inline operations do not wait for delayed auxiliary requests', async () => {
+    const auxiliary = deferred()
+    const writes = []
+    const row = { id: 1, email: 'fast@example.invalid', image_enabled: true }
+    const { state: s } = view('Accounts', { api: {
+        get: async (path) => path === '/api/tokens' ? [row] : auxiliary.promise,
+        put: async (path, body) => { writes.push({ path, body }); return { success: true } },
+    } })
+    const pending = s.load()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(s.loading.value, false)
+    assert.equal(s.rows.value[0].email, row.email)
+    await s.toggleAccountSetting(s.rows.value[0], 'image_enabled', false)
+    assert.equal(writes.length, 1)
+    assert.equal(s.accounts.value[0].image_enabled, false)
+    auxiliary.resolve({ accounts: [{ token_id: 1, image_enabled: true }], entries: [] })
+    await pending
+    assert.equal(s.accounts.value[0].image_enabled, false)
+    assert.equal(s.vids.value.length, 0, 'pre-mutation Vids responses stay invalidated')
+})
+
+test('manual refresh and delete finish while older auxiliary requests remain pending', async () => {
+    const auxiliary = deferred()
+    let server = [{ id: 1, email: 'synthetic@example.invalid', credits: 100 }]
+    let tokenReads = 0
+    const { state: s } = view('Accounts', { api: {
+        get: async (path) => path === '/api/tokens' ? (++tokenReads, server.map((row) => ({ ...row }))) : auxiliary.promise,
+        delete: async () => { server = []; return { success: true } },
+    } })
+    await s.load()
+    server = [{ ...server[0], credits: 900 }]
+    await s.load()
+    assert.equal(s.accounts.value[0].credits, 900)
+    await s.action(s.rows.value[0], 'delete')
+    assert.equal(s.rows.value.length, 0)
+    assert.equal(s.busy.has('1:delete'), false)
+    assert.equal(tokenReads, 3)
+    auxiliary.resolve({ accounts: [], entries: [] })
+})
+
+test('quick settings invalidate delayed Vids summaries and keep shared capabilities current', async () => {
+    const auxiliary = deferred()
+    const account = { id: 1, email: 'synthetic@example.invalid', video_enabled: true, refresh_interval_minutes: 30 }
+    const { state: s } = view('Accounts', { api: {
+        get: async (path) => path === '/api/tokens' ? [account] : auxiliary.promise,
+        put: async () => ({ success: true }),
+    } })
+    s.vids.value = [{ token_id: 1, video_enabled: true }]
+    await s.load()
+    s.quickDraft(s.rows.value[0]).video_enabled = false
+    await s.saveQuickAccount(s.rows.value[0], 'settings')
+    assert.equal(s.accounts.value[0].video_enabled, false)
+    assert.equal(s.vids.value[0].video_enabled, false)
+    auxiliary.resolve({ accounts: [{ token_id: 1, video_enabled: true, runtime_error: 'old-error' }], entries: [] })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(s.vids.value[0].video_enabled, false)
+    assert.equal(s.vids.value[0].runtime_error, undefined)
+})
+
+test('account reentry paints a short-lived memory snapshot and unmount ignores late responses', async () => {
+    const pending = deferred()
+    const old = { id: 1, email: 'cached@example.invalid' }
+    const saved = []
+    const fixture = view('Accounts', { context: {
+        readAccountSnapshot: () => ({ accounts: [old], vids: [], candidates: [], proxies: [] }),
+        writeAccountSnapshot: (...args) => saved.push(args),
+    }, api: { get: async () => pending.promise } })
+    const s = fixture.state
+    assert.equal(s.loading.value, false)
+    assert.equal(s.rows.value[0].email, old.email)
+    const request = s.load()
+    assert.equal(s.loading.value, false)
+    for (const cleanup of fixture.cleanup) cleanup()
+    pending.resolve([{ id: 2, email: 'late@example.invalid' }])
+    await request
+    await nextTick()
+    assert.equal(s.accounts.value[0].email, old.email)
+    assert.equal(saved.length, 0)
 })
 
 test('account quota polling paints cached balances first, merges requests and retains values on failure', async () => {
@@ -1314,7 +1691,9 @@ test('account quota polling paints cached balances first, merges requests and re
     assert.equal(s.loading.value, false)
     assert.equal(s.rows.value[0].credits, 900)
     assert.equal(s.rows.value[0].vids.last_quota.image.available, 10)
-    assert.equal(s.quotaRefreshing.value, true)
+    assert.equal(s.quotaRefreshing.value, false)
+    assert.equal(reads.filter((path) => path.includes('?refresh=true')).length, 0)
+    now += 15 * 60 * 1000
     const first = s.refreshVidsQuota()
     const second = s.refreshVidsQuota()
     assert.equal(reads.filter((path) => path.includes('?refresh=true')).length, 1)
@@ -1645,12 +2024,64 @@ for (const runtime of ['native', 'docker']) {
                 source: 'lay4flow-import-extension',
                 type: 'import.ready',
                 extension_id: 'unexpected-in-webview',
-                version: '1.8.0',
+                version: '1.8.4',
             },
         })
         assert.equal(s.extensionReady.value, false)
     })
 }
+
+test('desktop browser handoff sends a fixed command without URL or credentials and handles only its own receipt', () => {
+    const commands = []
+    const timers = new Map()
+    let nextTimer = 0
+    const fixture = view('Accounts', {
+        context: {
+            window: {
+                lay4flowDesktop: { runtime: 'native' },
+                chrome: { webview: { postMessage: (message) => commands.push(plain(message)) } },
+            },
+            setTimeout: (callback) => { timers.set(++nextTimer, callback); return nextTimer },
+            clearTimeout: (id) => timers.delete(id),
+        },
+    })
+    const s = fixture.state
+    s.openDesktopLoginBrowser()
+    assert.deepEqual(commands, [{ type: 'desktop.openLoginBrowser', requestId: 'request-fixture-id' }])
+    assert.equal(s.desktopLoginBrowserOpening.value, true)
+    s.openDesktopLoginBrowser()
+    assert.equal(commands.length, 1)
+    s.receiveDesktopLoginBrowser({ data: { type: 'desktop.loginBrowser.status', requestId: 'foreign', state: 'opened' } })
+    assert.equal(s.desktopLoginBrowserOpening.value, true)
+    s.receiveDesktopLoginBrowser({ data: { type: 'desktop.loginBrowser.status', requestId: 'request-fixture-id', state: 'opened' } })
+    assert.equal(s.desktopLoginBrowserOpening.value, false)
+    assert.equal(s.extensionError.value, false)
+    assert.match(s.extensionStatus.value, /本机浏览器已打开/)
+    assert.equal(timers.size, 0)
+})
+
+test('older desktop and browser handoff timeout keep copy-address recovery visible', () => {
+    const missing = view('Accounts', { context: { window: { lay4flowDesktop: { runtime: 'native' } } } })
+    missing.state.openDesktopLoginBrowser()
+    assert.equal(missing.state.desktopLoginBrowserOpening.value, false)
+    assert.equal(missing.state.extensionError.value, true)
+    assert.match(missing.state.extensionStatus.value, /复制管理地址/)
+    let timeout
+    const ready = view('Accounts', {
+        context: {
+            window: {
+                lay4flowDesktop: { runtime: 'native' },
+                chrome: { webview: { postMessage() {} } },
+            },
+            setTimeout: (callback) => { timeout = callback; return 1 },
+        },
+    })
+    ready.state.openDesktopLoginBrowser()
+    timeout()
+    assert.equal(ready.state.desktopLoginBrowserOpening.value, false)
+    assert.equal(ready.state.extensionError.value, true)
+    assert.match(ready.state.extensionStatus.value, /复制管理地址/)
+})
 
 test('extension detection reports silence and releases its timeout when the view closes', () => {
     const timers = new Map()
@@ -1675,9 +2106,9 @@ test('extension detection reports silence and releases its timeout when the view
     callback()
     assert.equal(s.extensionDetecting.value, false)
     assert.equal(s.extensionReady.value, false)
-    assert.match(s.extensionDetectionStatus.value, /未检测到扩展/)
-    assert.match(s.extensionDetectionStatus.value, /1\.7\.3/)
-    assert.match(s.extensionDetectionStatus.value, /刷新当前管理页/)
+    assert.match(s.extensionDetectionStatus.value, /尚未连接登录扩展/)
+    assert.match(s.extensionDetectionStatus.value, /不同端口分别授权/)
+    assert.match(s.extensionDetectionStatus.value, /版本只会在连接成功后校验/)
     s.detectExtension()
     assert.equal(timers.size, 1)
     for (const cleanup of fixture.cleanup) cleanup()
@@ -1700,9 +2131,9 @@ test('extension detection identifies an incompatible bridge and accepts a compat
     assert.equal(s.extensionId.value, '')
     assert.match(s.extensionDetectionStatus.value, /旧扩展 1\.7\.3/)
     assert.match(s.extensionDetectionStatus.value, /停用旧扩展/)
-    ready('current', '1.8.1')
+    ready('current', '1.8.4')
     assert.equal(s.extensionReady.value, true)
-    assert.equal(s.extensionVersion.value, '1.8.1')
+    assert.equal(s.extensionVersion.value, '1.8.4')
     assert.equal(s.extensionId.value, 'current')
     assert.equal(s.extensionDetectionStatus.value, '')
     ready('old', '1.7.3')
@@ -1713,7 +2144,25 @@ test('extension detection identifies an incompatible bridge and accepts a compat
     assert.equal(s.extensionId.value, 'current', 'an active login remains bound to its extension')
 })
 
-test('extension login uses the fingerprint browser network and keeps only a scoped receipt in browser storage', async () => {
+test('extension discovery broadcasts past stale extension ids after a reload', () => {
+    const posts = []
+    const browserWindow = { postMessage: message => posts.push(plain(message)) }
+    const fixture = view('Accounts', { context: { window: browserWindow } })
+    const s = fixture.state
+    s.extensionId.value = 'previous-unpacked-directory'
+    s.extensionSession.value = { session_id: 'stale-receipt' }
+    s.detectExtension()
+    assert.equal(posts.at(-1).type, 'import.hello')
+    assert.equal('extension_id' in posts.at(-1), false)
+    s.receiveExtensionMessage({ source: browserWindow, origin: 'http://fixture.local', data: {
+        source: 'lay4flow-import-extension', type: 'import.ready', extension_id: 'new-unpacked-directory', version: '1.8.4',
+    } })
+    assert.equal(s.extensionReady.value, true)
+    assert.equal(s.extensionId.value, 'new-unpacked-directory')
+    assert.equal(s.extensionSession.value, null)
+})
+
+test('extension login defaults to incognito on the local browser and stores only a scoped receipt', async () => {
     const posts = []
     const bridge = []
     const browserWindow = { postMessage: (message, origin) => bridge.push({ message: plain(message), origin }) }
@@ -1745,14 +2194,14 @@ test('extension login uses the fingerprint browser network and keeps only a scop
             source: 'lay4flow-import-extension',
             type: 'import.ready',
             extension_id: 'fixture-extension',
-            version: '1.8.0',
+            version: '1.8.4',
         },
     })
     await s.startExtensionLogin()
     assert.deepEqual(posts, [{ path: '/api/plugin/import/start', body: {} }])
     assert.equal(bridge[0].origin, 'http://fixture.local')
     assert.equal(bridge[0].message.type, 'import.start.v2')
-    assert.equal(bridge[0].message.payload.login_context, 'profile')
+    assert.equal(bridge[0].message.payload.login_context, 'isolated')
     assert.equal(bridge[0].message.payload.nonce, 'never-persist-this-nonce')
     const stored = JSON.parse(fixture.storage.get('lay4flow.extensionLogin'))
     assert.equal(stored.session_id, 'extension-session')
@@ -1782,7 +2231,7 @@ test('extension bridge ignores foreign origins, extensions and stale sessions be
     const browserWindow = {}
     const fixture = view('Accounts', { context: { window: browserWindow }, api: { get: accountReads([]) } })
     const s = fixture.state
-    const ready = { source: 'lay4flow-import-extension', type: 'import.ready', extension_id: 'owned', version: '1.8.0' }
+    const ready = { source: 'lay4flow-import-extension', type: 'import.ready', extension_id: 'owned', version: '1.8.4' }
     s.receiveExtensionMessage({ source: browserWindow, origin: 'https://foreign.fixture', data: ready })
     assert.equal(s.extensionReady.value, false)
     s.receiveExtensionMessage({ source: browserWindow, origin: 'http://fixture.local', data: ready })
@@ -1810,6 +2259,93 @@ test('extension bridge ignores foreign origins, extensions and stale sessions be
     assert.equal(s.extensionSession.value, null)
     assert.match(s.extensionStatus.value, /verified@fixture.local/)
     assert.equal(fixture.notices.length, 1)
+})
+
+test('queued extension receipts release capture without claiming saved accounts and retain both outcomes', async () => {
+    const browserWindow = {}
+    const job = (id, session, state, extra = {}) => ({ id, session_id: session, state, attempts: 1, ...extra })
+    let jobs = [job('first-job', 'first-session', 'running'), job('second-job', 'second-session', 'queued')]
+    const writes = []
+    const fixture = view('Accounts', {
+        context: { window: browserWindow },
+        api: {
+            get: async (path) =>
+                path === '/api/plugin/import/jobs' ? { success: true, jobs: plain(jobs) } : accountReads([])(path),
+            post: async (path, body) => {
+                writes.push({ path, body: plain(body) })
+                return { success: true, job: { ...jobs[0], state: 'queued', can_retry: false } }
+            },
+        },
+    })
+    const s = fixture.state
+    s.extensionId.value = 'owned'
+    s.extensionSession.value = { session_id: 'first-session', extension_id: 'owned' }
+    fixture.storage.set('lay4flow.extensionLogin', JSON.stringify(s.extensionSession.value))
+    s.receiveExtensionMessage({
+        source: browserWindow,
+        origin: 'http://fixture.local',
+        data: {
+            source: 'lay4flow-import-extension', extension_id: 'owned', session_id: 'first-session',
+            type: 'import.result', success: true, result: { action: 'queued' },
+        },
+    })
+    await s.refreshExtensionJobs()
+    assert.equal(s.extensionSession.value, null)
+    assert.equal(fixture.storage.has('lay4flow.extensionLogin'), false)
+    assert.match(s.extensionStatus.value, /后台验证中/)
+    assert.equal(fixture.notices.some((notice) => notice.kind === 'success'), false)
+    assert.equal(s.extensionJobs.value.length, 2)
+    jobs = [
+        job('first-job', 'first-session', 'failed', { message: '身份验证暂时失败，资料保留', can_retry: true }),
+        job('second-job', 'second-session', 'completed', { email: 'second@example.test', token_id: 22 }),
+    ]
+    await s.refreshExtensionJobs()
+    assert.equal(s.extensionJobs.value[0].state, 'failed')
+    assert.equal(s.extensionJobs.value[1].state, 'completed')
+    assert.ok(fixture.notices.some((notice) => notice.kind === 'warning' && /验证失败/.test(notice.value)))
+    assert.ok(fixture.notices.some((notice) => notice.kind === 'success' && /second@example.test/.test(notice.value)))
+    await s.retryExtensionJob(s.extensionJobs.value[0])
+    assert.deepEqual(writes, [{ path: '/api/plugin/import/jobs/first-job/retry', body: {} }])
+    assert.equal(s.extensionJobs.value[0].id, 'first-job')
+    assert.equal(s.extensionJobs.value[0].state, 'queued')
+    assert.equal(s.extensionJobs.value[1].id, 'second-job')
+    assert.equal(JSON.stringify(writes).includes('cookie'), false)
+    for (const dispose of fixture.cleanup) dispose()
+})
+
+test('durable extension history restores after navigation and survives malformed or failed polling', async () => {
+    const jobs = [
+        { id: 'retained-failure', session_id: 'old-session', state: 'failed', message: '资料已保留', can_retry: true },
+        { id: 'retained-success', state: 'completed', email: 'saved@example.test' },
+    ]
+    let mode = 'valid'
+    const fixture = view('Accounts', {
+        api: {
+            get: async (path) => {
+                if (path !== '/api/plugin/import/jobs') return accountReads([])(path)
+                if (mode === 'offline') throw new Error('temporary disconnect')
+                return mode === 'malformed' ? { success: true } : { success: true, jobs }
+            },
+            post: async () => ({ success: true, job: { id: 'foreign-job', state: 'queued' } }),
+        },
+    })
+    const s = fixture.state
+    await s.refreshExtensionJobs()
+    assert.deepEqual(plain(s.extensionJobs.value.map((job) => job.id)), ['retained-failure', 'retained-success'])
+    assert.equal(fixture.storage.size, 0, 'history recovery never needs browser credentials')
+    for (mode of ['malformed', 'offline']) {
+        await s.refreshExtensionJobs()
+        assert.equal(s.extensionJobs.value[0].id, 'retained-failure')
+        assert.ok(s.extensionJobsError.value)
+        assert.equal(s.extensionJobsLoading.value, false)
+    }
+    await s.retryExtensionJob(s.extensionJobs.value[0])
+    assert.equal(s.extensionJobs.value[0].id, 'retained-failure', 'foreign retry receipt cannot replace the task')
+    assert.equal(fixture.errors.length, 1)
+    for (const dispose of fixture.cleanup) dispose()
+    const previous = s.extensionJobs.value
+    await s.refreshExtensionJobs()
+    assert.equal(s.extensionJobs.value, previous)
 })
 
 test('Cloak login opens without an email and automatically completes from its scoped status', async () => {
@@ -2132,6 +2668,86 @@ test('Profile import submits one background job and releases the modal without w
     assert.equal(fixture.storage.size, 0)
 })
 
+test('Cookie JSON imports one account on the selected fixed proxy without trusting source session metadata', async () => {
+    const writes = []
+    const cookieAccount = {
+        cookies: { SID: 'synthetic-sid', OSID: 'synthetic-osid', '__Secure-1PSID': 'synthetic-1psid' },
+        email: 'cookie@example.test',
+        projectId: 'source-project',
+        sid: '-123456789',
+        userPaygateTier: 'PAYGATE_TIER_ONE',
+    }
+    const fixture = view('Accounts', {
+        api: {
+            post: async (path, body) => {
+                writes.push({ path, body: plain(body) })
+                return {
+                    success: true,
+                    job: {
+                        id: 'cookie-import-job', state: 'queued', total: 1,
+                        items: [{ email: cookieAccount.email, state: 'queued', stage: 'cookie_import' }],
+                    },
+                }
+            },
+        },
+    })
+    const s = fixture.state
+    s.importText.value = JSON.stringify(cookieAccount)
+    s.importProxy.value = 17
+    s.importOpen.value = true
+    await s.importAccounts()
+    assert.deepEqual(writes, [{
+        path: '/api/profile-transfer/jobs',
+        body: { bundles: [cookieAccount], proxy_pool_id: 17, request_id: 'request-fixture-id' },
+    }])
+    assert.equal(s.importOpen.value, false)
+    assert.equal(s.importJobs.value[0].state, 'queued')
+    assert.equal(s.importStageLabel(s.importJobs.value[0].items[0]), '验证 Cookie 登录态')
+    assert.equal('session_token' in writes[0].body.bundles[0], false)
+    assert.equal('browser_profile_status' in writes[0].body.bundles[0], false)
+    assert.equal(fixture.storage.size, 0)
+    assert.equal(fixture.errors.length, 0)
+})
+
+test('Cookie JSON accepts scoped rows and mixed account arrays through the existing import queue', async () => {
+    const cookieAccount = {
+        email: 'scoped@example.test',
+        cookies: [{ name: 'SID', value: 'synthetic-scoped-sid', domain: '.google.com', path: '/' }],
+    }
+    const profileAccount = { format: 'lay4flow-cloak-session', version: 1, account: { email: 'profile@example.test' } }
+    const legacyAccount = { email: 'legacy@example.test', session_token: 'synthetic-session-token' }
+    for (const input of [cookieAccount, [cookieAccount, profileAccount, legacyAccount]]) {
+        const writes = []
+        const fixture = view('Accounts', {
+            api: {
+                post: async (path, body) => {
+                    writes.push({ path, body: plain(body) })
+                    return { success: true, job: { id: 'mixed-job', state: 'queued', total: body.bundles.length, items: [] } }
+                },
+            },
+        })
+        fixture.state.importText.value = JSON.stringify(input)
+        await fixture.state.importAccounts()
+        assert.equal(writes[0].path, '/api/profile-transfer/jobs')
+        assert.deepEqual(writes[0].body.bundles, Array.isArray(input) ? input : [input])
+        assert.equal('proxy_pool_id' in writes[0].body, false)
+        assert.equal(fixture.errors.length, 0)
+    }
+})
+
+test('invalid account JSON stays in the dialog and never starts an import request', async () => {
+    for (const input of ['not JSON', '{}', '[]', '[[]]', '[null]', '[123]', '{"cookies":"not-a-cookie-object"}']) {
+        const fixture = view('Accounts')
+        fixture.state.importOpen.value = true
+        fixture.state.importText.value = input
+        await fixture.state.importAccounts()
+        assert.equal(fixture.requests.length, 0)
+        assert.equal(fixture.state.importOpen.value, true)
+        assert.equal(fixture.state.importing.value, false)
+        assert.equal(fixture.errors.length, 1)
+    }
+})
+
 test('background imports restore after navigation, show server stages and retry failed items without resending credentials', async () => {
     const writes = []
     let tick
@@ -2143,7 +2759,7 @@ test('background imports restore after navigation, show server stages and retry 
         failed: 0,
         can_retry: false,
         items: [
-            { email: 'first@fixture.local', state: 'running', stage: 'cold_check_1', elapsed_seconds: 13 },
+            { email: 'first@fixture.local', state: 'running', stage: 'flow_verification', elapsed_seconds: 13 },
             { email: 'second@fixture.local', state: 'queued', stage: 'queued' },
         ],
     }
@@ -2166,7 +2782,7 @@ test('background imports restore after navigation, show server stages and retry 
     const s = fixture.state
     await s.refreshImportJobs()
     assert.equal(s.activeImportJobs.value.length, 1)
-    assert.match(s.importStageLabel(s.importJobs.value[0].items[0]), /1\/2/)
+    assert.equal(s.importStageLabel(s.importJobs.value[0].items[0]), '验证 Flow 会话')
     assert.equal(s.importJobProgress(s.importJobs.value[0]), '0 / 2 \u9879')
     assert.equal(typeof tick, 'function')
     job = {
@@ -2344,4 +2960,42 @@ test('malformed stored payloads keep log details readable and reject executable 
     assert.equal(s.requestPrompt.value, null)
     assert.equal(s.media.value.length, 1)
     assert.equal(s.media.value[0].url, 'http://fixture.local/tmp/synthetic.png')
+})
+
+test('account plans show verified tier labels and never infer a subscription from credits', () => {
+    const { state: s } = view('Accounts')
+    for (const [value, label] of [
+        ['PAYGATE_TIER_NOT_PAID', 'Free'], ['PAYGATE_TIER_ONE', 'Pro'], ['PAYGATE_TIER_TWO', 'Ultra'],
+        ['PAYGATE_TIER_UNSUBSCRIBED_WITH_CREDITS', '未订阅（有积分）'],
+        [null, '未知'], ['', '未知'], ['PAYGATE_TIER_UNSPECIFIED', '未知'],
+        ['PAYGATE_TIER_ZERO', 'Plus'], ['PAYGATE_TIER_FUTURE', '其他等级'], ['__proto__', '其他等级'],
+    ]) assert.equal(s.tier(value), label)
+    assert.equal(s.accountPlan({ credits: 25000 }), 'unknown')
+    assert.equal(s.accountPlan({ user_paygate_tier: 'PAYGATE_TIER_ONE', credits: 0 }), 'pro')
+    assert.equal(s.accountPlan({ vidsOnly: true }), 'none')
+    assert.match(s.tierTitle({ user_paygate_tier: 'PAYGATE_TIER_ZERO' }), /PAYGATE_TIER_ZERO/)
+})
+
+test('plan filter combines with other account filters and resets pagination', async () => {
+    const { state: s } = view('Accounts')
+    s.accounts.value = [
+        { id: 1, email: 'free@example.invalid', is_active: true, user_paygate_tier: 'PAYGATE_TIER_NOT_PAID' },
+        { id: 2, email: 'pro@example.invalid', is_active: true, user_paygate_tier: 'PAYGATE_TIER_ONE' },
+        { id: 3, email: 'ultra@example.invalid', is_active: false, user_paygate_tier: 'PAYGATE_TIER_TWO' },
+        { id: 4, email: 'unknown@example.invalid', is_active: true },
+        { id: 5, email: 'plus@example.invalid', is_active: true, user_paygate_tier: 'PAYGATE_TIER_ZERO' },
+    ]
+    s.page.value = 3
+    s.plan.value = 'pro'
+    await nextTick()
+    assert.deepEqual(plain(s.filtered.value.map((row) => row.id)), [2])
+    assert.equal(s.page.value, 1)
+    s.plan.value = 'ultra'
+    s.state.value = 'active'
+    assert.equal(s.filtered.value.length, 0)
+    s.state.value = 'all'
+    s.plan.value = 'unknown'
+    assert.deepEqual(plain(s.filtered.value.map((row) => row.id)), [4])
+    s.plan.value = 'plus'
+    assert.deepEqual(plain(s.filtered.value.map((row) => row.id)), [5])
 })

@@ -167,7 +167,11 @@ class ImagePipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.handler.token_manager.record_usage.assert_awaited_once_with(7, is_video=False)
         self.handler.token_manager.record_success.assert_awaited_once_with(7)
         self.handler.token_manager.record_error.assert_not_awaited()
-        self.assertEqual(self.handler.db.add_request_log.await_args.args[0].status_code, 200)
+        self.handler.db.add_request_log.assert_awaited_once()
+        self.assertEqual(self.handler.db.add_request_log.await_args.args[0].status_code, 102)
+        final_log = self.handler.db.update_request_log.await_args.kwargs
+        self.assertEqual(final_log["status_code"], 200)
+        self.assertEqual(final_log["status_text"], "completed")
         await self.assert_released()
 
     async def test_empty_upstream_media_is_http_failure_and_releases_account(self):
@@ -228,10 +232,12 @@ class ImagePipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.handler.token_manager.record_usage.assert_not_awaited()
                 self.handler.token_manager.record_success.assert_not_awaited()
                 self.handler.token_manager.record_error.assert_awaited_once_with(7)
-                log = self.handler.db.add_request_log.await_args.args[0]
-                self.assertEqual(log.status_text, "failed")
-                self.assertEqual(log.status_code, 500)
-                self.assertEqual(json.loads(log.response_body)["error"], "生成结果中的图片媒体无效")
+                log = self.handler.db.update_request_log.await_args.kwargs
+                self.assertEqual(log["status_text"], "failed")
+                self.assertEqual(log["status_code"], 500)
+                self.assertEqual(
+                    json.loads(log["response_body"])["error"], "生成结果中的图片媒体无效"
+                )
                 await self.assert_released()
                 self.handler.load_balancer.release_pending.reset_mock()
                 self.handler.token_manager.record_error.reset_mock()

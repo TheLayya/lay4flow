@@ -108,9 +108,11 @@ class StudioGenerationJobs:
             return
         changed = False
         for item in job["items"]:
-            if item["status"] not in {"unknown", "received", "download_failed"}:
+            if item["status"] not in {"unknown", "received", "download_failed", "completed"}:
                 continue
             value = self.refresh(item)
+            if item["status"] == "completed" and value and value.get("status") != "completed":
+                continue  # Settled generation never regresses during media recovery.
             if value and any(item.get(key) != value[key] for key in value):
                 item.update(value)
                 changed = True

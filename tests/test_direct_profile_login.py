@@ -120,7 +120,7 @@ class DirectProfileLoginTests(unittest.IsolatedAsyncioTestCase):
     async def start(self):
         return await self.viewer.login.start(" User@Example.Invalid ", "", "owner")
 
-    async def test_close_cold_probe_and_project_must_pass_before_new_account_is_enabled(self):
+    async def test_close_and_cold_probe_complete_before_account_enabled_without_project_calls(self):
         receipt = await self.start()
         token_id = receipt["token_id"]
         pending = await self.db.get_token(token_id)
@@ -139,14 +139,6 @@ class DirectProfileLoginTests(unittest.IsolatedAsyncioTestCase):
         protected.write_bytes(b"synthetic Google login state")
         fingerprint = hashlib.sha256(protected.read_bytes()).hexdigest()
 
-        async def prepare(token_id):
-            self.assertFalse((await self.db.get_token(token_id)).is_active)
-            self.assertEqual(self.backend.opens, 3, "cold probe must open the saved Profile")
-            self.assertEqual(self.backend.closed, 3)
-            await self.db.update_token(token_id, current_project_id="synthetic-project")
-            return "synthetic-project"
-
-        self.tokens.ensure_project_exists.side_effect = prepare
         result = await self.viewer.login.complete(
             receipt["session_id"], "owner", receipt["viewer_id"]
         )
@@ -156,8 +148,15 @@ class DirectProfileLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["credits"], 100)
         self.assertTrue(ready.is_active)
         self.assertTrue(ready.auto_refresh_enabled)
+        self.assertEqual(ready.browser_profile_next_at, ready.next_refresh_at)
+        self.assertEqual(
+            (ready.next_refresh_at - ready.last_st_refresh_at).total_seconds(),
+            ready.refresh_interval_minutes * 60,
+        )
         self.assertTrue(ready.image_enabled and ready.video_enabled)
-        self.assertEqual(ready.current_project_id, "synthetic-project")
+        self.assertIsNone(ready.current_project_id)
+        self.assertEqual(self.backend.opens, 3, "cold probe must open the saved Profile")
+        self.assertEqual(self.backend.closed, 3)
         self.assertTrue(ready.st.startswith("profile-login:"))
         self.assertIsNone(ready.at)
         self.assertIsNone(ready.at_expires)
@@ -175,7 +174,7 @@ class DirectProfileLoginTests(unittest.IsolatedAsyncioTestCase):
             await self.viewer.login.complete(receipt["session_id"], "owner", receipt["viewer_id"]),
             result,
         )
-        self.tokens.ensure_project_exists.assert_awaited_once()
+        self.tokens.ensure_project_exists.assert_not_awaited()
 
     async def test_logged_in_browser_completes_with_fresh_live_and_cold_probes(self):
         receipt = await self.start()
@@ -354,12 +353,20 @@ class DirectProfileLoginTests(unittest.IsolatedAsyncioTestCase):
         self.tokens.ensure_project_exists.assert_not_awaited()
         self.backend.identity = "user@example.invalid"
 
-        async def manually_disable(token_id):
-            await self.db.update_token(token_id, ban_reason="manual")
+        update = self.db.update_token_if_credentials_match
 
-        self.tokens.ensure_project_exists.side_effect = manually_disable
-        with self.assertRaises(ViewerError):
-            await self.viewer.login.complete(receipt["session_id"], "owner", receipt["viewer_id"])
+        async def manually_disable(token_id, expected, **updates):
+            if updates.get("is_active") is True:
+                await self.db.update_token(token_id, ban_reason="manual")
+            return await update(token_id, expected, **updates)
+
+        with patch.object(
+            self.db, "update_token_if_credentials_match", side_effect=manually_disable
+        ):
+            with self.assertRaises(ViewerError):
+                await self.viewer.login.complete(
+                    receipt["session_id"], "owner", receipt["viewer_id"]
+                )
         saved = await self.db.get_token(receipt["token_id"])
         self.assertFalse(saved.is_active)
         self.assertEqual(saved.ban_reason, "manual")
@@ -491,18 +498,24 @@ class DirectProfileLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.db.get_all_tokens(), [])
         self.assertEqual(self.viewer.login._sessions, {})
 
-    async def test_project_failure_stays_disabled_and_can_be_retried_without_new_login(self):
+    async def test_project_pool_failure_cannot_fail_verified_login_or_repeat_it(self):
         receipt = await self.start()
         self.tokens.ensure_project_exists.side_effect = RuntimeError("synthetic project failure")
-        with self.assertRaises(ViewerError):
-            await self.viewer.login.complete(receipt["session_id"], "owner", receipt["viewer_id"])
-        self.assertFalse((await self.db.get_token(receipt["token_id"])).is_active)
-        self.tokens.ensure_project_exists.side_effect = None
         result = await self.viewer.login.complete(
             receipt["session_id"], "owner", receipt["viewer_id"]
         )
         self.assertTrue(result["success"])
-        self.assertEqual(len(self.backend.flow_reads), 3)
+        token = await self.db.get_token(receipt["token_id"])
+        self.assertTrue(token.is_active)
+        self.assertTrue(token.auto_refresh_enabled)
+        self.assertEqual(token.browser_profile_status, "ready")
+        self.assertEqual(token.refresh_error, "")
+        self.assertEqual(
+            await self.viewer.login.complete(receipt["session_id"], "owner", receipt["viewer_id"]),
+            result,
+        )
+        self.assertEqual(len(self.backend.flow_reads), 2)
+        self.tokens.ensure_project_exists.assert_not_awaited()
 
     async def test_failed_close_retains_pending_identity_and_profile_lock(self):
         receipt = await self.start()

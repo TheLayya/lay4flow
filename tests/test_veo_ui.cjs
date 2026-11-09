@@ -6,6 +6,7 @@ const vm = require('node:vm');
 
 const html = fs.readFileSync(path.join(__dirname, '../static/test.html'), 'utf8');
 const code = require('./helpers/page_scripts.cjs')(html);
+assert.doesNotMatch(html, /mediaIdGroup|videoMediaId/);
 const elements = new Map();
 function element() {
   return {
@@ -33,7 +34,7 @@ new vm.Script(code).runInContext(context);
 
 (async () => {
   const ids = ['gemini-3.1-flash-image', 'gemini-3.0-pro-image', 'gemini-3.1-flash-image-lite',
-    'imagen-4.0-generate-preview', 'veo_3_1', 'omni_1.1_flash'];
+    'imagen-4.0-generate-preview', 'veo_3_1', 'omni_1.2_flash', 'omni_1.1_flash'];
   const sidebar = () => elements.get('modelSidebar').children.map(item => item.dataset.model);
   assert.deepEqual(sidebar(), ids);
   catalog = json('Object.entries(FALLBACK_MODELS).map(([id, spec]) => ({id, ...spec}))');
@@ -43,28 +44,20 @@ new vm.Script(code).runInContext(context);
   assert.equal(elements.get('videoPriority').value, 'standard');
   assert.deepEqual(options('videoPriority'), ['standard', 'relaxed']);
   assert.equal(elements.get('videoPriorityGroup').style.display, 'block');
+  assert(!options('videoMode').includes('extend'));
   set('videoMode', 'extend'); run('changeMode()');
   assert.deepEqual(options('videoQuality'), ['quality', 'fast', 'lite']);
   assert.equal(elements.get('videoQuality').value, 'fast');
-  assert.equal(elements.get('btnGenerate').disabled, false);
-  assert.equal(elements.get('mediaIdGroup').style.display, 'block');
+  assert.equal(elements.get('btnGenerate').disabled, true);
   assert.equal(elements.get('videoUploadGroup').style.display, 'none');
-  assert.equal(elements.get('videoMode').children.find(item => item.value === 'extend').textContent, '视频续写（Extend）');
   assert.doesNotMatch(elements.get('modeHint').textContent, /Remix/);
-  assert.throws(() => run("buildRequest('continue')"), /媒体 ID/);
-  set('videoMediaId', 'source-video');
-  let body = json("buildRequest('continue')");
-  assert.equal(body.model, 'veo_3_1');
-  assert.deepEqual(body.generationConfig.videoConfig, {
-    mode: 'extend', aspectRatio: '16:9', resolution: '720p', priority: 'standard', quality: 'fast', durationSeconds: 8
-  });
-  assert.equal(body.messages[0].content[1].video_url.url, 'extend://source-video');
+  assert.throws(() => run("buildRequest('continue')"), /Omni 1.2.*上传原视频/);
 
   set('videoMode', 'first_last_frame'); run('changeMode()');
   assert.deepEqual(options('videoQuality'), ['quality', 'fast', 'lite']);
   set('videoQuality', 'lite'); set('videoDuration', 8); set('videoAspect', '9:16');
   run("STATE.video.images = ['data:image/png;base64,A', 'data:image/png;base64,B']; updateParameters()");
-  body = json("buildRequest('transition')");
+  let body = json("buildRequest('transition')");
   assert.equal(body.model, 'veo_3_1');
   assert.deepEqual(body.generationConfig.videoConfig, {
     mode: 'first_last_frame', aspectRatio: '9:16', resolution: '720p', priority: 'standard', quality: 'lite', durationSeconds: 8
@@ -78,7 +71,7 @@ new vm.Script(code).runInContext(context);
   set('videoMode', 'extend'); run('changeMode()');
   assert.equal(elements.get('videoDuration').value, '8');
   assert.equal(elements.get('videoResolution').value, '720p');
-  assert.equal(elements.get('btnGenerate').disabled, false);
+  assert.equal(elements.get('btnGenerate').disabled, true);
 
   // Mode changes derive supported qualities from server capabilities.
   set('videoMode', 'reference_to_video'); set('videoQuality', 'quality'); run('changeMode()');
@@ -122,9 +115,8 @@ new vm.Script(code).runInContext(context);
   assert.deepEqual(options('videoPriority'), ['standard']);
   assert.equal(elements.get('videoPriority').value, 'standard');
   assert.match(elements.get('modeHint').textContent, /仅支持标准/);
-  body = json("buildRequest('continue after relaxed')");
-  assert.equal(body.generationConfig.videoConfig.priority, 'standard');
-  assert.equal(body.generationConfig.videoConfig.quality, 'fast');
+  assert.equal(elements.get('btnGenerate').disabled, true);
+  assert.throws(() => run("buildRequest('continue after relaxed')"), /Omni 1.2.*上传原视频/);
   set('videoMode', 'text_to_video'); run('changeMode()');
   assert.deepEqual(options('videoPriority'), ['standard', 'relaxed']);
   assert.equal(elements.get('videoPriority').value, 'standard');

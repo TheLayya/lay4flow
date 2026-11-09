@@ -103,6 +103,26 @@ class FlowProfileProjectTests(unittest.IsolatedAsyncioTestCase):
             self.context, "UpteDb", ["projects/*", 21], network_step="flow_projects"
         )
 
+    async def test_omitted_repeated_project_field_creates_first_project(self):
+        for listed in ([], [None], [None, "pagination"]):
+            with self.subTest(listed=listed):
+                self.rpc.reset_mock()
+                self.rpc.side_effect = [listed, ["first-project"]]
+                result = await create_profile_project(self.tokens, self.token, "First")
+                self.assertEqual(result.project_id, "first-project")
+                self.assertEqual(self.rpc.await_count, 2)
+                await self.db.delete_project("first-project")
+
+    async def test_malformed_project_collection_prevents_creating_a_remote_project(self):
+        for listed in ({}, None, [False], ["invalid"], [[False]]):
+            with self.subTest(listed=listed):
+                self.rpc.reset_mock()
+                self.rpc.side_effect = [listed, ["must-not-create"]]
+                with self.assertRaises(FlowRPCError):
+                    await create_profile_project(self.tokens, self.token, "First")
+                self.assertEqual(self.rpc.await_count, 1)
+        self.assertEqual(await self.db.get_projects_by_token(self.token_id), [])
+
     async def test_identity_failure_prevents_write_and_database_insert(self):
         self.identity.return_value = {"reason": "identity_mismatch"}
         with self.assertRaises(FlowRPCError):
@@ -226,3 +246,68 @@ class FlowProfileProjectTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     (await self.db.get_token(self.token_id)).current_project_id, "manual-selection"
                 )
+
+    async def test_temporary_expansion_failure_uses_persisted_project_without_replaying_write(self):
+        await self.db.add_project(
+            Project(project_id="saved-id", token_id=self.token_id, project_name="Saved")
+        )
+        pool = ProjectPool(self.db, object(), lambda: 4)
+        create = AsyncMock(side_effect=FlowRPCError("transient_error", "flow_projects"))
+        result = await pool.ensure_project_exists(self.token_id, create_project=create)
+        self.assertEqual(result, "saved-id")
+        create.assert_awaited_once()
+        saved = await self.db.get_token(self.token_id)
+        self.assertEqual(saved.current_project_id, "saved-id")
+        self.assertEqual(saved.proxy_pool_id, self.proxy_id)
+
+    async def test_partial_pool_survives_failure_after_first_project_is_persisted(self):
+        pool = ProjectPool(self.db, object(), lambda: 4)
+
+        async def create(token, index):
+            if index > 1:
+                raise TimeoutError("synthetic creation timeout")
+            project = Project(project_id="first-id", token_id=token.id, project_name="First")
+            project.id = await self.db.add_project(project)
+            return project
+
+        create = AsyncMock(side_effect=create)
+        result = await pool.ensure_project_exists(self.token_id, create_project=create)
+        self.assertEqual(result, "first-id")
+        self.assertEqual(create.await_count, 2)
+        self.assertEqual(len(await self.db.get_projects_by_token(self.token_id)), 1)
+
+    async def test_failed_expansion_cannot_bypass_changed_identity_or_disabled_proxy(self):
+        await self.db.add_project(
+            Project(project_id="saved-id", token_id=self.token_id, project_name="Saved")
+        )
+        pool = ProjectPool(self.db, object(), lambda: 4)
+        for kind in ("email", "proxy_disabled"):
+            with self.subTest(kind=kind):
+                await self.db.update_token(self.token_id, email=self.token.email)
+                await self.db.set_proxy_pool_enabled(self.proxy_id, True)
+
+                async def create(token, index):
+                    await self.change_binding(kind)
+                    raise FlowRPCError("transient_error", "flow_projects")
+
+                with self.assertRaisesRegex(ValueError, "binding changed"):
+                    await pool.ensure_project_exists(self.token_id, create_project=create)
+                self.assertIsNone((await self.db.get_token(self.token_id)).current_project_id)
+
+    async def test_project_rpc_failure_keeps_authentication_reason_and_network_step(self):
+        pool = ProjectPool(self.db, object(), lambda: 4)
+        for reason, has_project in (("login_required", True), ("transient_error", False)):
+            with self.subTest(reason=reason):
+                if has_project:
+                    await self.db.add_project(
+                        Project(project_id="saved-id", token_id=self.token_id, project_name="Saved")
+                    )
+                else:
+                    await self.db.delete_project("saved-id")
+                failure = FlowRPCError(reason, "flow_projects")
+                create = AsyncMock(side_effect=failure)
+                with self.assertRaises(FlowRPCError) as caught:
+                    await pool.ensure_project_exists(self.token_id, create_project=create)
+                self.assertIs(caught.exception, failure)
+                self.assertEqual(caught.exception.network_step, "flow_projects")
+                create.assert_awaited_once()

@@ -113,6 +113,9 @@ class AdminCaptchaConfigTests(unittest.IsolatedAsyncioTestCase):
                 "/api/plugin/import/start",
                 "/api/plugin/import/complete",
                 "/api/plugin/import/extension.zip",
+                "/api/plugin/import/jobs",
+                "/api/plugin/import/jobs/{job_id}",
+                "/api/plugin/import/jobs/{job_id}/retry",
             },
         )
 

@@ -71,6 +71,43 @@ class ProfileSessionRefresherTests(unittest.IsolatedAsyncioTestCase):
         refresher.refresh_in_context.assert_not_awaited()
         manager.mark_blocked.assert_awaited_once_with(token.email, "environment_changed")
 
+    async def test_scheduled_renewal_borrowing_manual_page_reports_validation_only(self):
+        context = SimpleNamespace(new_page=AsyncMock(), add_cookies=AsyncMock())
+        token = SimpleNamespace(email="user@example.com")
+        manager = SimpleNamespace(
+            spec=AsyncMock(return_value=SimpleNamespace(profile_dir="synthetic-profile")),
+            credential_session=Mock(side_effect=AssertionError("opened a second browser")),
+            mark_blocked=AsyncMock(),
+            mark_verified=AsyncMock(),
+        )
+        verifier = SimpleNamespace(verify_environment=AsyncMock(return_value="environment_stable"))
+
+        @asynccontextmanager
+        async def provider(current):
+            self.assertIs(current, token)
+            yield context
+
+        for explicit_context in (True, False):
+            with self.subTest(explicit_context=explicit_context):
+                refresher = ProfileSessionRefresher(
+                    manager, verifier, object(), None if explicit_context else provider
+                )
+                refresher.refresh_in_context = AsyncMock(
+                    return_value={"_validated_session": {"credits": 9}}
+                )
+                if explicit_context:
+                    async with refresher.use_context(token.email, context):
+                        result = await refresher.refresh(token, renew_browser=True)
+                else:
+                    result = await refresher.refresh(token, renew_browser=True)
+                self.assertFalse(result["_browser_renewed"])
+                self.assertEqual(result["_validated_session"]["credits"], 9)
+                refresher.refresh_in_context.assert_awaited_once_with(token, context)
+        context.new_page.assert_not_awaited()
+        context.add_cookies.assert_not_awaited()
+        manager.credential_session.assert_not_called()
+        manager.mark_verified.assert_not_awaited()
+
     async def test_active_context_passes_existing_session_intent_only_when_requested(self):
         manager = SimpleNamespace(
             spec=AsyncMock(return_value=SimpleNamespace(profile_dir="synthetic-profile")),

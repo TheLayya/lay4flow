@@ -25,6 +25,7 @@ from .client import (
     video_feature,
     video_results,
 )
+from .media_cleanup import _atomic_receipt, media_access
 
 KINDS = {
     "video": "vids-video",
@@ -125,6 +126,7 @@ class VidsGateway:
         self._ready = False
         self._closed = False
         self._failed_start = False
+        self._media_access = media_access(self.root)
 
     def _persist_session(self, client):
         if self.session_store is None:
@@ -333,6 +335,12 @@ class VidsGateway:
         return self.root / (generation_id + ".json")
 
     def _save(self, record):
+        if (
+            record.get("id") in getattr(self, "_vids_outcome_tracking", set())
+            and record.get("operation") != "insert"
+        ):
+            record["outcome_tracking_version"] = 1
+        record["updated_at"] = time.time()
         path = self._path(record["id"])
         temporary = path.with_suffix("." + uuid.uuid4().hex + ".tmp")
         with temporary.open("w", encoding="utf-8") as handle:
@@ -355,10 +363,14 @@ class VidsGateway:
         )
         result["content_url"] = (
             f"/v1/vids/generations/{record['id']}/content"
-            if record["status"] == "completed" and record.get("operation") != "insert"
+            if record["status"] == "completed"
+            and record.get("operation") != "insert"
+            and not record.get("media_expired")
             else None
         )
         result["metadata"] = record.get("metadata", {})
+        if record.get("media_expired"):
+            result["media_expired"] = True
         if record.get("error_operation") in {
             "upload-start",
             "upload-finalize",
@@ -651,6 +663,10 @@ class VidsGateway:
                     409, "idempotency_conflict", "Idempotency-Key has different parameters"
                 )
             return self.public(previous)
+        if "source_id" in request and self.get(request["source_id"]).get("media_expired"):
+            raise GatewayError(
+                410, "expired", "Source media has expired; restore its original download first"
+            )
         if self.lock.locked():
             raise GatewayError(429, "busy", "The single-account gateway is busy")
         async with self.lock:
@@ -855,7 +871,20 @@ class VidsGateway:
                 await self._download(record)
             return self.public(record)
 
-    async def _download(self, record):
+    async def _download(self, record, *, restore=False):
+        original = dict(record) if restore else None
+
+        def save():
+            if not restore:
+                self._save(record)
+            elif record.get("status") == "completed" and not record.get("media_expired"):
+                for field in ("updated_at", "completed_at"):
+                    if field in original:
+                        record[field] = original[field]
+                    else:
+                        record.pop(field, None)
+                _atomic_receipt(self._path(record["id"]), record)
+
         try:
             kind = record["kind"]
             resources = (
@@ -867,12 +896,12 @@ class VidsGateway:
             )(record["response"])
             if not resources:
                 record.update(status="no_result", error="upstream_returned_no_media")
-                self._save(record)
+                save()
                 return
             resource = resources[0]
             if kind == "image" and len(resources) != record.get("image_count", 1):
                 record.update(status="specification_mismatch", error="upstream_image_count")
-                self._save(record)
+                save()
                 return
             if kind == "image" and "image_specification" in record:
                 numerator, denominator = map(
@@ -885,7 +914,7 @@ class VidsGateway:
                     record.update(
                         status="specification_mismatch", error="upstream_image_specification"
                     )
-                    self._save(record)
+                    save()
                     return
             if kind == "video" and "video_specification" in record:
                 specification = record["video_specification"]
@@ -896,7 +925,7 @@ class VidsGateway:
                     record.update(
                         status="specification_mismatch", error="upstream_video_specification"
                     )
-                    self._save(record)
+                    save()
                     return
             suffix, mime = {
                 "video": (".mp4", "video/mp4"),
@@ -941,7 +970,7 @@ class VidsGateway:
                     record.update(
                         status="specification_mismatch", error="upstream_video_specification"
                     )
-                    self._save(record)
+                    save()
                     return
                 if "video_specification" in record:
                     specification = record["video_specification"]
@@ -952,7 +981,7 @@ class VidsGateway:
                         record.update(
                             status="specification_mismatch", error="upstream_video_specification"
                         )
-                        self._save(record)
+                        save()
                         return
                 resource = {**resource, **actual}
             if kind in {"speech", "music"} and not (data[:4] == b"RIFF" and data[8:12] == b"WAVE"):
@@ -966,21 +995,34 @@ class VidsGateway:
                 metadata={k: resource[k] for k in ("width", "height", "duration") if k in resource},
             )
             record["metadata"]["bytes"] = len(data)
+            record.pop("media_expired", None)
+            record.pop("media_expired_at", None)
+            record["media_cached_at"] = time.time()
             if len(outputs) > 1:
                 record["outputs"] = outputs
             if kind == "video":
                 record["completed_at"] = int(time.time())
         except asyncio.CancelledError:
             record.update(status="download_failed", error="download_interrupted")
-            self._save(record)
+            save()
             raise
         except Exception:
             record.update(status="download_failed", error="download_failed")
-        self._save(record)
+        save()
 
     async def retry_download(self, generation_id):
         async with self.lock:
             record = self.get(generation_id)
+            if record["status"] == "completed" and record.get("media_expired"):
+                if "response" not in record:
+                    raise GatewayError(410, "expired", "Original media download is unavailable")
+                await self._download(record, restore=True)
+                if record["status"] != "completed" or record.get("media_expired"):
+                    # Recovery cannot rewrite a previously settled paid outcome.
+                    raise GatewayError(
+                        502, "download_failed", "Original media download could not be restored"
+                    )
+                return self.public(record)
             if record["status"] in {"received", "download_failed"}:
                 await self._download(record)
             elif record["status"] != "completed":
@@ -1214,6 +1256,10 @@ class VidsGateway:
         record = self.get(generation_id)
         if record.get("id") != generation_id:
             raise GatewayError(410, "expired", "Generation content is unavailable")
+        if record.get("media_expired"):
+            raise GatewayError(
+                410, "expired", "Generation content has expired; restore its original download"
+            )
         if record["status"] != "completed" or record.get("operation") == "insert":
             raise GatewayError(409, "not_ready", "Generation content is unavailable")
         if index and (
@@ -1228,6 +1274,6 @@ class VidsGateway:
         if suffix is None or record["suffix"] != suffix:
             raise GatewayError(410, "expired", "Generation content is unavailable")
         path = self.root / (generation_id + (f"_{index}" if index else "") + suffix)
-        if path.resolve().parent != self.root or not path.is_file():
+        if path.is_symlink() or path.resolve().parent != self.root or not path.is_file():
             raise GatewayError(410, "expired", "Generation content is unavailable")
         return path, record["mime_type"]

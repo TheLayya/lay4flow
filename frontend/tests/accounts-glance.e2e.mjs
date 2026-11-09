@@ -10,7 +10,7 @@ import { chromium } from 'playwright'
 const base = process.env.FRONTEND_PREVIEW_URL || 'http://127.0.0.1:38126'
 assert.match(base, /^http:\/\/(127\.0\.0\.1|localhost):\d+$/)
 const root = fileURLToPath(new URL('../..', import.meta.url))
-const output = resolve(root, '../../output/accounts-glance')
+const output = resolve(root, 'tmp/accounts-glance')
 const executablePath = [
     process.env.PLAYWRIGHT_BROWSER_PATH,
     'C:/Program Files/Google/Chrome/Application/chrome.exe',
@@ -156,7 +156,7 @@ async function waitText(locator, text) {
 }
 async function open(email, mobile = false) {
     await close()
-    const area = page.locator(mobile ? '.mobile-accounts' : '.accounts-table')
+    const area = page.locator('.accounts-table')
     await area.locator('.account-identity').filter({ hasText: email }).click()
     await drawer.waitFor({ state: 'visible' })
     await waitText(drawer, email)
@@ -225,7 +225,7 @@ try {
     )
     await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
     await refreshedAccounts
-    await healthyRow.locator('.account-identity').filter({ hasText: `只读刷新 ${tokenReadVersion}` }).waitFor()
+    await page.waitForFunction((value) => document.querySelector('.accounts-table input[aria-label="healthy@example.test 备注"]')?.value === value, `只读刷新 ${tokenReadVersion}`)
     await page.locator('.selection-bar').filter({ hasText: '已选择' }).waitFor()
     assert.match(
         await page.locator('.selection-bar').innerText(),
@@ -240,7 +240,7 @@ try {
 
     const nextRead = tokenReadVersion + 1
     await page.locator('.page-heading').getByRole('button', { name: '刷新', exact: true }).click()
-    await healthyRow.locator('.account-identity').filter({ hasText: `只读刷新 ${nextRead}` }).waitFor()
+    await page.waitForFunction((value) => document.querySelector('.accounts-table input[aria-label="healthy@example.test 备注"]')?.value === value, `只读刷新 ${nextRead}`)
     assert.match(await page.locator('.selection-bar').innerText(), /已选择\s*2\s*位成员/)
     const accountSearch = page.locator('.account-toolbar input').first()
     await accountSearch.fill('healthy@example.test')
@@ -269,7 +269,7 @@ try {
     assert.match(await sessions.innerText(), /会话正常/)
     assert.match(await sessions.innerText(), /会话就绪/)
     assert.match(await sessions.innerText(), /身份已验证/)
-    assert.match(await sessions.innerText(), /2026[\s\S]*10[\s\S]*17/)
+    assert.match(await sessions.innerText(), /2026[\s\S]*10[\s\S]*16/)
     for (const selector of ['.account-balances', '.account-session-grid']) await inFirstScreen(selector)
     for (const label of ['刷新会话', '查看浏览器', '重新连接']) {
         const button = drawer.getByRole('button', { name: label, exact: true })
@@ -326,14 +326,14 @@ try {
 
     await close()
     await page.setViewportSize({ width: 390, height: 844 })
-    const mobile = page.locator('.mobile-account').filter({ hasText: 'healthy@example.test' })
-    assert.ok(await mobile.getByRole('checkbox', { name: '选择 healthy@example.test', exact: true }).isChecked())
-    const mobileVids = page.locator('.mobile-account').filter({ hasText: 'vidsonly@example.test' })
-    assert.ok(await mobileVids.getByRole('checkbox', { name: '选择 vidsonly@example.test', exact: true }).isChecked())
-    record('Desktop selection remains checked after switching to the mobile account list')
-    await mobile.locator('.mobile-account-health').waitFor()
+    const mobile = page.locator('.accounts-table .el-table__row').filter({ hasText: 'healthy@example.test' })
+    assert.ok(await mobile.locator('td.el-table-column--selection input').isChecked())
+    const mobileVids = page.locator('.accounts-table .el-table__row').filter({ hasText: 'vidsonly@example.test' })
+    assert.ok(await mobileVids.locator('td.el-table-column--selection input').isChecked())
+    record('Desktop selection remains checked in the narrow horizontally scrolling account table')
+    await mobile.locator('.account-list-health').waitFor()
     assert.match(
-        await mobile.locator('.mobile-account-health').innerText(),
+        await mobile.locator('.account-list-health').innerText(),
         /Flow[\s\S]*会话正常[\s\S]*Vids[\s\S]*会话就绪/,
     )
     await open('healthy@example.test', true)
@@ -352,9 +352,9 @@ try {
         'Mobile overview metadata must be reachable with continuous scrolling',
     )
     await screenshot('healthy-mobile-bottom')
-    record('Mobile list shows both health states and overview scrolls continuously without horizontal overflow')
+    record('Narrow table retains both health states and overview scrolls continuously without document overflow')
 
-    assert.ok(apiReads.some((path) => path.includes('/accounts/detail?refresh=true')))
+    assert.ok(!apiReads.some((path) => path.includes('/accounts/detail?refresh=true')))
     assert.equal(blockedMutations.length, 0, 'Viewing account overview must not attempt writes')
     assert.deepEqual(errors, [])
     record('Read-only regression performs no account, quota, profile or generation mutations')

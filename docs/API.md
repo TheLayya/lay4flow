@@ -80,6 +80,16 @@ Videos 专用接口返回任务对象。保存任务 `id`，查询 `/v1/videos/{
 
 Chat 视频可在 `generationConfig.videoConfig` 中传 `mode`、`durationSeconds`、`resolution`、`aspectRatio` 和模型支持的其他字段。首尾帧使用显式 `mode=first_last_frame`，参考图按首帧、尾帧顺序排列。Veo 续写使用已有媒体的 `extend://MEDIA_ID`。Omni 视频编辑接受源视频和裁剪参数；先读取目录确认支持组合。
 
+新增 `omni_1.2_flash`：文生、单图与参考图可选整数 3–15 秒，首尾帧按当前 Flow 目录开放 3–10 秒。11–15 秒、续写及 1080p 放大需 Plus/Pro/Ultra，4K 需 Ultra；账号调度和提交前实时目录校验均会检查权限。Omni 1.2 编辑可裁剪 3–15 秒，超过 10 秒需订阅。续写的 `mode=extend`、`durationSeconds=3..10` 表示追加秒数，可上传原视频并附 0–3 张参考图。工作台可直接从已有视频作品选择「续写视频」，无需填写媒体 ID；Chat 接口以 `video_url` 传原视频，已有 Flow 媒体的 `extend://MEDIA_ID` 引用保留给程序化集成。旧 `omni_1.1_flash` 保留独立调用，不自动切换新模型或价格。
+
+```json
+{"model":"omni_1.2_flash","prompt":"海边日出，镜头缓慢推进","seconds":"15","size":"1280x720"}
+```
+
+该示例用于 `POST /v1/videos`，需要已配置的订阅账号；仍按标准鉴权与 `Idempotency-Key` 创建任务。能力来自官方目录和本地模拟协议检查，真实付费生成验收单独记录。
+
+Videos 续写入口可通过 multipart 的 `input_video` 上传 3–60 秒、最多 100 MiB 的 MP4，并传 `generationConfig.videoConfig.mode=extend`；`seconds` 表示追加秒数，参考图通过 `input_reference` 或重复的 `input_reference[]` 提供。上传、媒体 ID 与原账号绑定由后台处理，界面无需用户填写标识。程序化集成也可用 `input_video_media_id` 直接引用原 Flow 媒体。服务读取处理后的真实时长，校验最终结果是否等于原片加追加段；1080p/4K 续写要求该总时长不超过 15 秒。
+
 SSE 客户端需检查流内错误与完成标记；HTTP 200 仅表示流已建立。客户端、网关和上游请求均应设置足够的超时，避免连接中断后盲目重发付费生成。
 
 ## Python SDK
@@ -103,6 +113,12 @@ print(result.choices[0].message.content)
 ```
 
 `extra_body` 内容合入 HTTP JSON 顶层。环境变量示例值：`LAY4FLOW_BASE_URL=https://your-host.example/v1`。
+
+## 管理页请求日志
+
+管理员登录后，`GET /api/logs` 返回轻量列表，新增 `attempt_count`（含首次）、`retry_count` 和 `account_count`。旧记录的这些字段为 `null`，表示当时未记录次数。
+
+`GET /api/logs/{id}` 按需返回 `attempt_history`。其中 `attempts` 按发生顺序保存账号、阶段、结果、耗时、错误、命中规则、冷却或等待时长及后续动作。同一创作请求的同账号重试和换号重试更新同一条日志；视频提交受理后仍需等待最终结果。逐次记录仅适用于启用记录后的请求，旧数据不会推测补齐。
 
 ## 部署前提与边界
 

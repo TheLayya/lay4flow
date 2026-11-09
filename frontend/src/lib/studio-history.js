@@ -2,6 +2,20 @@ export const STUDIO_HISTORY_KEY = 'lay4flow_studio_receipts'
 export const STUDIO_HISTORY_LIMIT = 300
 export const STUDIO_HISTORY_OWNER_KEY = `${STUDIO_HISTORY_KEY}:owner`
 
+const removableStates = new Set([
+  'completed',
+  'failed',
+  'no_result',
+  'specification_mismatch',
+  'unknown',
+  'received',
+  'download_failed',
+])
+
+export function canRemoveStudioEntry(entry) {
+  return removableStates.has(entry?.status)
+}
+
 export function studioHistoryKey(namespace) {
   return `${STUDIO_HISTORY_KEY}:v2:${encodeURIComponent(namespace)}`
 }

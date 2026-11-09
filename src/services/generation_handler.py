@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import time
 from contextlib import aclosing, nullcontext
 from pathlib import Path
@@ -28,7 +29,19 @@ from ..core.models import RequestLog, Task
 from ..core.monitoring import record_generation_result
 from .file_cache import FileCache
 from .flow import media as media_protocol
+from .flow.flow_rpc import FlowRPCError
+from .flow.video_extend import (
+    extension_metadata,
+    processed_uploaded_extension,
+    uploaded_extension_duration_ms,
+)
 from .flow_client import validate_video_trim
+from .generation_attempts import (
+    CURRENT_ATTEMPTS,
+    AccountGenerationRetry,
+    GenerationAttempts,
+    GenerationBudgetExceeded,
+)
 from .proxy_manager import AccountProxyUnavailable, ProxyManager
 
 
@@ -268,6 +281,20 @@ class GenerationHandler:
             return
         if not isinstance(generation_options, dict):
             raise ValueError("generation_options must be an object")
+        if (
+            model_config.get("video_type") == "extend"
+            and video_bytes
+            and str(model_config.get("model_key", "")).startswith("macaron_cookie_")
+        ):
+            # Pure validation before account selection or any media upload.
+            duration = uploaded_extension_duration_ms(video_bytes, "video/mp4")
+            if (
+                model_config.get("upsample")
+                and duration + model_config["duration_seconds"] * 1000 > 15000
+            ):
+                raise ValueError(
+                    "Upscaled extension requires original plus added duration of at most 15 seconds"
+                )
         if not {"trimStartMs", "trimEndMs"}.intersection(generation_options):
             return
         if model_config.get("video_type") != "edit":
@@ -275,13 +302,133 @@ class GenerationHandler:
         validate_video_trim(
             generation_options.get("trimStartMs", 0),
             generation_options.get("trimEndMs", 10000),
+            max_duration_ms=model_config.get("max_trim_ms", 10000),
         )
+        if str(model_config.get("model_key", "")).startswith("macaron_cookie_"):
+            span = generation_options.get("trimEndMs", 10000) - generation_options.get(
+                "trimStartMs", 0
+            )
+            if span < 3000:
+                raise ValueError("Omni 1.2 editing requires a segment of at least 3 seconds")
+            if span > model_config.get("duration_seconds", 10) * 1000:
+                raise ValueError("Video trim exceeds the duration encoded by the selected model")
         if not video_bytes:
             raise ValueError(
                 "Video trim requires a video upload; an existing media ID cannot be trimmed"
             )
 
-    async def handle_generation(
+    async def handle_generation(self, *args, **kwargs) -> AsyncGenerator:
+        """Retry confirmed rejected Flow submissions with another eligible account."""
+        policy = getattr(self.token_manager, "generation_error_policy", None)
+        settings = await policy.get_config() if policy is not None else {"max_account_attempts": 1}
+        attempts = GenerationAttempts(max(1, int(config.flow_max_retries)))
+        max_accounts = min(attempts.limit, settings["max_account_attempts"])
+        attempts.accounts_limit = max_accounts
+        try:
+            async with aclosing(
+                self._handle_generation_attempts(attempts, max_accounts, *args, **kwargs)
+            ) as pipeline:
+                async for chunk in pipeline:
+                    yield chunk
+        except (asyncio.CancelledError, GeneratorExit):
+            await self._finalize_generation_log(
+                attempts, "cancelled", 499, "生成已取消: 客户端连接已断开"
+            )
+            raise
+        except Exception as error:
+            await self._finalize_generation_log(attempts, "failed", 500, str(error))
+            raise
+
+    async def _finalize_generation_log(self, attempts, status, status_code, error):
+        """Finalize failures outside the account pipeline, including retry delays."""
+        if not attempts.last_log or attempts.log_state.get("terminal"):
+            return
+        attempts.finalize(status, error)
+        marker = CURRENT_ATTEMPTS.set(attempts)
+        try:
+            await self._log_request(
+                attempts.account_id,
+                attempts.last_log["operation"],
+                attempts.last_log["request_data"],
+                {
+                    "error": error,
+                    "performance": {"request_id": attempts.request_id},
+                },
+                status_code,
+                time.time() - attempts.started_at,
+                log_id=attempts.log_state.get("id"),
+                status_text="failed",
+                progress=attempts.log_state.get("progress", 0),
+            )
+        finally:
+            CURRENT_ATTEMPTS.reset(marker)
+
+    async def _handle_generation_attempts(
+        self, attempts, max_accounts, *args, **kwargs
+    ) -> AsyncGenerator:
+        last_error = None
+        for index in range(max_accounts):
+            pipeline = self._handle_generation_once(*args, **kwargs)
+            try:
+                while True:
+                    marker = CURRENT_ATTEMPTS.set(attempts)
+                    try:
+                        chunk = await anext(pipeline)
+                    finally:
+                        CURRENT_ATTEMPTS.reset(marker)
+                    yield chunk
+            except StopAsyncIteration:
+                return
+            except AccountGenerationRetry as retry:
+                last_error = retry.error
+                attempts.finish("failed", retry.error)
+                if attempts.used <= index:
+                    attempts.used = index + 1
+                if retry.decision.get("action") not in {"RETRY", "DELAY"}:
+                    attempts.excluded.add(retry.token_id)
+                attempts.decision(
+                    retry.decision,
+                    retry=index + 1 < max_accounts and attempts.used < attempts.limit,
+                )
+                if index + 1 >= max_accounts or attempts.used >= attempts.limit:
+                    marker = CURRENT_ATTEMPTS.set(attempts)
+                    try:
+                        if attempts.last_log:
+                            data = attempts.last_log
+                            await self._log_request(
+                                retry.token_id,
+                                data["operation"],
+                                data["request_data"],
+                                {
+                                    "error": str(last_error),
+                                    "performance": {"request_id": attempts.request_id},
+                                },
+                                503,
+                                time.time() - attempts.started_at,
+                                log_id=attempts.log_state.get("id"),
+                                status_text="failed",
+                            )
+                    finally:
+                        CURRENT_ATTEMPTS.reset(marker)
+                    break
+                delay = (
+                    retry.decision.get("seconds", 0)
+                    if retry.decision.get("action") == "DELAY"
+                    else 0
+                )
+                if delay:
+                    await asyncio.sleep(delay)
+            finally:
+                marker = CURRENT_ATTEMPTS.set(attempts)
+                try:
+                    await pipeline.aclose()
+                finally:
+                    CURRENT_ATTEMPTS.reset(marker)
+        yield self._create_error_response(
+            f"生成失败，已达到账号尝试上限：{last_error}", status_code=503
+        )
+
+    async def _handle_generation_once(
         self,
         model: str,
         prompt: str,
@@ -302,7 +449,8 @@ class GenerationHandler:
             images: 图片列表 (bytes格式)
             stream: 是否流式输出
         """
-        start_time = time.time()
+        attempts = CURRENT_ATTEMPTS.get()
+        start_time = attempts.started_at if attempts is not None else time.time()
         public_model = response_model or model
         token = None
         generation_type = None
@@ -310,7 +458,11 @@ class GenerationHandler:
         slot_acquired = False
         submission_lease = None
         submission_error = None
-        request_id = f"gen-{int(start_time * 1000)}-{id(asyncio.current_task())}"
+        request_id = (
+            attempts.request_id
+            if attempts is not None
+            else f"gen-{int(start_time * 1000)}-{id(asyncio.current_task())}"
+        )
         perf_trace: Dict[str, Any] = {
             "request_id": request_id,
             "model": public_model,
@@ -318,9 +470,13 @@ class GenerationHandler:
             "status": "processing",
         }
         generation_result = self._create_generation_result()
+        generation_started = False
+        failure_recorded = False
         response_state = self._create_response_state()
         response_state["base_url"] = (base_url_override or "").strip().rstrip("/") or None
-        request_log_state: Dict[str, Any] = {"id": None, "progress": 0}
+        request_log_state: Dict[str, Any] = (
+            attempts.log_state if attempts is not None else {"id": None, "progress": 0}
+        )
 
         # 防止并发链路复用到上一次请求的指纹上下文
         if hasattr(self.flow_client, "clear_request_fingerprint"):
@@ -359,12 +515,7 @@ class GenerationHandler:
             f"[GENERATION] 开始生成 - 模型: {public_model}, 解析模型: {model}, 类型: {generation_type}, Prompt: {prompt[:50]}..."
         )
 
-        # 向用户展示开始信息
-        if stream:
-            yield self._create_stream_chunk(
-                f"✨ {'视频' if generation_type == 'video' else '图片'}生成任务已启动\n",
-                role="assistant",
-            )
+        if not request_log_state.get("id"):
             request_log_state["id"] = await self._log_request(
                 token_id=None,
                 operation=request_operation,
@@ -379,6 +530,13 @@ class GenerationHandler:
                 duration=0,
                 status_text="started",
                 progress=0,
+            )
+
+        # Persist the request before yielding: clients can close after this chunk.
+        if stream:
+            yield self._create_stream_chunk(
+                f"✨ {'视频' if generation_type == 'video' else '图片'}生成任务已启动\n",
+                role="assistant",
             )
 
         # 2. 选择Token
@@ -434,6 +592,8 @@ class GenerationHandler:
         debug_logger.log_info(f"[GENERATION] 已选择Token: {token.id} ({token.email})")
         pending_token_state["active"] = True
         selected_token_id = token.id
+        if attempts is not None:
+            attempts.select_account(token)
         concurrency_manager = getattr(self, "concurrency_manager", None)
 
         try:
@@ -531,10 +691,27 @@ class GenerationHandler:
                 error_msg = "Token AT无效或刷新失败"
                 debug_logger.log_error(f"[GENERATION] {error_msg}")
                 record_generation_result(generation_type, "failed", time.time() - start_time)
+                await self._log_request(
+                    selected_token_id,
+                    request_operation,
+                    request_payload,
+                    {"error": error_msg, "performance": perf_trace},
+                    503,
+                    time.time() - start_time,
+                    log_id=request_log_state.get("id"),
+                    status_text="failed",
+                    progress=request_log_state.get("progress", 0),
+                )
                 if stream:
                     yield self._create_stream_chunk(f"错误: {error_msg}\n")
                 yield self._create_error_response(error_msg, status_code=503)
                 return
+
+            policy = getattr(self.token_manager, "generation_error_policy", None)
+            if policy is not None and await policy.availability(token.id, model=model):
+                raise AccountGenerationRetry(
+                    RuntimeError("账号进入冷却或异常状态，已跳过"), token.id, {"action": "RETRY"}
+                )
 
             # 4. 确保Project存在
             debug_logger.log_info("[GENERATION] 检查/创建Project...")
@@ -546,6 +723,17 @@ class GenerationHandler:
                 )
                 debug_logger.log_error(f"[GENERATION] {error_msg}")
                 record_generation_result(generation_type, "failed", time.time() - start_time)
+                await self._log_request(
+                    token.id,
+                    request_operation,
+                    request_payload,
+                    {"error": error_msg, "performance": perf_trace},
+                    403,
+                    time.time() - start_time,
+                    log_id=request_log_state.get("id"),
+                    status_text="failed",
+                    progress=request_log_state.get("progress", 0),
+                )
                 if stream:
                     yield self._create_stream_chunk(f"错误: {error_msg}\n")
                 yield self._create_error_response(error_msg, status_code=403)
@@ -586,6 +774,7 @@ class GenerationHandler:
                 )
 
             # 5. 根据类型处理
+            generation_started = True
             generation_pipeline_started_at = time.time()
             if generation_type == "image":
                 debug_logger.log_info("[GENERATION] 开始图片生成流程...")
@@ -644,9 +833,25 @@ class GenerationHandler:
             if not generation_result.get("success"):
                 error_msg = generation_result.get("error_message") or "生成未成功完成"
                 submission_error = error_msg
+                if attempts is not None:
+                    attempts.finish("failed", error_msg, next_action="stop")
                 debug_logger.log_warning(f"[GENERATION] 生成未成功，不扣次数: {error_msg}")
-                if token and self._should_count_token_error(error_msg):
-                    await self.token_manager.record_error(token.id)
+                if token and (
+                    self._should_count_token_error(error_msg)
+                    or (
+                        getattr(self.token_manager, "generation_error_policy", None) is not None
+                        and await self.token_manager.generation_error_policy.match(error_msg)
+                        is not None
+                    )
+                ):
+                    policy = getattr(self.token_manager, "generation_error_policy", None)
+                    failure_recorded = True
+                    if policy is not None:
+                        decision = await policy.record_failure(token.id, error_msg, model=model)
+                        if attempts is not None and decision is not None:
+                            attempts.decision(decision, retry=False)
+                    else:
+                        await self.token_manager.record_error(token.id)
                 duration = time.time() - start_time
                 record_generation_result(generation_type, "failed", duration)
                 perf_trace["status"] = "failed"
@@ -675,6 +880,11 @@ class GenerationHandler:
 
             # 重置错误计数 (请求成功时清空连续错误计数)
             await self.token_manager.record_success(token.id)
+            if attempts is not None:
+                if len(attempts.history) == attempts.account_attempt_start:
+                    attempts.begin("submit")
+                attempts.finish("success", next_action="completed")
+                attempts.history[-1]["next_action"] = "completed"
 
             debug_logger.log_info("[GENERATION] ✅ 生成成功完成")
 
@@ -733,6 +943,8 @@ class GenerationHandler:
             )
 
         except asyncio.CancelledError:
+            if attempts is not None and token:
+                attempts.finish("cancelled", next_action="stop")
             error_msg = "生成已取消: 客户端连接已断开"
             debug_logger.log_warning(f"[GENERATION] ⚠️ {error_msg}")
             duration = time.time() - start_time
@@ -755,10 +967,75 @@ class GenerationHandler:
             raise
         except Exception as e:
             submission_error = e
+            if isinstance(e, AccountGenerationRetry):
+                if attempts is not None:
+                    attempts.finish("failed", e.error)
+                    attempts.decision(
+                        e.decision,
+                        retry=attempts.used < attempts.limit
+                        and attempts.account_runs < attempts.accounts_limit,
+                    )
+                raise
+            if (
+                isinstance(e, FlowRPCError)
+                and e.reason == "account_cooldown"
+                and not generation_result.get("upstream_accepted")
+            ):
+                raise AccountGenerationRetry(e, token.id, {"action": "LIMIT", "seconds": 0})
             error_msg = f"生成失败: {str(e)}"
+            if attempts is not None and token:
+                attempts.finish("failed", e, next_action="stop")
             debug_logger.log_error(f"[GENERATION] 生成失败: {error_msg}")
-            if token:
+            policy = getattr(self.token_manager, "generation_error_policy", None)
+            decision = None
+            matched = await policy.match(e) if token and policy is not None else None
+            if (
+                token
+                and policy is not None
+                and not failure_recorded
+                and not isinstance(e, GenerationBudgetExceeded)
+                and (matched is not None or self._should_count_token_error(e))
+            ):
+                failure_recorded = True
+                decision = await policy.record_failure(token.id, e, model=model)
+                safe_replay = (
+                    not generation_started
+                    or isinstance(e, FlowRPCError)
+                    and (
+                        e.submission_rejected
+                        and e.network_step in {"flow_generate_image", "flow_generate_video"}
+                        or e.network_step
+                        in {"flow_bootstrap", "flow_identity", "flow_models", "flow_credits"}
+                    )
+                ) and not generation_result.get("upstream_accepted")
+                if attempts is not None and decision is not None:
+                    attempts.decision(decision, retry=False)
+                if decision is not None and safe_replay and not video_media_id:
+                    if attempts is not None:
+                        attempts.decision(
+                            decision,
+                            retry=attempts.used < attempts.limit
+                            and attempts.account_runs < attempts.accounts_limit,
+                        )
+                    await self._log_request(
+                        token.id,
+                        request_operation,
+                        request_payload,
+                        {
+                            "error": error_msg,
+                            "rule_action": decision["action"],
+                            "switch_account": True,
+                        },
+                        102,
+                        time.time() - start_time,
+                        log_id=request_log_state.get("id"),
+                        status_text="retrying_account",
+                        progress=request_log_state.get("progress", 0),
+                    )
+                    raise AccountGenerationRetry(e, token.id, decision)
+            if token and policy is None and not failure_recorded:
                 if self._should_count_token_error(e):
+                    failure_recorded = True
                     await self.token_manager.record_error(token.id)
                 else:
                     debug_logger.log_info(
@@ -829,6 +1106,8 @@ class GenerationHandler:
         若将其纳入连续错误，会在回归测试或代理波动时把 token 自动打成 inactive。
         """
         error_text = str(error or "").strip().lower()
+        if isinstance(error, GenerationBudgetExceeded):
+            return False
         if isinstance(error, AccountProxyUnavailable):
             return False
         if ProxyManager.is_submission_transport_error(error):
@@ -965,6 +1244,8 @@ class GenerationHandler:
                         else self._normalize_error_message(exc, max_length=240)
                     )
                 raise
+            if generation_result is not None:
+                generation_result["upstream_accepted"] = True
             if image_trace is not None:
                 image_trace["generate_api_ms"] = int((time.time() - generate_started_at) * 1000)
                 image_trace["upstream_trace"] = upstream_trace
@@ -1269,6 +1550,61 @@ class GenerationHandler:
 
             # 图片数量
             image_count = len(images) if images else 0
+            extension = None
+            if video_type == "extend" and str(model_config.get("model_key", "")).startswith(
+                "macaron_cookie_"
+            ):
+                if video_bytes:
+                    duration_ms = uploaded_extension_duration_ms(video_bytes, video_mime_type)
+                    if (
+                        model_config.get("upsample")
+                        and duration_ms + model_config["duration_seconds"] * 1000 > 15000
+                    ):
+                        raise ValueError(
+                            "Upscaled extension requires original plus added duration of at most 15 seconds"
+                        )
+                    video_media_id = await self.flow_client.upload_video(
+                        token.at,
+                        video_bytes,
+                        video_mime_type,
+                        project_id=project_id,
+                        trim_start_ms=0,
+                        trim_end_ms=duration_ms,
+                        max_duration_ms=60000,
+                    )
+                source = await self.flow_client.check_video_status(
+                    token.at, [{"mediaName": video_media_id, "projectId": project_id}]
+                )
+                extension = extension_metadata(
+                    source, video_media_id, model_config["duration_seconds"]
+                )
+                if video_bytes:
+                    processed_uploaded_extension(extension, duration_ms)
+                if model_config.get("upsample") and extension["expected_duration_ms"] > 15000:
+                    raise ValueError(
+                        "Omni 1.2 upscaled extensions require original plus added duration of at most 15 seconds"
+                    )
+
+            if model_config.get("upsample") and str(model_config.get("model_key", "")).startswith(
+                "macaron_cookie_"
+            ):
+                final_duration = (
+                    (extension["expected_duration_ms"] + 999) // 1000
+                    if extension
+                    else model_config["duration_seconds"]
+                )
+                stages = [
+                    {
+                        "model_key": model_config["upsample"]["model_key"],
+                        "aspect_ratio": model_config["aspect_ratio"],
+                        "duration": final_duration,
+                        "resolution": 3 if "4K" in model_config["upsample"]["resolution"] else 2,
+                        "mode": "upsample",
+                    }
+                ]
+                admit = getattr(self.flow_client, "admit_video_stages", None)
+                if admit is not None:
+                    await admit(stages)
 
             if video_type == "edit":
                 if not video_bytes and not video_media_id:
@@ -1281,7 +1617,7 @@ class GenerationHandler:
                     self._mark_generation_failed(generation_result, error_msg)
                     yield self._create_error_response(error_msg, status_code=400)
                     return
-            elif video_bytes:
+            elif video_bytes and not extension:
                 error_msg = "视频素材仅支持 omni_edit 模型"
                 self._mark_generation_failed(generation_result, error_msg)
                 yield self._create_error_response(error_msg, status_code=400)
@@ -1336,6 +1672,12 @@ class GenerationHandler:
                     yield self._create_error_response(error_msg, status_code=400)
                     return
 
+            elif video_type == "extend" and str(model_config.get("model_key", "")).startswith(
+                "macaron_cookie_"
+            ):
+                if image_count > 3:
+                    raise ValueError("Omni 1.2 Extend accepts at most 3 reference images")
+
             # ========== 上传图片 ==========
             start_media_id = None
             end_media_id = None
@@ -1379,7 +1721,11 @@ class GenerationHandler:
                 debug_logger.log_info(f"[R2V] 上传了 {len(reference_images)} 张参考图片")
 
             # Omni R2V: 参考图上传到 project，随后直接走 batchAsyncGenerateVideoReferenceImages
-            elif video_type in {"omni", "edit"} and images:
+            elif (
+                video_type in {"omni", "edit"}
+                or video_type == "extend"
+                and str(model_config.get("model_key", "")).startswith("macaron_cookie_")
+            ) and images:
                 if stream:
                     yield self._create_stream_chunk(f"上传 {image_count} 张 Omni 参考图片...\n")
 
@@ -1404,7 +1750,12 @@ class GenerationHandler:
                 source_media_id = video_media_id
                 options = generation_options or {}
                 trim_start_ms = options.get("trimStartMs", 0)
-                trim_end_ms = options.get("trimEndMs", 10000)
+                trim_end_ms = options.get(
+                    "trimEndMs",
+                    model_config.get("duration_seconds", 10) * 1000
+                    if str(model_config.get("model_key", "")).startswith("macaron_cookie_")
+                    else 10000,
+                )
                 if video_bytes:
                     source_media_id = await self.flow_client.upload_video(
                         token.at,
@@ -1413,6 +1764,11 @@ class GenerationHandler:
                         project_id=project_id,
                         trim_start_ms=trim_start_ms,
                         trim_end_ms=trim_end_ms,
+                        **(
+                            {"max_duration_ms": model_config["max_trim_ms"]}
+                            if model_config.get("max_trim_ms", 10000) != 10000
+                            else {}
+                        ),
                     )
                     # Upload already trims the source; edit the full resulting asset.
                     trim_start_ms, trim_end_ms = 0, trim_end_ms - trim_start_ms
@@ -1431,6 +1787,8 @@ class GenerationHandler:
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
                 )
+                if model_config.get("max_trim_ms", 10000) != 10000:
+                    edit_kwargs["max_duration_ms"] = model_config["max_trim_ms"]
                 result = await self.flow_client.generate_video_edit(**edit_kwargs)
             elif video_type == "i2v" and start_media_id:
                 if end_media_id:
@@ -1526,6 +1884,7 @@ class GenerationHandler:
                     user_paygate_tier=normalized_tier,
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
+                    **({"reference_images": reference_images} if reference_images else {}),
                 )
 
             # T2V 或 R2V无图: 纯文本生成
@@ -1545,6 +1904,8 @@ class GenerationHandler:
                 video_trace["submit_generation_ms"] = int((time.time() - submit_started_at) * 1000)
 
             # 获取task_id和operations
+            if generation_result is not None:
+                generation_result["upstream_accepted"] = True
             operations = result.get("operations", [])
             if not operations:
                 self._mark_generation_failed(
@@ -1581,6 +1942,14 @@ class GenerationHandler:
 
             # 检查是否需要放大
             upsample_config = model_config.get("upsample")
+            if upsample_config and str(model_config.get("model_key", "")).startswith(
+                "macaron_cookie_"
+            ):
+                upsample_config = {
+                    **upsample_config,
+                    "omni12": True,
+                    "duration_seconds": model_config.get("duration_seconds"),
+                }
 
             # 如果是 extend，传入源视频 media_id 用于后续拼接
             extend_source_id = video_media_id if video_type == "extend" else None
@@ -1594,6 +1963,7 @@ class GenerationHandler:
                 response_state,
                 request_log_state,
                 extend_source_media_id=extend_source_id,
+                **({"extension": extension} if extension is not None else {}),
             ):
                 yield chunk
 
@@ -1611,6 +1981,7 @@ class GenerationHandler:
         response_state: Optional[Dict[str, Any]] = None,
         request_log_state: Optional[Dict[str, Any]] = None,
         extend_source_media_id: Optional[str] = None,
+        extension: Optional[Dict] = None,
     ) -> AsyncGenerator:
         """轮询视频生成结果
 
@@ -1745,6 +2116,30 @@ class GenerationHandler:
                             )
 
                         try:
+                            upscale_extra = {}
+                            if upsample_config.get("omni12"):
+                                actual_duration = video_info.get("duration")
+                                if actual_duration is None:
+                                    # Extend can produce a longer combined clip;
+                                    # added seconds do not describe its output.
+                                    actual_duration = (
+                                        upsample_config.get("duration_seconds")
+                                        if not extend_source_media_id
+                                        else None
+                                    )
+                                try:
+                                    actual_duration = math.ceil(
+                                        float(str(actual_duration).removesuffix("s"))
+                                    )
+                                except (TypeError, ValueError, OverflowError):
+                                    raise ValueError(
+                                        "Omni 1.2 upscale requires the completed source duration"
+                                    ) from None
+                                if not 3 <= actual_duration <= 15:
+                                    raise ValueError(
+                                        "Omni 1.2 upscale supports completed sources from 3 to 15 seconds"
+                                    )
+                                upscale_extra["duration"] = actual_duration
                             # 提交放大任务
                             upsample_result = await self.flow_client.upsample_video(
                                 at=token.at,
@@ -1756,6 +2151,7 @@ class GenerationHandler:
                                 user_paygate_tier=normalized_tier,
                                 token_id=token.id,
                                 token_video_concurrency=token.video_concurrency,
+                                **upscale_extra,
                             )
 
                             upsample_operations = upsample_result.get("operations", [])
@@ -1773,6 +2169,7 @@ class GenerationHandler:
                                     generation_result,
                                     response_state,
                                     request_log_state,
+                                    **({"extension": extension} if extension is not None else {}),
                                 ):
                                     yield chunk
                                 return
@@ -1838,6 +2235,7 @@ class GenerationHandler:
                         extend_source_media_id
                         and video_media_id
                         and getattr(token, "browser_profile_source", "") != "cloak"
+                        and extension is None
                     ):
                         try:
                             if stream:
@@ -1969,6 +2367,7 @@ class GenerationHandler:
                         "aspectRatio": aspect_ratio,
                         "model": resolved_video.get("model"),
                         "duration": resolved_video.get("duration"),
+                        **({"extension": extension} if extension is not None else {}),
                     }
 
                     # 返回结果
@@ -2073,6 +2472,8 @@ class GenerationHandler:
                     media["mime_type"] = "video/mp4"
                     if assets.get("mediaGenerationId"):
                         media["media_id"] = assets["mediaGenerationId"]
+                    if assets.get("extension"):
+                        media["extension"] = dict(assets["extension"])
                 payload["media"] = media
                 choices[0].setdefault("delta" if streaming else "message", {})["media"] = media
                 payload["progress"] = 100
@@ -2291,6 +2692,16 @@ class GenerationHandler:
         }
         if isinstance(response_extra, dict):
             payload.update(response_extra)
+        attempts = CURRENT_ATTEMPTS.get()
+        summary = {}
+        if attempts is not None:
+            history = attempts.snapshot()
+            payload["attempt_history"] = history
+            summary = {
+                "attempt_count": history["total_attempts"],
+                "retry_count": history["retry_count"],
+                "account_count": history["account_count"],
+            }
 
         should_write = (
             safe_progress in (0, 100)
@@ -2312,6 +2723,7 @@ class GenerationHandler:
                 duration=0,
                 status_text=status_text,
                 progress=safe_progress,
+                **summary,
             )
         except Exception as e:
             debug_logger.log_error(f"Failed to update request log progress: {e}")
@@ -2330,6 +2742,28 @@ class GenerationHandler:
     ):
         """Update the existing request log, or create one when no log_id is set."""
         try:
+            attempts = CURRENT_ATTEMPTS.get()
+            summary = {}
+            if attempts is not None:
+                response_data = dict(response_data)
+                if status_code == 200 or status_code >= 400:
+                    attempts.finalize(
+                        "success"
+                        if status_code == 200
+                        else "cancelled"
+                        if status_code == 499
+                        else "failed",
+                        response_data.get("error"),
+                    )
+                history = attempts.snapshot()
+                response_data["attempt_history"] = history
+                summary = {
+                    "attempt_count": history["total_attempts"],
+                    "retry_count": history["retry_count"],
+                    "account_count": history["account_count"],
+                }
+                log_id = log_id or attempts.log_state.get("id")
+                attempts.last_log = {"operation": operation, "request_data": request_data}
             effective_status_text = status_text or (
                 "completed"
                 if status_code == 200
@@ -2356,7 +2790,10 @@ class GenerationHandler:
                     duration=duration,
                     status_text=effective_status_text,
                     progress=effective_progress,
+                    **summary,
                 )
+                if attempts is not None:
+                    attempts.log_state["terminal"] = status_code == 200 or status_code >= 400
                 return log_id
 
             log = RequestLog(
@@ -2368,8 +2805,13 @@ class GenerationHandler:
                 duration=duration,
                 status_text=effective_status_text,
                 progress=effective_progress,
+                **summary,
             )
-            return await self.db.add_request_log(log)
+            created = await self.db.add_request_log(log)
+            if attempts is not None:
+                attempts.log_state["id"] = created
+                attempts.log_state["terminal"] = status_code == 200 or status_code >= 400
+            return created
         except Exception as e:
             debug_logger.log_error(f"Failed to log request: {e}")
             return None

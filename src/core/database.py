@@ -63,14 +63,44 @@ class Database:
         """Open a configured SQLite connection and optionally serialize writes."""
         if write:
             async with self._write_lock:
-                async with aiosqlite.connect(self.db_path, timeout=self._connect_timeout) as db:
-                    await self._configure_connection(db)
+                async with self._connection() as db:
                     yield db
             return
 
-        async with aiosqlite.connect(self.db_path, timeout=self._connect_timeout) as db:
+        async with self._connection() as db:
+            yield db
+
+    @staticmethod
+    async def _finish_connection_task(awaitable):
+        """Do not detach SQLite worker cleanup when shutdown cancels a task."""
+        task = asyncio.ensure_future(awaitable)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    pass
+            task.result()
+            raise
+
+    @asynccontextmanager
+    async def _connection(self):
+        connection = aiosqlite.connect(self.db_path, timeout=self._connect_timeout)
+        # aiosqlite 0.21 does not stop its worker if __aenter__ is cancelled.
+        # Finish connecting before closing it, while preserving cancellation.
+        opening = asyncio.ensure_future(connection)
+        try:
+            try:
+                db = await asyncio.shield(opening)
+            except BaseException:
+                await self._finish_connection_task(opening)
+                raise
             await self._configure_connection(db)
             yield db
+        finally:
+            await self._finish_connection_task(connection.close())
 
     async def _table_exists(self, db, table_name: str) -> bool:
         """Check if a table exists in the database"""

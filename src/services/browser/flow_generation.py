@@ -17,6 +17,7 @@ from ..flow.angular_images import (
 )
 from ..flow.flow_rpc import FlowRPCError, flow_rpc
 from ..flow.remote_captcha import RemoteCaptchaError
+from ..generation_attempts import CURRENT_ATTEMPTS
 from ..project_pool import flow_session_binding
 from .flow_session import account_http_session
 from .token_account_probe import TokenManagerAccountProbe
@@ -27,6 +28,20 @@ class FlowProfileGeneration:
         self.client, self.tokens, self.token = client, tokens, token
         self._request_context = None
         self._identity_verified = False
+        self._required_video_stages = []
+
+    async def admit_video_stages(self, stages):
+        """Validate the complete paid output plan before any native submission."""
+        from ..flow.angular_video import resolve_video_usage
+
+        async with self._context() as (context, _):
+            await self._verified(context)
+            models = await self._call(context, MODELS_RPC, [], network_step="flow_models")
+            credits = await self._call(context, "nzlxg", [], network_step="flow_credits")
+            tier = credits[3] if isinstance(credits, list) and len(credits) > 3 else None
+            for stage in stages:
+                resolve_video_usage(models, service_tier=tier, **stage)
+        self._required_video_stages = [dict(stage) for stage in stages]
 
     @asynccontextmanager
     async def session(self):
@@ -65,6 +80,12 @@ class FlowProfileGeneration:
                 f"[FLOW_BINDING] Token {self.token.id}: changed_fields={','.join(changed)}"
             )
             raise FlowRPCError("account_changed", "flow_generation")
+        if not read_only:
+            policy = getattr(self.tokens, "generation_error_policy", None)
+            if policy is not None and await policy.availability(self.token.id):
+                error = FlowRPCError("account_cooldown", "flow_generation")
+                error.submission_rejected = True
+                raise error
 
     @asynccontextmanager
     async def _context(self, *, read_only=False):
@@ -134,6 +155,9 @@ class FlowProfileGeneration:
             )
             batch_id, media_id, workflow_id = (str(uuid.uuid4()) for _ in range(3))
             for attempt in range(max(1, config.flow_max_retries)):
+                budget = CURRENT_ATTEMPTS.get()
+                if budget is not None:
+                    budget.take()
                 started = time.monotonic()
                 browser_id = None
                 record = {"attempt": attempt + 1, "recaptcha_ok": False}
@@ -162,6 +186,8 @@ class FlowProfileGeneration:
                     )
                     if progress:
                         await progress("submitting_image", 48)
+                    if budget is not None:
+                        budget.stage("submit")
                     response = await self._call(
                         context,
                         IMAGE_RPC,
@@ -172,9 +198,13 @@ class FlowProfileGeneration:
                     )
                     result = parse_image_response(response)
                     record["success"] = True
+                    if budget is not None:
+                        budget.finish("success", next_action="completed")
                     trace["final_success_attempt"] = attempt + 1
                     return result, batch_id, trace
                 except Exception as error:
+                    if budget is not None:
+                        budget.finish("failed", error, next_action="stop")
                     record.update(success=False, error=str(error)[:240])
                     error.flow_retry_trace = trace
                     # An unknown submission outcome must not be posted again.
@@ -186,9 +216,14 @@ class FlowProfileGeneration:
                             and error.retryable
                         )
                         or attempt + 1 >= config.flow_max_retries
+                        or budget is not None
+                        and budget.used >= budget.limit
                     ):
                         raise
                     if isinstance(error, RemoteCaptchaError):
+                        if budget is not None:
+                            budget.history[-1]["next_action"] = "retry_same_account"
+                            budget.history[-1]["delay_seconds"] = min(attempt + 1, 3)
                         await asyncio.sleep(min(attempt + 1, 3))
                 finally:
                     record["duration_ms"] = int((time.monotonic() - started) * 1000)
@@ -280,10 +315,18 @@ class FlowProfileGeneration:
                 duration=duration,
                 mode=mode,
             )
+            # Membership/catalog permissions may change while inputs upload.
+            # Check the requested final resolution again before native billing.
+            if mode != "upsample":
+                for stage in self._required_video_stages:
+                    resolve_video_usage(models, service_tier=service_tier, **stage)
             for name in ("batch_id", "media_id", "workflow_id"):
                 kwargs[name] = kwargs.get(name) or str(uuid.uuid4())
             max_attempts = max(1, config.flow_max_retries)
             for attempt in range(max_attempts):
+                budget = CURRENT_ATTEMPTS.get()
+                if budget is not None:
+                    budget.take()
                 browser_id = None
                 rejection_reason = None
                 delay = min(attempt + 1, 3)
@@ -303,7 +346,9 @@ class FlowProfileGeneration:
                         captcha_token=captcha,
                         **kwargs,
                     )
-                    return parse_video_response(
+                    if budget is not None:
+                        budget.stage("submit")
+                    result = parse_video_response(
                         await self._call(
                             context,
                             VIDEO_RPCS[mode],
@@ -314,7 +359,13 @@ class FlowProfileGeneration:
                         ),
                         project_id,
                     )
+                    if budget is not None:
+                        budget.stage("polling")
+                        budget.finish("accepted", next_action="polling")
+                    return result
                 except (RemoteCaptchaError, FlowRPCError) as error:
+                    if budget is not None:
+                        budget.finish("failed", error, next_action="stop")
                     # A typed RPC rejection without a success payload is known
                     # not to have accepted this write. Network timeouts and
                     # mixed/unknown outcomes must never submit another video.
@@ -336,17 +387,29 @@ class FlowProfileGeneration:
                             else "upstream_rejected"
                         )
                         delay = min(2 ** (attempt + 1), 10) + random.uniform(0, 1)
+                    # Configured account actions belong to the outer selector,
+                    # which can exclude this account and release all its leases.
+                    policy = getattr(self.tokens, "generation_error_policy", None)
+                    if confirmed and policy is not None and await policy.match(error) is not None:
+                        raise
                     retryable = error.retryable and (
                         isinstance(error, RemoteCaptchaError)
                         or confirmed
                         and error.reason == "transient_error"
                     )
-                    if not retryable or attempt + 1 >= max_attempts:
+                    if (
+                        not retryable
+                        or attempt + 1 >= max_attempts
+                        or (budget is not None and budget.used >= budget.limit)
+                    ):
                         raise
                     debug_logger.log_warning(
                         f"[VIDEO_RETRY] Token {self.token.id}: {error}; "
                         f"attempt={attempt + 1}/{max_attempts}; delay={delay:.1f}s"
                     )
+                    if budget is not None:
+                        budget.history[-1]["next_action"] = "retry_same_account"
+                        budget.history[-1]["delay_seconds"] = round(delay, 2)
                 finally:
                     if browser_id:
                         if rejection_reason:
@@ -375,7 +438,16 @@ class FlowProfileGeneration:
                 project_id = self.token.current_project_id
             return parse_media_response(payload, project_id)
 
-    async def upload_video(self, project_id, video_bytes, mime_type, trim_start_ms, trim_end_ms):
+    async def upload_video(
+        self,
+        project_id,
+        video_bytes,
+        mime_type,
+        trim_start_ms,
+        trim_end_ms,
+        *,
+        max_duration_ms=10000,
+    ):
         from .flow_video_upload import upload_profile_video
 
         async with self._context() as (context, proxy):
@@ -388,6 +460,7 @@ class FlowProfileGeneration:
                 mime_type,
                 trim_start_ms,
                 trim_end_ms,
+                **({"max_duration_ms": max_duration_ms} if max_duration_ms != 10000 else {}),
             )
             return media_name
 

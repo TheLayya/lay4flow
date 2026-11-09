@@ -657,6 +657,9 @@ class SchemaManager:
                     duration FLOAT NOT NULL,
                     status_text TEXT DEFAULT '',
                     progress INTEGER DEFAULT 0,
+                    attempt_count INTEGER,
+                    retry_count INTEGER,
+                    account_count INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (token_id) REFERENCES tokens(id)
@@ -821,6 +824,9 @@ class SchemaManager:
                         duration FLOAT NOT NULL,
                         status_text TEXT DEFAULT '',
                         progress INTEGER DEFAULT 0,
+                        attempt_count INTEGER,
+                        retry_count INTEGER,
+                        account_count INTEGER,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (token_id) REFERENCES tokens(id)
@@ -861,6 +867,11 @@ class SchemaManager:
                 await db.execute("ALTER TABLE request_logs ADD COLUMN progress INTEGER DEFAULT 0")
             if not await self._database._column_exists(db, "request_logs", "updated_at"):
                 await db.execute("ALTER TABLE request_logs ADD COLUMN updated_at TIMESTAMP")
+            # Do not backfill zeros: legacy rows did not record whether retries
+            # happened, so their unknown values must remain distinguishable.
+            for column in ("attempt_count", "retry_count", "account_count"):
+                if not await self._database._column_exists(db, "request_logs", column):
+                    await db.execute(f"ALTER TABLE request_logs ADD COLUMN {column} INTEGER")
             await db.execute(
                 "UPDATE request_logs SET updated_at = created_at WHERE updated_at IS NULL"
             )

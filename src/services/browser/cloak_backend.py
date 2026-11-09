@@ -51,6 +51,8 @@ class CloakBrowserBackend:
         if headless is not None:
             options["headless"] = headless
         self._check_launch_settings(profile_dir, options)
+        if self._session_restore_enabled(profile_dir):
+            self._prepare_restore_preferences(profile_dir)
         # Keep headed Profile identity unchanged; background windows use a
         # separate desktop that is never exposed through the viewer's VNC.
         if display:
@@ -101,12 +103,84 @@ class CloakBrowserBackend:
         args = list(options.pop("args", ()))
         if any(arg == "--fingerprint" or arg.startswith("--fingerprint=") for arg in args):
             raise ValueError("fingerprint seed is owned by the profile manager")
-        for flag in ("--disable-breakpad", "--disable-crash-reporter"):
+        for flag in (
+            "--disable-breakpad",
+            "--disable-crash-reporter",
+            # Chromium 146 blocks third-party cookies by default (Tracking
+            # Protection / 3PCD). Google's Flow login spans accounts.google.com
+            # and flow.google.com, so blocking cross-site cookies drops the
+            # session on the next flow_bootstrap probe ("login_required").
+            "--disable-features=TrackingProtection3pcd",
+        ):
             if flag not in args:
                 args.append(flag)
+        if self._session_restore_enabled(profile_dir) and "--restore-last-session" not in args:
+            args.append("--restore-last-session")
         args.append(f"--fingerprint={self._profile_seed(profile_dir)}")
         options["args"] = args
         return options
+
+    @staticmethod
+    def _session_restore_enabled(profile_dir: Path) -> bool:
+        marker = profile_dir / "session_restore.json"
+        if marker.is_symlink():
+            raise ValueError("Profile session restoration path is invalid")
+        try:
+            values = json.loads(marker.read_text(encoding="utf-8"))
+            return (
+                isinstance(values, dict)
+                and type(values.get("version")) is int
+                and values["version"] == 1
+            )
+        except (OSError, ValueError, AttributeError):
+            return False
+
+    @staticmethod
+    def _prepare_restore_preferences(profile_dir: Path) -> None:
+        """Preserve session cookies without inventing their server-side expiry."""
+        preference = profile_dir / "Default" / "Preferences"
+        if preference.is_symlink() or preference.parent.is_symlink():
+            raise ValueError("Profile preferences path is invalid")
+        if preference.exists():
+            values = json.loads(preference.read_text(encoding="utf-8"))
+            if not isinstance(values, dict) or not isinstance(values.get("session", {}), dict):
+                raise ValueError("Profile preferences are invalid")
+        else:
+            values = {}
+        values.setdefault("session", {})["restore_on_startup"] = 1
+        preference.parent.mkdir(parents=True, exist_ok=True)
+        temporary = preference.with_suffix(".restore.tmp")
+        if temporary.is_symlink():
+            raise ValueError("Profile preferences path is invalid")
+        temporary.write_text(json.dumps(values, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(preference)
+
+    @staticmethod
+    def prepare_session_restore(profile_dir: Path) -> None:
+        """Opt a new, closed Profile into persistent browser session restoration.
+
+        Existing Profiles keep their exact launch digest. Only Profiles that
+        already opted in can call this again after their first browser launch.
+        """
+        profile_dir = Path(profile_dir)
+        metadata = profile_dir / "metadata.json"
+        if metadata.is_symlink() or profile_dir.is_symlink():
+            raise ValueError("Profile metadata path is invalid")
+        metadata_values = json.loads(metadata.read_text(encoding="utf-8"))
+        if not isinstance(metadata_values, dict):
+            raise ValueError("Profile metadata is invalid")
+        CloakBrowserBackend._profile_seed(profile_dir)
+        marker = profile_dir / "session_restore.json"
+        temporary = marker.with_suffix(".restore.tmp")
+        if marker.is_symlink() or temporary.is_symlink():
+            raise ValueError("Profile session restoration path is invalid")
+        if (
+            profile_dir / "launch_settings.sha256"
+        ).exists() and not CloakBrowserBackend._session_restore_enabled(profile_dir):
+            raise ValueError("Existing Profile session restoration requires explicit migration")
+        CloakBrowserBackend._prepare_restore_preferences(profile_dir)
+        temporary.write_text(json.dumps({"version": 1}), encoding="utf-8")
+        temporary.replace(marker)
 
     def migrate_proxy_settings(
         self, staged_profile: Path, *, old_proxy_url: str, new_proxy_url: str

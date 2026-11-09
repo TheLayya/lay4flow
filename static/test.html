@@ -97,7 +97,7 @@ input:focus, select:focus, textarea:focus { outline-color: #18181b; }
     <label for="apiKey">API Key</label><input type="password" id="apiKey" autocomplete="off" placeholder="输入 API Key">
     <label for="baseUrl">地址</label><input type="text" id="baseUrl" placeholder="http://localhost:8000">
   </div>
-  <p class="config-note" id="catalogNote">未连接时显示内置的 6 个公开模型；Veo 兼容入口已合并到 Veo 3.1，实际生成需要有效 API Key。</p>
+  <p class="config-note" id="catalogNote">未连接时显示内置的 7 个公开模型；Veo 兼容入口已合并到 Veo 3.1，实际生成需要有效 API Key。</p>
   <div class="main-layout">
     <nav class="sidebar" id="modelSidebar" aria-label="模型"></nav>
     <div class="content">
@@ -123,10 +123,6 @@ input:focus, select:focus, textarea:focus { outline-color: #18181b; }
             <div><label for="trimStartMs">片段开始（毫秒）</label><input id="trimStartMs" type="number" min="0" step="1" value="0"></div>
             <div><label for="trimEndMs">片段结束（毫秒）</label><input id="trimEndMs" type="number" min="1" step="1" value="10000"></div>
           </div>
-          <div class="form-group" id="mediaIdGroup" style="display:none;">
-            <label for="videoMediaId">源视频媒体 ID</label><input id="videoMediaId" placeholder="填写已有 Flow 视频的 mediaGenerationId">
-            <p class="hint">视频续写使用已有媒体 ID，不支持在这里上传源视频。</p>
-          </div>
         </div>
         <div class="form-group"><label for="promptInput">提示词</label><textarea id="promptInput" placeholder="描述你想生成或修改的内容">一只可爱的橘猫趴在窗台上晒太阳，窗外是樱花盛开的春天</textarea></div>
         <div class="form-group" id="imageUploadGroup" style="display:none;">
@@ -145,7 +141,7 @@ input:focus, select:focus, textarea:focus { outline-color: #18181b; }
   </div>
 </main>
 <script src="/static/js/model_catalog.js?v=banana21-20261010"></script>
-<script src="/static/js/test.js?v=20261003-09"></script>
+<script src="/static/js/test.js?v=20261109-upload-extend"></script>
 <script>if(window.location?.search?.includes('embedded='))document.querySelector('.app-header')?.remove();</script>
 </body>
 </html>

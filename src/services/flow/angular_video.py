@@ -117,6 +117,28 @@ def resolve_video_usage(
             )
             if not isinstance(entry, list) or not entry or entry[0] is None:
                 continue
+            if variable_duration and (key.startswith("macaron_cookie_") or duration is not None):
+                # The zero base price is not permission for every edit length.
+                # GetModels field26 lists actual (tier, seconds, resolution)
+                # combinations, including free <=10s and paid-only 11..15s.
+                if duration is None:
+                    continue
+                try:
+                    rates = usage[25][0]
+                except (IndexError, TypeError):
+                    continue
+                requested_resolution = resolution or (4 if key.endswith("_360p") else 1)
+                if not isinstance(rates, list) or not any(
+                    isinstance(rate, list)
+                    and len(rate) > 1
+                    and rate[0] == [service_tier, duration, requested_resolution]
+                    and isinstance(rate[1], list)
+                    and len(rate[1]) > 1
+                    and type(rate[1][1]) in (int, float)
+                    and rate[1][1] >= 0
+                    for rate in rates
+                ):
+                    continue
             return key
     raise ValueError(
         f"Flow video model is unavailable for the requested mode, aspect, or tier: {key}"

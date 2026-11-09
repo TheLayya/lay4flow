@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import {
     STUDIO_HISTORY_KEY,
     STUDIO_HISTORY_OWNER_KEY,
+    canRemoveStudioEntry,
     readStudioHistory,
     selectStudioHistory,
     studioHistoryKey,
@@ -23,6 +24,14 @@ const records = () =>
         title: `work-${index}`,
         outputs: [],
     }))
+
+test('interrupted and unresolved cards can be removed while active tasks retain their controls', () => {
+    for (const status of ['completed', 'failed', 'no_result', 'specification_mismatch', 'unknown', 'received', 'download_failed'])
+        assert.equal(canRemoveStudioEntry({ status }), true, status)
+    for (const status of ['preparing', 'generating', 'queued', 'in_progress', 'invalid'])
+        assert.equal(canRemoveStudioEntry({ status }), false, status)
+    assert.equal(canRemoveStudioEntry(null), false)
+})
 
 test('the ordinary 300 request window retains every unresolved receipt regardless of age', () => {
     const entries = records()

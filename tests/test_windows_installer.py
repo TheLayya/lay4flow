@@ -138,6 +138,20 @@ if ((Get-Content -LiteralPath $script:InstallLogPath -Raw) -notmatch 'ordinary c
                     hashlib.sha256(archive.read(icon)).hexdigest(),
                     "f7110df60bbf05a070524ac2ca720818b84b0f61baa27c175218b53e18a10c86",
                 )
+                self.assertIn(prefix + "docs/WINDOWS_INSTALL.md", names)
+                self.assertIn(prefix + "docs/images/qq-group.jpg", names)
+                self.assertEqual(
+                    archive.read(prefix + "account_import_extension/manifest.json"),
+                    (ROOT / "account_import_extension/manifest.json").read_bytes(),
+                )
+                self.assertEqual(
+                    archive.read(prefix + "PROJECT_README.md"),
+                    (ROOT / "README.md").read_bytes(),
+                )
+                self.assertEqual(
+                    archive.read(prefix + "docs/WINDOWS_INSTALL.md"),
+                    (ROOT / "docs/WINDOWS_INSTALL.md").read_bytes(),
+                )
                 self.assertIn("IconLocation", (ROOT / "scripts/windows/install.ps1").read_text())
 
     def test_powershell_scripts_parse(self):

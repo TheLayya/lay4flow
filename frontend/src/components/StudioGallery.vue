@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { canRemoveStudioEntry as canRemove } from '../lib/studio-history'
 import {
     Picture,
     VideoCamera,
@@ -41,6 +42,7 @@ const emit = defineEmits([
     'hydrate',
     'reference-image',
     'animate-image',
+    'extend-video',
 ])
 const filter = ref('all')
 const statusFilter = ref('all')
@@ -64,8 +66,12 @@ const statusFilters = [
 function entryKey(entry) {
     return String(entry.key || entry.receipt || entry.started)
 }
-function canRemove(entry) {
-    return entry.status === 'completed' || failures.includes(entry.status)
+function canExtendVideo(card) {
+    return card.kind === 'video' && card.entry.status === 'completed' && !card.entry.mediaExpired &&
+        Boolean(card.output?.url || card.output?.path || card.output?.sourceURL)
+}
+function extendVideo(card) {
+    if (!props.busy && canExtendVideo(card)) emit('extend-video', { entry: card.entry, output: card.output, index: card.index })
 }
 const cards = computed(() =>
     props.entries.flatMap((entry) => {
@@ -316,7 +322,7 @@ function previewFromKeyboard(event) {
                         :model-value="checkedKeys.has(entryKey(card.entry))"
                         :disabled="!canRemove(card.entry)"
                         :aria-label="`选择记录：${card.entry.title || entryKey(card.entry)}`"
-                        :title="canRemove(card.entry) ? '选择此记录' : '原任务待确认，保留收据后可继续查询'"
+                        :title="canRemove(card.entry) ? '选择此记录' : '任务正在排队或生成，暂不能清理记录'"
                         @change="toggleEntry(card.entry, $event)"
                     />
                 </div>
@@ -492,6 +498,9 @@ function previewFromKeyboard(event) {
                         {{ card.entry.title || '从收据恢复的作品' }}
                     </p>
                     <div class="gallery-card-actions">
+                        <el-button v-if="canExtendVideo(card)" size="small" :icon="VideoCamera" :disabled="busy" @click="extendVideo(card)">
+                            续写视频
+                        </el-button>
                         <el-button
                             v-if="card.kind === 'image' && card.output?.url && !hasPreviewError(card)"
                             size="small"
@@ -559,7 +568,7 @@ function previewFromKeyboard(event) {
                         <el-button
                             v-if="
                                 card.entry.provider === 'vids' &&
-                                ['received', 'download_failed'].includes(card.entry.status)
+                                (['received', 'download_failed'].includes(card.entry.status) || card.entry.mediaExpired)
                             "
                             size="small"
                             type="primary"

@@ -34,10 +34,15 @@ from .core.config import config
 from .core.monitoring import CONTENT_TYPE_LATEST, render_main_metrics
 from .core.update_guard import UpdateActivity, UpdateGuardMiddleware
 from .core.version import VERSION
+from .services.browser.profile_cache_maintenance import ProfileCacheMaintenance
 from .services.factory import create_services
 from .services.video_jobs import VideoJobService
 from .services.vids.auto_onboarding import VidsAutoOnboarding
+from .services.vids.bindings import read_bindings
+from .services.vids.deletion_markers import is_deleted
 from .services.vids.gateway import GatewayError
+from .services.vids.keepalive import VidsKeepalive
+from .services.vids.media_cleanup import VidsMediaCleanup
 from .services.vids.onboarding import VidsOnboardingService
 
 # Auxiliary API containers may skip the Vids video-worker and its database lock.
@@ -248,17 +253,39 @@ async def _flow_lifespan(app: FastAPI):
 async def lifespan(app: FastAPI):
     async with _flow_lifespan(app):
         try:
+            app.state.profile_cache_maintenance.start()
             if not _SKIP_VIDS:
                 try:
-                    await vids_runtime.start(config.get_raw_config().get("vids", {}))
+                    # Vids bootstraps every bound account over the network; a slow
+                    # or unreachable provider must not stall the Flow startup.
+                    await asyncio.wait_for(
+                        vids_runtime.start(config.get_raw_config().get("vids", {})),
+                        timeout=60,
+                    )
                 except GatewayError as error:
                     # A provider session failure must not stop Flow or its management UI.
                     vids_runtime.last_error_code = error.code
+                except TimeoutError:
+                    vids_runtime.last_error_code = "startup_timeout"
+                for token_id in sorted(services.vids_dispatcher._accounts):
+                    try:
+                        await services.vids_dispatcher.reconcile_outcomes(token_id)
+                    except Exception:
+                        # Local diagnostics recovery cannot block media/account startup.
+                        pass
                 if app.state.vids_auto_onboarding is not None:
                     for token in await db.get_all_tokens():
                         app.state.vids_auto_onboarding.schedule(token.id)
+                app.state.vids_maintenance.start()
+                app.state.vids_media_cleanup.start()
+            # Extension-import worker is independent of Vids; it must start even
+            # when the (network-bound) Vids runtime is skipped or fails to start.
+            from .services.browser.extension_import_jobs import get_extension_import_jobs
+
+            get_extension_import_jobs(token_manager).start()
             yield
         finally:
+            await app.state.profile_cache_maintenance.close()
             studio_jobs = getattr(app.state, "studio_jobs", None)
             if studio_jobs is not None:
                 await studio_jobs.close()
@@ -266,7 +293,12 @@ async def lifespan(app: FastAPI):
             import_jobs = getattr(token_manager, "_profile_import_jobs", None)
             if import_jobs is not None:
                 await import_jobs.close()
+            extension_jobs = getattr(token_manager, "_extension_import_jobs", None)
+            if extension_jobs is not None:
+                await extension_jobs.close()
             if not _SKIP_VIDS:
+                await app.state.vids_media_cleanup.close()
+                await app.state.vids_maintenance.close()
                 if app.state.vids_auto_onboarding is not None:
                     await app.state.vids_auto_onboarding.close()
                 await vids_runtime.close()
@@ -315,6 +347,7 @@ vids_registry_path = Path(
     config.get_raw_config().get("vids", {}).get("registry_path", "data/vids/bindings.json")
 )
 profile_manager = getattr(getattr(token_manager, "profile_refresher", None), "manager", None)
+app.state.profile_cache_maintenance = ProfileCacheMaintenance(profile_manager)
 app.state.vids_onboarding = (
     VidsOnboardingService(
         db,
@@ -353,6 +386,29 @@ async def repair_vids_session(token_id):
 
 services.vids_dispatcher.repair_session = repair_vids_session
 
+app.state.vids_maintenance = VidsKeepalive(
+    vids_runtime,
+    repair_vids_session,
+    profile_manager=profile_manager,
+    get_config=services.vids_dispatcher.account_policy.get_config,
+)
+
+
+def _saved_vids_cleanup_bindings():
+    """Saved bindings remain cleanup targets even if HTTP session startup failed."""
+    settings = config.get_raw_config().get("vids", {})
+    rows = [*settings.get("accounts", []), *read_bindings(vids_registry_path)]
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict) and not is_deleted(vids_registry_path, row.get("token_id"))
+    ]
+
+
+app.state.vids_media_cleanup = VidsMediaCleanup(
+    vids_runtime, lambda: config.cache_timeout, get_bindings=_saved_vids_cleanup_bindings
+)
+
 
 app.add_exception_handler(StarletteHTTPException, openai_http_exception_handler)
 
@@ -387,6 +443,7 @@ app.include_router(
         get_settings=lambda: config.get_raw_config().get("vids", {}),
         runtime=vids_runtime,
         repair_session=repair_vids_session,
+        get_maintenance=lambda: app.state.vids_maintenance,
     )
 )
 app.include_router(

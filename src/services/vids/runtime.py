@@ -45,7 +45,11 @@ class VidsRuntime:
             raise GatewayError(503, "runtime_busy", "Vids runtime is already started")
         self.account_errors.clear()
         try:
-            if not isinstance(settings, dict) or set(settings) - {"accounts", "registry_path"}:
+            if not isinstance(settings, dict) or set(settings) - {
+                "accounts",
+                "registry_path",
+                "read_max_attempts",
+            }:
                 raise ValueError
             rows = settings.get("accounts", [])
             if not isinstance(rows, list):
@@ -146,7 +150,8 @@ class VidsRuntime:
 
         self.binding_rows = {row["token_id"]: dict(row) for row, _, _ in prepared}
         try:
-            bindings = []
+            # Phase 1: prepare every account's gateway without network I/O.
+            candidates = []  # (token_id, gateway, identity_hash)
             for row, root, key_source in prepared:
                 token_id = row["token_id"]
                 try:
@@ -172,7 +177,6 @@ class VidsRuntime:
                     self.account_errors[token_id] = "invalid_configuration"
                     continue
                 source = (cookie_sources or {}).get(token_id)
-                gateway = None
                 try:
                     gateway = VidsGateway(
                         None,
@@ -185,19 +189,43 @@ class VidsRuntime:
                         cookie_source=source,
                         refresh_session=source is not None,
                     )
-                    self._gateways.append(gateway)
-                    await gateway.start()
                 except Exception as error:
-                    if gateway is not None:
-                        try:
-                            await self._finish_cleanup(gateway.close())
-                        except Exception:
-                            pass
-                        self._gateways.remove(gateway)
                     self.account_errors[token_id] = self._account_error_code(error)
                     continue
-                bindings.append(VidsAccount(token_id, gateway, row["identity_hash"]))
+                self._gateways.append(gateway)
+                candidates.append((token_id, gateway, row["identity_hash"]))
+
+            # Phase 2: bootstrap every gateway concurrently. Each account owns its
+            # own runtime directory lock, so parallel session setup is safe.
+            results = await asyncio.gather(
+                *(gateway.start() for _, gateway, _ in candidates),
+                return_exceptions=True,
+            )
+
+            # Phase 3: keep successful gateways and clean up failed ones.
+            bindings = []
+            for (token_id, gateway, identity_hash), result in zip(candidates, results):
+                if isinstance(result, BaseException):
+                    try:
+                        await self._finish_cleanup(gateway.close())
+                    except Exception:
+                        pass
+                    self._gateways.remove(gateway)
+                    self.account_errors[token_id] = self._account_error_code(result)
+                    continue
+                bindings.append(VidsAccount(token_id, gateway, identity_hash))
             self.dispatcher.replace(bindings)
+            policy = self.dispatcher.account_policy
+            if policy is not None:
+                for binding in bindings:
+                    try:
+                        await policy.reconcile(binding.token_id, binding.gateway.root)
+                    except Exception:
+                        # A diagnostics write failure cannot invalidate a
+                        # validated session or replay any provider operation.
+                        from ...core.logger import debug_logger
+
+                        debug_logger.log_warning("[VIDS_RECEIPT_RECOVERY] storage_unavailable")
             self.dispatcher.unavailable_receipt_roots = {
                 row["token_id"]: root
                 for row, root, _ in prepared
@@ -232,6 +260,36 @@ class VidsRuntime:
                 await self._close()
 
         await self._finish_cleanup(locked_close())
+
+    @asynccontextmanager
+    async def login_maintenance(self, token_id):
+        """Reserve account work without requiring a healthy preceding login."""
+        # Queue this one reservation behind unrelated lifecycle work. Rejecting
+        # immediately makes Flow reauthentication fail throughout Vids startup
+        # or automatic onboarding of any other account.
+        async with self._lifecycle_lock:
+            account = self.dispatcher._accounts.get(token_id)
+            preflight = self.dispatcher._preflight_locks.get(token_id)
+            gateway = account.gateway if account is not None else None
+            if (
+                token_id in self.dispatcher._pool_pending
+                or preflight is not None
+                and preflight.locked()
+                or gateway is not None
+                and gateway.lock.locked()
+            ):
+                raise GatewayError(
+                    409, "account_busy", "Vids account is busy; retry after it finishes"
+                )
+            if gateway is None:
+                # Missing/failed runtime bindings are exactly when a fresh
+                # Flow login may be needed; preserve them for later recovery.
+                yield
+                return
+            async with gateway.lock:
+                # Do not call _account(network=True), bootstrap or quota here.
+                # Those require the old credentials that this operation repairs.
+                yield
 
     @asynccontextmanager
     async def proxy_switch(self, token_id, target_proxy):
@@ -410,6 +468,7 @@ class VidsRuntime:
                     gateway for gateway in self._gateways if gateway is not account.gateway
                 ]
             self.dispatcher._accounts.pop(token_id, None)
+            self.dispatcher.forget_quota(token_id)
             self.dispatcher._roots.pop(token_id, None)
             self.dispatcher.unavailable_receipt_roots.pop(token_id, None)
             self.dispatcher._preflight_locks.pop(token_id, None)

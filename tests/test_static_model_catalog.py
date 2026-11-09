@@ -28,7 +28,7 @@ class StaticModelCatalogTests(unittest.TestCase):
         html = (OUTPUT.parents[1] / "test.html").read_text(encoding="utf-8")
         self.assertNotIn("const FALLBACK_MODELS", html)
         self.assertLess(html.index("/static/js/model_catalog.js"), html.index("/static/js/test.js"))
-        self.assertIn("?v=20261003-09", html)
+        self.assertIn("/static/js/test.js?v=20261109-upload-extend", html)
 
     def test_script_assets_load_without_exposing_protected_pages(self):
         # Importing the app wires route dependencies; restore them for other tests.

@@ -734,7 +734,7 @@ def _resolve_generation_request(model, request, images, video_bytes, video_media
         ):
             raise HTTPException(
                 status_code=400,
-                detail="Use veo_3_1 or omni_1.1_flash with videoConfig; legacy video IDs already encode their parameters",
+                detail="Use veo_3_1, omni_1.1_flash or omni_1.2_flash with videoConfig; legacy video IDs already encode their parameters",
             )
     return _resolve_request_model(model, request, images), model, None
 
@@ -743,10 +743,35 @@ def _validate_video_model(model: str, uploaded_video: bool = True) -> None:
     """Video uploads are only meaningful for the Omni edit route."""
     config_entry = MODEL_CONFIG.get(model)
     allowed_types = {"edit"} if uploaded_video else {"edit", "extend"}
+    if model.startswith("omni_1_2_"):
+        allowed_types.add("extend")
     if not config_entry or config_entry.get("video_type") not in allowed_types:
         raise HTTPException(
             status_code=400, detail="Video input is only supported by omni_edit models"
         )
+
+
+def _validate_uploaded_extend(model, video_bytes, mime, options):
+    if (
+        not video_bytes
+        or not str(model).startswith("omni_1_2_")
+        or not options
+        or options.get("mode") != "extend"
+    ):
+        return
+    from ..services.flow.video_extend import uploaded_extension_duration_ms
+
+    try:
+        duration = uploaded_extension_duration_ms(video_bytes, mime)
+        if (
+            options.get("resolution") in {"1080p", "4k"}
+            and duration + options["durationSeconds"] * 1000 > 15000
+        ):
+            raise ValueError(
+                "Upscaled extension requires original plus added duration of at most 15 seconds"
+            )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 def _get_request_base_url(request: Request) -> Optional[str]:
@@ -798,6 +823,7 @@ async def _normalize_openai_request(
         if video_bytes is not None or video_media_id is not None:
             _validate_video_model(model, video_bytes is not None)
         _validate_uploaded_edit_trim(video_bytes, video_mime_type, options)
+        _validate_uploaded_extend(model, video_bytes, video_mime_type, options)
         initial_image_count = len(images)
         images = await _append_openai_reference_images(model, request.messages, images)
         if len(images) != initial_image_count:
@@ -853,6 +879,7 @@ async def _normalize_gemini_request(
     if video_bytes is not None or video_media_id is not None:
         _validate_video_model(resolved_model, video_bytes is not None)
     _validate_uploaded_edit_trim(video_bytes, video_mime_type, options)
+    _validate_uploaded_extend(resolved_model, video_bytes, video_mime_type, options)
     system_instruction = _extract_text_from_gemini_content(request.systemInstruction)
     model_config = MODEL_CONFIG.get(resolved_model)
     media_model = bool(model_config and model_config.get("type") in {"image", "video"})
@@ -1234,7 +1261,7 @@ async def list_models(
             "owned_by": "lay4flow",
             "provider": "flow",
             "input_modalities": ["text", "image"]
-            + (["video"] if model["id"] == "omni_1.1_flash" else []),
+            + (["video"] if model["id"] in {"omni_1.1_flash", "omni_1.2_flash"} else []),
             "output_modalities": [model.get("type", "image")],
             "supported_endpoints": ["/v1/chat/completions", "/v1/responses"]
             + (

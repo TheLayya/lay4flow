@@ -6,6 +6,8 @@ const vm = require('node:vm');
 
 const html = fs.readFileSync(path.join(__dirname, '../static/test.html'), 'utf8');
 const code = require('./helpers/page_scripts.cjs')(html);
+assert.doesNotMatch(html, /mediaIdGroup|videoMediaId|填写已有 Flow 视频|不支持在这里上传源视频/);
+assert.doesNotMatch(code, /videoMediaId|mediaIdGroup|extend:\/\//);
 const elements = new Map(), alerts = [], requests = [];
 function element() {
   return {
@@ -40,7 +42,7 @@ const set = (id, value) => { elements.get(id).value = String(value); };
 const json = expression => JSON.parse(run(`JSON.stringify(${expression})`));
 
 (async () => {
-  const ids = ['gemini-3.1-flash-image', 'gemini-3.0-pro-image', 'gemini-3.1-flash-image-lite', 'imagen-4.0-generate-preview', 'veo_3_1', 'omni_1.1_flash'];
+  const ids = ['gemini-3.1-flash-image', 'gemini-3.0-pro-image', 'gemini-3.1-flash-image-lite', 'imagen-4.0-generate-preview', 'veo_3_1', 'omni_1.2_flash', 'omni_1.1_flash'];
   assert.deepEqual(json('Object.keys(FALLBACK_MODELS)'), ids);
   assert.deepEqual(elements.get('modelSidebar').children.map(item => item.dataset.model), ids);
   for (const id of ids) {
@@ -65,6 +67,29 @@ const json = expression => JSON.parse(run(`JSON.stringify(${expression})`));
   assert(elements.get('modelSidebar').children.some(item => item.dataset.model === 'new-video-model'));
   catalogResponse = {data: json('Object.entries(FALLBACK_MODELS).map(([id, entry]) => ({id, ...entry}))')};
   await run('loadModels()'); requests.length = 0;
+
+  run("selectModel('omni_1.2_flash')"); set('videoMode', 'text_to_video'); run('changeMode()');
+  set('videoDuration', 15); set('videoResolution', '720p'); run('updateParameters()');
+  assert.equal(json("buildRequest('long clip')").generationConfig.videoConfig.durationSeconds, 15);
+  assert.match(elements.get('modeHint').textContent, /Plus、Pro 或 Ultra/);
+  set('videoMode', 'edit'); run('changeMode()');
+  await run("handleVideoFile({type:'video/mp4',size:20})");
+  set('trimEndMs', 15000); run('updateParameters()');
+  assert.equal(json("buildRequest('long edit')").generationConfig.videoConfig.trimEndMs, 15000);
+  set('trimEndMs', 2000); assert.throws(() => run("buildRequest('short edit')"), /3–15 秒/);
+  run("selectModel('omni_1.2_flash')"); set('videoMode', 'reference_to_video'); run('changeMode()');
+  await run("handleFiles([{type:'image/png'}, {type:'image/png'}, {type:'image/png'}])");
+  set('videoMode', 'extend'); run('changeMode()');
+  await run("handleVideoFile({type:'video/mp4',size:20})");
+  run('STATE.video.durationMs = 10000');
+  const extended = json("buildRequest('extend with references')");
+  assert.equal(extended.messages[0].content.filter(item => item.type === 'image_url').length, 3);
+  assert.equal(extended.messages[0].content.at(-1).video_url.url, 'data:video/mp4;base64,AAAA');
+  assert.equal(elements.get('videoUploadGroup').style.display, 'block');
+  assert.equal(elements.get('videoTrimGroup').style.display, 'none');
+  set('videoMode', 'first_last_frame'); run('changeMode()');
+  assert(!elements.get('videoDuration').children.some(option => option.value === '15'));
+  requests.length = 0;
 
   for (const [mode, imageCount] of [['text_to_video', 0], ['image_to_video', 1], ['first_last_frame', 2], ['reference_to_video', 1], ['edit', 0]]) {
     run("selectModel('omni_1.1_flash')"); set('videoMode', mode); run('changeMode()');
@@ -126,11 +151,11 @@ const json = expression => JSON.parse(run(`JSON.stringify(${expression})`));
   set('videoMode', 'reference_to_video'); set('videoQuality', 'quality'); run('changeMode()');
   assert.equal(elements.get('videoQuality').value, 'fast');
   assert.equal(elements.get('btnGenerate').disabled, false);
+  assert(!elements.get('videoMode').children.some(item => item.value === 'extend'), 'ID-only Extend must stay outside the product controls');
   set('videoMode', 'extend'); run('changeMode()');
-  assert.equal(elements.get('videoUploadGroup').style.display, 'none'); assert.equal(elements.get('mediaIdGroup').style.display, 'block');
-  assert.throws(() => run("buildRequest('continue')"), /媒体 ID/);
-  set('videoMediaId', 'existing-video-id'); body = json("buildRequest('continue')");
-  assert.equal(body.model, 'veo_3_1'); assert.equal(body.messages[0].content[1].video_url.url, 'extend://existing-video-id');
+  assert.equal(elements.get('videoUploadGroup').style.display, 'none');
+  assert.equal(elements.get('btnGenerate').disabled, true);
+  assert.throws(() => run("buildRequest('continue')"), /Omni 1.2.*上传原视频/);
   set('videoMode', 'text_to_video'); run('changeMode()');
   set('videoQuality', 'fast'); set('videoDuration', 4); set('videoResolution', '4k');
   assert.throws(() => run("buildRequest('invalid fast 4k')"), /组合不受支持/);
@@ -156,11 +181,10 @@ const json = expression => JSON.parse(run(`JSON.stringify(${expression})`));
 
   run("selectModel('veo_3_1')");
   set('videoMode', 'extend'); run('changeMode()');
-  assert.equal(elements.get('mediaIdGroup').style.display, 'block');
-  set('videoMediaId', 'source-video'); body = json("buildRequest('remix')");
-  assert.equal(body.model, 'veo_3_1');
-  assert.equal(body.generationConfig.videoConfig.mode, 'extend');
-  assert.equal(body.messages[0].content[1].video_url.url, 'extend://source-video');
+  const requestCount = requests.length;
+  await run('generate()');
+  assert.equal(requests.length, requestCount, 'A stale ID-only mode must not submit a generation request');
+  assert.match(alerts.at(-1), /Omni 1.2.*上传原视频/);
 
   run("selectModel('gemini-3.1-flash-image')"); await run("handleFiles([{type:'image/png'}])");
   set('imageAspect', '1:1'); set('imageSize', '2k'); body = json("buildRequest('orange cat')");
@@ -179,5 +203,5 @@ const json = expression => JSON.parse(run(`JSON.stringify(${expression})`));
   // An upstream SSE error must finish as failed, never green success.
   stream = 'data: {"error":{"message":"Upstream failed"}}\n\ndata: [DONE]\n\n'; await run('generate()');
   assert.equal(elements.get('statusText').textContent, '失败'); assert.equal(elements.get('statusDot').className, 'status-dot status-error');
-  console.log('PASS: public models, interpolation/remix controls, Omni auto/edit/frames, trim validation, Veo combination guards, image options, canonical requests, SSE errors');
+  console.log('PASS: public models, upload-only Extend controls, Omni auto/edit/frames, trim validation, Veo combination guards, image options, canonical requests, SSE errors');
 })().catch(error => { console.error(error); process.exitCode = 1; });

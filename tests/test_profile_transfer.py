@@ -18,6 +18,7 @@ from src.api.admin_routes.profile_transfer import create_profile_transfer_router
 from src.core.database import Database
 from src.services.browser.cloak_backend import CloakBrowserBackend
 from src.services.browser.environment import EnvironmentSnapshot
+from src.services.browser.extension_login import ExtensionLogin
 from src.services.browser.profile_transfer import (
     FORMAT,
     ProfileTransfer,
@@ -93,6 +94,8 @@ class Backend(CloakBrowserBackend):
         self.states = {}
         self.opens = 0
         self.restores = []
+        self.cookie_repairs = []
+        self.cookie_repair_error = None
         self.version = "146.synthetic"
 
     async def open(self, profile_dir, *, proxy_url=None):
@@ -106,9 +109,25 @@ class Backend(CloakBrowserBackend):
             self.restores.append(copy.deepcopy(value))
             self.states[str(profile_dir)] = copy.deepcopy(value)
 
+        async def add_cookies(values):
+            self.cookie_repairs.append(copy.deepcopy(values))
+            if self.cookie_repair_error is not None:
+                raise self.cookie_repair_error
+            current = self.states[str(profile_dir)]["cookies"]
+            keyed = {(row["name"], row["domain"], row["path"]): row for row in current}
+            keyed.update(
+                {(row["name"], row["domain"], row["path"]): copy.deepcopy(row) for row in values}
+            )
+            self.states[str(profile_dir)]["cookies"] = list(keyed.values())
+
+        async def clear_cookies():
+            self.states[str(profile_dir)]["cookies"] = []
+
         context = SimpleNamespace(
             browser=SimpleNamespace(version=self.version),
             set_storage_state=AsyncMock(side_effect=restore),
+            add_cookies=AsyncMock(side_effect=add_cookies),
+            clear_cookies=AsyncMock(side_effect=clear_cookies),
             storage_state=AsyncMock(
                 side_effect=lambda **kw: copy.deepcopy(self.states[str(profile_dir)])
             ),
@@ -161,7 +180,8 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
                     "at_expires": None,
                     "credits": 1050,
                     "user_paygate_tier": "PAYGATE_TIER_ONE",
-                }
+                },
+                "google_cookies": json.dumps(await context.cookies()),
             }
 
         verifier = ProfileVerifier()
@@ -185,7 +205,7 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.start()
         self.addCleanup(self.runtime.stop)
 
-    async def test_native_restore_once_flow_verification_and_two_cold_reopens_before_enabled_save(
+    async def test_native_restore_once_flow_verification_before_enabled_save(
         self,
     ):
         stages = []
@@ -197,10 +217,7 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
                 "open_profile",
                 "restore_state",
                 "flow_verification",
-                "cold_check_1",
-                "cold_check_2",
                 "save_account",
-                "prepare_workspace",
                 "finalize",
             ],
         )
@@ -214,24 +231,34 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(token.credits, 1050)
         self.assertEqual(token.user_paygate_tier, "PAYGATE_TIER_ONE")
         self.assertEqual(token.refresh_interval_minutes, 30)
+        self.assertEqual(token.browser_profile_next_at, token.next_refresh_at)
+        self.assertEqual(token.next_refresh_at, token.last_st_refresh_at + timedelta(minutes=30))
         self.assertGreaterEqual(token.next_refresh_at, before + timedelta(minutes=30))
         self.assertLessEqual(
             token.next_refresh_at, datetime.now(timezone.utc) + timedelta(minutes=30)
         )
         self.assertEqual(
             result["validation"],
-            {"flow_session_verified": True, "cold_reopens": 2, "identity_verified": True},
+            {"flow_session_verified": True, "identity_verified": True},
         )
         self.assertTrue(token.auto_refresh_enabled)
         self.assertEqual(token.browser_profile_status, "ready")
         self.assertEqual(token.login_password, "")
         self.assertEqual(len(self.backend.restores), 1)
-        self.assertEqual(self.backend.opens, 3)
+        self.assertEqual(self.backend.opens, 1)
         state = self.backend.restores[0]
         self.assertEqual(state["origins"], bundle()["storage_state"]["origins"])
         self.assertEqual(state["cookies"][1]["partitionKey"], "https://flow.google.com")
         self.assertEqual((await self.manager.spec(EMAIL)).fingerprint_seed, 46281)
-        self.tokens.ensure_project_exists.assert_awaited_once_with(token.id)
+        imported = await self.manager.spec(EMAIL)
+        self.assertTrue(CloakBrowserBackend._session_restore_enabled(imported.profile_dir))
+        self.assertEqual(
+            json.loads((imported.profile_dir / "Default" / "Preferences").read_text())["session"][
+                "restore_on_startup"
+            ],
+            1,
+        )
+        self.tokens.ensure_project_exists.assert_not_awaited()
         self.assertIsNone(token.ban_reason)
 
     async def test_explicit_proxy_snapshot_rejects_a_changed_pool_address_before_profile_open(self):
@@ -247,19 +274,34 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.backend.opens, 0)
         self.assertEqual(await self.database.get_all_tokens(), [])
 
-    async def test_disabled_source_stays_disabled_and_duplicate_never_opens_or_overwrites(self):
+    async def test_session_is_saved_after_single_browser_verification(self):
+        closed = []
+        self.backend.close = AsyncMock(side_effect=lambda context: closed.append(context))
+        result = await self.service.import_bundle(bundle())
+        token = await self.database.get_token(result["token_id"])
+        self.assertEqual(token.credits, 1050)
+        self.assertEqual(len(self.backend.restores), 1)
+        self.assertEqual(len(closed), 1)
+        self.database.add_token.assert_not_awaited() if isinstance(
+            self.database.add_token, AsyncMock
+        ) else None
+
+    async def test_disabled_account_reimport_updates_login_without_enabling_it(self):
         first = await self.service.import_bundle(bundle(False))
         token = await self.database.get_token(first["token_id"])
         self.assertFalse(token.is_active)
         self.assertEqual(token.ban_reason, "manual")
         self.tokens.ensure_project_exists.assert_not_awaited()
-        with self.assertRaises(ProfileTransferError) as failure:
-            await self.service.import_bundle(bundle())
-        self.assertEqual(failure.exception.code, "account_exists")
-        self.assertEqual(self.backend.opens, 3)
+        second = await self.service.import_bundle(bundle())
+        self.assertEqual(second["action"], "updated")
+        self.assertEqual(second["token_id"], first["token_id"])
+        self.assertFalse((await self.database.get_token(first["token_id"])).is_active)
+        self.assertEqual(self.backend.opens, 2)
 
-    async def test_manual_changes_during_project_preparation_are_not_overwritten(self):
-        async def prepare(token_id):
+    async def test_manual_changes_before_finalization_are_not_overwritten(self):
+        finalize = self.database.update_token_if_credentials_match
+
+        async def change_before_finalize(token_id, expected, **updates):
             await self.database.update_token(
                 token_id,
                 is_active=False,
@@ -267,10 +309,16 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
                 banned_at=datetime.now(timezone.utc),
                 auto_refresh_enabled=True,
             )
-            return "synthetic-project"
+            return await finalize(token_id, expected, **updates)
 
-        self.tokens.ensure_project_exists.side_effect = prepare
-        with self.assertRaises(ProfileTransferError) as caught:
+        with (
+            patch.object(
+                self.database,
+                "update_token_if_credentials_match",
+                side_effect=change_before_finalize,
+            ),
+            self.assertRaises(ProfileTransferError) as caught,
+        ):
             await self.service.import_bundle(bundle())
         self.assertEqual(caught.exception.code, "account_changed")
         token = (await self.database.get_all_tokens())[0]
@@ -297,7 +345,7 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["last_error"], "transfer_failed")
         self.assertNotIn("transfer_failure_reason", metadata)
 
-    async def test_retry_failed_new_profile_reuses_state_and_still_renews_and_checks_twice(self):
+    async def test_retry_failed_new_profile_reuses_state_and_still_renews(self):
         renew = self.refresher.refresh_in_context.side_effect
         self.refresher.refresh_in_context.side_effect = ProfileNotReadyError(
             EMAIL, "transient_error"
@@ -312,9 +360,9 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         self.assertEqual(retained.read_text("utf-8"), "retained")
         self.assertEqual(len(self.backend.restores), 1)
-        self.assertEqual(self.backend.opens, 4)
+        self.assertEqual(self.backend.opens, 2)
         self.assertEqual(self.refresher.refresh_in_context.await_count, 2)
-        self.assertEqual(self.refresher.verifier.verify_account.await_count, 2)
+        self.assertEqual(self.refresher.verifier.verify_account.await_count, 0)
         self.assertEqual((await self.manager.status(EMAIL)).state, "ready")
         diagnostic = json.loads((directory / "profile_transfer.json").read_text("utf-8"))
         self.assertTrue(diagnostic["completed"])
@@ -346,6 +394,220 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.backend.restores), 1)
         self.assertEqual(await self.database.get_all_tokens(), [])
 
+    async def interrupted_profile(self, *, state_imported=True, metadata_state="starting"):
+        renew = self.refresher.refresh_in_context.side_effect
+        self.refresher.refresh_in_context.side_effect = ProfileNotReadyError(
+            EMAIL, "transient_error"
+        )
+        with self.assertRaises(ProfileNotReadyError):
+            await self.service.import_bundle(bundle(False))
+        directory = self.manager.root_dir / self.manager._normalize_account_key(EMAIL)
+        metadata_path = directory / "metadata.json"
+        metadata = json.loads(metadata_path.read_text("utf-8"))
+        metadata.update(state=metadata_state)
+        metadata.pop("last_error", None)
+        metadata.pop("last_verified_at", None)
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        transfer_path = directory / "profile_transfer.json"
+        transfer = json.loads(transfer_path.read_text("utf-8"))
+        transfer = {
+            "binding_sha256": transfer["binding_sha256"],
+            "state_imported": state_imported,
+        }
+        transfer_path.write_text(json.dumps(transfer), encoding="utf-8")
+        if not state_imported:
+            self.backend.states[str(directory)] = {"cookies": [], "origins": []}
+            self.backend.restores.clear()
+        self.refresher.refresh_in_context.side_effect = renew
+        return directory
+
+    async def test_interrupted_restored_profile_resumes_without_reinjecting_state(self):
+        directory = await self.interrupted_profile()
+        retained = directory / "retained.txt"
+        retained.write_text("original-login", encoding="utf-8")
+        result = await self.service.import_bundle(bundle(False))
+        self.assertTrue(result["success"])
+        self.assertEqual(retained.read_text("utf-8"), "original-login")
+        self.assertEqual(len(self.backend.restores), 1)
+        self.assertEqual(self.backend.opens, 2)
+        self.assertEqual(self.refresher.verifier.verify_account.await_count, 0)
+        self.assertEqual((await self.manager.status(EMAIL)).state, "ready")
+
+    async def test_interrupted_profile_before_restore_injects_once_and_verifies(self):
+        await self.interrupted_profile(state_imported=False, metadata_state="stopped")
+        result = await self.service.import_bundle(bundle(False))
+        self.assertTrue(result["success"])
+        self.assertEqual(len(self.backend.restores), 1)
+        self.assertEqual(self.refresher.verifier.verify_account.await_count, 0)
+        self.assertEqual(self.backend.opens, 2)
+
+    async def test_trusted_extension_repairs_expired_retained_login_without_resetting_storage(self):
+        directory = await self.interrupted_profile()
+        original = self.backend.states[str(directory)]
+        original["cookies"].append(cookie("retained-only", "flow.google.com"))
+        original_origins = copy.deepcopy(original["origins"])
+        retained = directory / "retained.txt"
+        retained.write_text("original-profile", encoding="utf-8")
+        self.refresher.refresh_in_context.reset_mock()
+        value = bundle(False)
+        value["storage_state"]["cookies"][0]["value"] = "fresh-verified-login"
+        value["storage_state"]["origins"] = []
+        result = await self.service.import_bundle(value, repair_existing_login=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(len(self.backend.restores), 1, "Native state is never reset on repair")
+        self.assertEqual(len(self.backend.cookie_repairs), 1)
+        self.assertEqual(self.backend.states[str(directory)]["origins"], original_origins)
+        self.assertIn(
+            "retained-only",
+            {row["name"] for row in self.backend.states[str(directory)]["cookies"]},
+        )
+        self.assertFalse(
+            any(
+                row["name"].startswith("__Secure-next-auth.session-token")
+                for row in self.backend.cookie_repairs[0]
+            )
+        )
+        self.assertEqual(retained.read_text("utf-8"), "original-profile")
+        self.refresher.refresh_in_context.assert_awaited_once()
+        self.assertEqual(self.refresher.verifier.verify_account.await_count, 0)
+        token = await self.database.get_token(result["token_id"])
+        self.assertIn("fresh-verified-login", token.google_cookies)
+        self.assertEqual(token.proxy_pool_id, self.proxy_id)
+        self.assertEqual((await self.manager.spec(EMAIL)).fingerprint_seed, 46281)
+
+    async def test_regular_import_never_repairs_expired_retained_login(self):
+        await self.interrupted_profile()
+        self.refresher.refresh_in_context.side_effect = ProfileNotReadyError(
+            EMAIL, "login_required"
+        )
+        with self.assertRaises(ProfileNotReadyError):
+            await self.service.import_bundle(bundle(False))
+        self.assertEqual(self.backend.cookie_repairs, [])
+        self.assertEqual(await self.database.get_all_tokens(), [])
+
+    async def test_trusted_repair_does_not_replace_identity_or_network_failures(self):
+        await self.interrupted_profile()
+        for reason in ("identity_mismatch", "transient_error", "environment_changed"):
+            self.refresher.refresh_in_context.side_effect = ProfileNotReadyError(EMAIL, reason)
+            with self.subTest(reason=reason), self.assertRaises(ProfileNotReadyError):
+                await self.service.import_bundle(bundle(False), repair_existing_login=True)
+        self.assertEqual(len(self.backend.cookie_repairs), 3)
+        self.assertEqual(await self.database.get_all_tokens(), [])
+
+    async def test_trusted_cookie_repair_failure_keeps_account_unpublished(self):
+        directory = await self.interrupted_profile()
+        before = copy.deepcopy(self.backend.states[str(directory)])
+        self.refresher.refresh_in_context.side_effect = ProfileNotReadyError(
+            EMAIL, "session_invalid"
+        )
+        self.backend.cookie_repair_error = RuntimeError("synthetic cookie write failure")
+        with self.assertRaisesRegex(RuntimeError, "cookie write"):
+            await self.service.import_bundle(bundle(False), repair_existing_login=True)
+        self.assertEqual(len(self.backend.cookie_repairs), 1)
+        self.assertEqual(self.backend.states[str(directory)], before)
+        self.assertEqual(await self.database.get_all_tokens(), [])
+
+    async def test_trusted_repair_revalidates_once_before_account_save(self):
+        await self.interrupted_profile()
+        self.refresher.refresh_in_context.reset_mock()
+        self.refresher.refresh_in_context.side_effect = ProfileNotReadyError(
+            EMAIL, "identity_mismatch"
+        )
+        with self.assertRaises(ProfileNotReadyError) as failure:
+            await self.service.import_bundle(bundle(False), repair_existing_login=True)
+        self.assertEqual(failure.exception.reason, "identity_mismatch")
+        self.refresher.refresh_in_context.assert_awaited_once()
+        self.assertEqual(await self.database.get_all_tokens(), [])
+
+    async def test_interrupted_profile_requires_original_seed_proxy_launch_and_incomplete_state(
+        self,
+    ):
+        directory = await self.interrupted_profile()
+        original = {
+            name: (directory / name).read_bytes()
+            for name in (
+                "metadata.json",
+                "profile_transfer.json",
+                "environment_snapshot.json",
+                "launch_settings.sha256",
+            )
+        }
+        proxy_id = await self.database.add_proxy_pool_entry("socks5://other.invalid:1080")
+        for invalid in (
+            "changed_seed",
+            "changed_proxy",
+            "changed_launch",
+            "ready_profile",
+            "completed_transfer",
+            "verified_profile",
+            "missing_environment",
+            "missing_launch",
+        ):
+            with self.subTest(invalid=invalid):
+                for name, data in original.items():
+                    (directory / name).write_bytes(data)
+                value = bundle(False)
+                kwargs = {}
+                if invalid == "changed_seed":
+                    value["browser"]["fingerprint_seed"] = 46282
+                elif invalid == "changed_proxy":
+                    kwargs["proxy_pool_id"] = proxy_id
+                elif invalid == "changed_launch":
+                    self.backend.options["locale"] = "zh-CN"
+                elif invalid in {"ready_profile", "verified_profile"}:
+                    metadata = json.loads((directory / "metadata.json").read_text("utf-8"))
+                    if invalid == "ready_profile":
+                        metadata["state"] = "ready"
+                    else:
+                        metadata["last_verified_at"] = 1234.5
+                    (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+                elif invalid == "completed_transfer":
+                    transfer = json.loads((directory / "profile_transfer.json").read_text("utf-8"))
+                    transfer["completed"] = True
+                    (directory / "profile_transfer.json").write_text(
+                        json.dumps(transfer), encoding="utf-8"
+                    )
+                else:
+                    (
+                        directory
+                        / (
+                            "environment_snapshot.json"
+                            if invalid == "missing_environment"
+                            else "launch_settings.sha256"
+                        )
+                    ).unlink()
+                before = {
+                    name: (directory / name).read_bytes()
+                    for name in original
+                    if (directory / name).exists()
+                }
+                with self.assertRaises(ProfileTransferError) as caught:
+                    await self.service.import_bundle(value, **kwargs)
+                self.assertEqual(caught.exception.code, "profile_exists")
+                self.assertEqual(
+                    before,
+                    {
+                        name: (directory / name).read_bytes()
+                        for name in original
+                        if (directory / name).exists()
+                    },
+                )
+                self.assertEqual(self.backend.opens, 1)
+                self.assertEqual(await self.database.get_all_tokens(), [])
+                self.backend.options.pop("locale", None)
+
+    async def test_interrupted_resume_still_rejects_identity_failure(self):
+        await self.interrupted_profile()
+        self.refresher.refresh_in_context.side_effect = ProfileNotReadyError(
+            EMAIL, "identity_mismatch"
+        )
+        with self.assertRaises(ProfileNotReadyError) as caught:
+            await self.service.import_bundle(bundle(False))
+        self.assertEqual(caught.exception.reason, "identity_mismatch")
+        self.assertEqual(caught.exception.transfer_stage, "flow_verification")
+        self.assertEqual(len(self.backend.restores), 1)
+        self.assertEqual(await self.database.get_all_tokens(), [])
+
     async def test_retry_accepts_updated_source_runtime_environment_and_launch_metadata(self):
         renew = self.refresher.refresh_in_context.side_effect
         self.refresher.refresh_in_context.side_effect = ProfileNotReadyError(
@@ -368,7 +630,7 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         self.assertEqual(len(self.backend.restores), 1)
         self.assertEqual(self.refresher.refresh_in_context.await_count, 2)
-        self.assertEqual(self.refresher.verifier.verify_account.await_count, 2)
+        self.assertEqual(self.refresher.verifier.verify_account.await_count, 0)
 
     async def test_retry_accepts_original_full_browser_binding_and_upgrades_sidecar(self):
         renew = self.refresher.refresh_in_context.side_effect
@@ -414,9 +676,9 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         self.assertEqual(retained.read_text("utf-8"), "preserved")
         self.assertEqual(len(self.backend.restores), 1)
-        self.assertEqual(self.backend.opens, 4)
+        self.assertEqual(self.backend.opens, 2)
         self.assertEqual(self.refresher.refresh_in_context.await_count, 2)
-        self.assertEqual(self.refresher.verifier.verify_account.await_count, 2)
+        self.assertEqual(self.refresher.verifier.verify_account.await_count, 0)
         self.assertEqual((await self.manager.status(EMAIL)).state, "ready")
 
     async def test_legacy_failed_profile_rejects_changed_proxy_without_writing_sidecar(self):
@@ -487,37 +749,33 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.database.get_all_tokens(), [])
 
     async def test_retry_never_skips_failed_cold_identity_check(self):
-        self.refresher.verifier.verify_account.side_effect = None
-        self.refresher.verifier.verify_account.return_value = AccountVerification(
-            False, True, 0, "identity_mismatch"
+        self.refresher.refresh_in_context.side_effect = ProfileNotReadyError(
+            EMAIL, "identity_mismatch"
         )
         with self.assertRaises(ProfileNotReadyError) as failure:
             await self.service.import_bundle(bundle())
-        self.assertEqual(failure.exception.transfer_stage, "cold_check_1")
-        self.refresher.refresh_in_context.side_effect = None
-        self.refresher.refresh_in_context.return_value = {
-            "_validated_session": {"at": None, "at_expires": None, "credits": 1050}
-        }
+        self.assertEqual(failure.exception.transfer_stage, "flow_verification")
         with self.assertRaises(ProfileNotReadyError) as retry:
             await self.service.import_bundle(bundle())
         self.assertEqual(retry.exception.reason, "identity_mismatch")
-        self.assertEqual(retry.exception.transfer_stage, "cold_check_1")
-        self.assertEqual(self.refresher.verifier.verify_account.await_count, 2)
+        self.assertEqual(retry.exception.transfer_stage, "flow_verification")
+        self.assertEqual(self.refresher.verifier.verify_account.await_count, 0)
         self.assertEqual(len(self.backend.restores), 1)
         self.assertEqual(await self.database.get_all_tokens(), [])
         self.tokens.ensure_project_exists.assert_not_awaited()
 
     async def test_cold_probe_failure_retains_network_step_without_private_details(self):
-        async def fail_credits(email, probe):
-            probe.network_step = "flow_credits"
-            return AccountVerification(True, True, 0, "credits_invalid")
+        async def fail_credits(token, context, force=False):
+            error = ProfileNotReadyError(EMAIL, "credits_invalid")
+            error.profile_network_step = "flow_credits"
+            raise error
 
-        self.refresher.verifier.verify_account.side_effect = fail_credits
+        self.refresher.refresh_in_context.side_effect = fail_credits
         with self.assertRaises(ProfileNotReadyError) as failure:
             await self.service.import_bundle(bundle(False))
         _, detail = transfer_error_detail(failure.exception)
         self.assertEqual(detail["network_step"], "flow_credits")
-        self.assertEqual(detail["stage"], "cold_check_1")
+        self.assertEqual(detail["stage"], "flow_verification")
         self.assertEqual(detail["reason"], "credits_invalid")
         directory = self.manager.root_dir / self.manager._normalize_account_key(EMAIL)
         sidecar = json.loads((directory / "profile_transfer.json").read_text("utf-8"))
@@ -540,28 +798,83 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
         result = await self.service.import_bundle(bundle(False))
         self.assertTrue(result["success"])
         self.assertEqual(retained.read_text("utf-8"), "original-profile")
-        self.assertEqual(self.backend.opens, 4)
+        self.assertEqual(self.backend.opens, 2)
         self.assertEqual(len(self.backend.restores), 1)
         self.assertEqual(self.refresher.refresh_in_context.await_count, 1)
-        self.assertEqual(self.refresher.verifier.verify_account.await_count, 2)
+        self.assertEqual(self.refresher.verifier.verify_account.await_count, 0)
 
-    async def test_project_failure_preserves_account_disabled_with_profile(self):
+    async def test_unavailable_projects_do_not_invalidate_a_verified_import(self):
         self.tokens.ensure_project_exists.side_effect = RuntimeError("synthetic")
-        with self.assertRaises(RuntimeError) as failure:
-            await self.service.import_bundle(bundle())
-        token = (await self.database.get_all_tokens())[0]
-        self.assertFalse(token.is_active)
-        self.assertFalse(token.auto_refresh_enabled)
-        self.assertEqual(token.browser_profile_status, "blocked")
+        result = await self.service.import_bundle(bundle())
+        token = await self.database.get_token(result["token_id"])
+        self.assertTrue(result["success"])
+        self.assertTrue(token.is_active)
+        self.assertTrue(token.auto_refresh_enabled)
+        self.assertEqual(token.browser_profile_status, "ready")
+        self.assertEqual(token.refresh_status, "ready")
+        self.assertFalse(token.refresh_error)
         self.assertTrue(token.st.startswith("profile-session:"))
-        self.assertEqual(failure.exception.transfer_token_id, token.id)
-        status, detail = transfer_error_detail(failure.exception)
-        self.assertEqual(status, 502)
-        self.assertEqual(detail["token_id"], token.id)
-        self.assertTrue(detail["requires_account_action"])
-        self.assertIn("账号已保存", detail["message"])
-        self.assertEqual(detail["stage"], "prepare_workspace")
-        self.assertNotIn("synthetic", json.dumps(detail))
+        self.tokens.ensure_project_exists.assert_not_awaited()
+        self.tokens.notify_profile_ready.assert_called_once_with(token.id)
+        directory = self.manager.root_dir / self.manager._normalize_account_key(EMAIL)
+        diagnostic = json.loads((directory / "profile_transfer.json").read_text("utf-8"))
+        self.assertTrue(diagnostic["completed"])
+        self.assertNotIn("transfer_failure_reason", diagnostic)
+        self.assertEqual(self.backend.opens, 1)
+        self.assertEqual(self.refresher.verifier.verify_account.await_count, 0)
+
+    async def test_extension_login_finishes_real_profile_import_with_auto_refresh_enabled(self):
+        self.tokens._profile_transfer = self.service
+        self.tokens.ensure_project_exists.side_effect = TimeoutError("project service unavailable")
+        self.refresher._proxy_url.return_value = "socks5://relay.invalid:1080"
+
+        @asynccontextmanager
+        async def snapshot_request(raw_cookies, identity, proxy):
+            self.assertEqual(proxy, "socks5://relay.invalid:1080")
+            yield SimpleNamespace(cookies=AsyncMock(return_value=[cookie()]))
+
+        with (
+            patch("src.services.browser.extension_login.snapshot_http_request", snapshot_request),
+            patch(
+                "src.services.browser.extension_login.read_flow_session",
+                new=AsyncMock(return_value={"email": EMAIL, "credits": 1050}),
+            ),
+            patch("src.services.browser.extension_login._runtime", return_value=RUNTIME),
+        ):
+            result = await ExtensionLogin(self.tokens).import_login(
+                {
+                    "google_cookies": json.dumps([cookie()]),
+                    "browser_identity": json.loads(ENVIRONMENT.to_json()),
+                },
+                proxy_pool_id=self.proxy_id,
+            )
+        self.assertTrue(result["success"])
+        token = await self.database.get_token(result["token_id"])
+        self.assertTrue(token.is_active and token.auto_refresh_enabled)
+        self.assertEqual(token.browser_profile_status, "ready")
+        self.assertEqual(token.proxy_pool_id, self.proxy_id)
+        self.assertEqual(token.proxy_url, "socks5://relay.invalid:1080")
+        self.tokens.ensure_project_exists.assert_not_awaited()
+        self.assertEqual(self.backend.opens, 1)
+
+    async def test_completion_diagnostic_write_failure_keeps_committed_login_and_auto_refresh(self):
+        original = self.manager._write_metadata_file
+
+        def write_metadata(path, values):
+            if path.name == "profile_transfer.json" and values.get("completed"):
+                raise OSError("synthetic private diagnostic failure")
+            return original(path, values)
+
+        with patch.object(self.manager, "_write_metadata_file", side_effect=write_metadata):
+            result = await self.service.import_bundle(bundle())
+        self.assertTrue(result["success"])
+        token = await self.database.get_token(result["token_id"])
+        self.assertTrue(token.is_active and token.auto_refresh_enabled)
+        self.assertEqual(token.browser_profile_status, "ready")
+        self.assertEqual(token.refresh_status, "ready")
+        self.assertFalse(token.refresh_error)
+        self.assertIsNone(token.ban_reason)
+        self.tokens.notify_profile_ready.assert_called_once_with(token.id)
 
     async def test_invalid_scope_runtime_and_launch_contract_reject_without_persistence(self):
         for mutate, expected in (
@@ -680,9 +993,9 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     self.backend.restores[index]["origins"], value["storage_state"]["origins"]
                 )
-        self.assertEqual(self.backend.opens, 6)
+        self.assertEqual(self.backend.opens, 2)
         self.assertEqual(self.refresher.refresh_in_context.await_count, 2)
-        self.assertEqual(self.refresher.verifier.verify_account.await_count, 4)
+        self.assertEqual(self.refresher.verifier.verify_account.await_count, 0)
         self.assertTrue(
             all(
                 call.kwargs.get("allow_viewport_change") is True
@@ -690,17 +1003,15 @@ class ProfileTransferTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_target_environment_change_after_restore_still_blocks_import(self):
+    async def test_import_does_not_probe_environment_by_reopening(self):
         self.refresher.verifier.environment_snapshot.side_effect = [
             ENVIRONMENT,
-            replace(ENVIRONMENT, timezone="Asia/Shanghai"),
+            AssertionError("Import must not reopen to probe persistence"),
         ]
-        with self.assertRaises(ProfileNotReadyError) as failure:
-            await self.service.import_bundle(bundle(False))
-        self.assertEqual(failure.exception.reason, "environment_changed")
-        self.assertEqual(failure.exception.transfer_stage, "cold_check_1")
-        self.assertEqual(len(self.backend.restores), 1)
-        self.assertEqual(await self.database.get_all_tokens(), [])
+        result = await self.service.import_bundle(bundle(False))
+        self.assertTrue(result["success"])
+        self.assertEqual(self.backend.opens, 1)
+        self.assertEqual(self.refresher.verifier.environment_snapshot.await_count, 1)
 
     def test_native_scope_keeps_partition_key_but_rejects_foreign_partition(self):
         value = bundle()["storage_state"]

@@ -56,6 +56,21 @@ class VidsDispatcherTests(unittest.IsolatedAsyncioTestCase):
 
     def new_dispatcher(self):
         dispatcher = VidsProviderDispatcher(self.db)
+
+        async def switches(token_ids):
+            return {
+                token_id: {
+                    "token_id": token_id,
+                    "email": getattr(token, "email", ""),
+                    "enabled": token.is_active,
+                    "image_enabled": token.image_enabled,
+                    "video_enabled": token.video_enabled,
+                }
+                for token_id in token_ids
+                if (token := self.tokens.get(token_id)) is not None
+            }
+
+        dispatcher.account_switches = AsyncMock(side_effect=switches)
         dispatcher.register(self.binding(1, self.first))
         dispatcher.register(self.binding(2, self.second))
         return dispatcher

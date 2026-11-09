@@ -130,6 +130,10 @@ class AdminAccountConfigRouteTests(unittest.TestCase):
                 "at_auto_refresh_enabled": True,
                 "protocol_refresh_enabled": False,
                 "refresh_interval_minutes": 120,
+                "scope": "legacy_protocol_accounts",
+                "profile_maintenance": "per_account",
+                "profile_default_interval_minutes": 30,
+                "scheduler_scan_seconds": 60,
             },
         )
 

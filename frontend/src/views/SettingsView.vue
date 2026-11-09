@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
     Key,
@@ -15,15 +15,15 @@ import {
 } from '@element-plus/icons-vue'
 import { api, notifyError, parseDate } from '../lib/api'
 import { CAPTCHA_SERVICE_URL } from '../lib/captcha-service'
-import Mascot from '../components/Mascot.vue'
 
-const group = ref('all')
+const group = ref('general')
 const route = useRoute()
 const captchaKeyInput = ref(null)
 const settingsQuery = ref('')
 const groups = [
     { id: 'general', label: '基础与访问', sub: '账号 · API 密钥', icon: Key },
     { id: 'generation', label: '生成与调度', sub: '超时 · 轮询 · 刷新', icon: MagicStick },
+    { id: 'rules', label: '自定义规则', sub: 'Flow · Vids 维护与保护', icon: Document },
     { id: 'captcha', label: '远程有头打码', sub: '服务地址 · 密钥 · 超时', icon: Monitor },
     { id: 'cache', label: '媒体缓存', sub: '保存时间 · 访问地址', icon: FolderOpened },
     { id: 'integration', label: '运行诊断', sub: '更新记录 · 调试日志', icon: Tools },
@@ -31,13 +31,22 @@ const groups = [
 const settingCards = [
     { id: 'api', section: 'general', terms: 'API 访问密钥 当前 API 密钥 新 API 密钥 key 外部客户端' },
     { id: 'login', section: 'general', terms: '控制台登录 管理员名称 当前密码 新密码 确认新密码 账号' },
-    { id: 'health', section: 'general', terms: '账号健康策略 连续错误暂停阈值 自动暂停 失败' },
     { id: 'timeouts', section: 'generation', terms: '任务等待时间 图片生成超时 视频生成超时 最大重试次数 秒' },
     { id: 'dispatch', section: 'generation', terms: '账号调度 默认调度 轮询调度 并发' },
     {
+        id: 'errorPolicy',
+        section: 'rules',
+        terms: '生成错误与账号保护 自定义规则 错误关键字 限速 配额 连续失败 冷却 换号 重试 LIMIT DEACTIVE RETRY DISABLE DELAY PUBLIC_ERROR_USER_QUOTA_REACHED RESOURCE_EXHAUSTED',
+    },
+    {
         id: 'refresh',
         section: 'generation',
-        terms: '登录态自动刷新 协议 ST 自动刷新 默认刷新间隔 分钟 Google Cookies Access Token',
+        terms: 'Profile 登录态维护 每账号 自动维护 会话维护间隔 分钟 Google Cookie 后台浏览器',
+    },
+    {
+        id: 'vidsConfig',
+        section: 'rules',
+        terms: 'Vids 会话维护 账号保护 保活 维护间隔 修复退避 连续失败 阈值 冷却 自定义规则 LIMIT DEACTIVE DISABLE',
     },
     {
         id: 'captcha',
@@ -59,10 +68,10 @@ const matchingCards = computed(() =>
 )
 const cardVisible = (id) => matchingCards.value.some((card) => card.id === id)
 const sectionVisible = (id) =>
-    (settingsQuery.value.trim() || group.value === 'all' || group.value === id) && matchingCards.value.some((card) => card.section === id)
+    (settingsQuery.value.trim() || group.value === id) && matchingCards.value.some((card) => card.section === id)
 function jumpToSection(id) {
     settingsQuery.value = ''
-    group.value = id
+    group.value = groups.some((item) => item.id === id) ? id : 'general'
 }
 const loading = ref(true)
 const failures = ref([])
@@ -70,12 +79,34 @@ const loaded = reactive(new Set())
 const snapshots = reactive({})
 const busy = reactive(new Set())
 const savedAt = reactive({})
-const admin = reactive({ admin_username: '', api_key: '', error_ban_threshold: 3, debug_enabled: false })
+const admin = reactive({ admin_username: '', api_key: '', debug_enabled: false })
 const password = reactive({ username: '', old_password: '', new_password: '', confirm_password: '' })
 const newKey = ref('')
 const generation = reactive({ image_timeout: 300, video_timeout: 1500, max_retries: 3 })
+const defaultAccountErrorRules = [
+    'PUBLIC_ERROR_MODEL_ACCESS_DENIED|LIMIT|0s',
+    'PUBLIC_ERROR_USER_QUOTA_REACHED|LIMIT|24h',
+    'Resource has been exhausted (e.g. check quota).|LIMIT|1s',
+    'PUBLIC_ERROR_USER_REQUESTS_THROTTLED|LIMIT|3s',
+    'RESOURCE_EXHAUSTED|LIMIT|5s',
+].join('\n')
+const accountErrorPolicy = reactive({
+    rules: defaultAccountErrorRules,
+    consecutive_failure_threshold: 3,
+    failure_cooldown_seconds: 300,
+    max_account_attempts: 3,
+})
+const accountErrorPolicyError = ref('')
+const vidsConfig = reactive({
+    keepalive_enabled: true,
+    keepalive_interval_minutes: 10,
+    repair_cooldown_seconds: 300,
+    consecutive_failure_threshold: 3,
+    failure_cooldown_seconds: 300,
+    rules: '',
+})
+const vidsConfigError = ref('')
 const callLogic = reactive({ call_mode: 'default' })
-const refreshConfig = reactive({ enabled: false, refresh_interval_minutes: 120 })
 const cache = reactive({ enabled: false, timeout: 7200, base_url: '', effective_base_url: '' })
 const captcha = reactive({
     captcha_method: 'remote_browser',
@@ -94,18 +125,31 @@ const release = reactive({
 const releaseCheck = reactive({ loading: false, checked_at: '', status: '', message: '' })
 let loadRequest
 const configSources = [
-    { id: 'admin', path: '/api/admin/config', target: admin },
-    { id: 'generation', path: '/api/config/generation', target: generation, wrap: true },
-    { id: 'callLogic', path: '/api/call-logic/config', target: callLogic, wrap: true },
     {
-        id: 'refresh',
-        path: '/api/token-refresh/config',
-        target: refreshConfig,
+        id: 'admin',
+        path: '/api/admin/config',
+        target: admin,
+        readOnly: true,
         map: (data) => ({
-            enabled: data.config.protocol_refresh_enabled,
-            refresh_interval_minutes: data.config.refresh_interval_minutes,
+            admin_username: data.admin_username,
+            api_key: data.api_key,
+            debug_enabled: data.debug_enabled,
         }),
     },
+    { id: 'generation', path: '/api/config/generation', target: generation, wrap: true },
+    {
+        id: 'errorPolicy',
+        path: '/api/account-error-policy',
+        target: accountErrorPolicy,
+        map: (data) => accountErrorPolicyPayload({ ...data.config, rules: data.config.rules ?? defaultAccountErrorRules }),
+    },
+    {
+        id: 'vidsConfig',
+        path: '/api/admin/vids/config',
+        target: vidsConfig,
+        map: (data) => vidsConfigPayload({ ...vidsConfig, ...data.config }),
+    },
+    { id: 'callLogic', path: '/api/call-logic/config', target: callLogic, wrap: true },
     { id: 'cache', path: '/api/cache/config', target: cache, wrap: true },
     {
         id: 'captcha',
@@ -120,7 +164,29 @@ const configSources = [
     },
 ]
 const string = (value) => JSON.stringify(value)
-const tracked = (id, value) => (id === 'admin' ? { error_ban_threshold: value.error_ban_threshold } : value)
+function accountErrorPolicyPayload(value = accountErrorPolicy) {
+    return {
+        rules: value.rules,
+        consecutive_failure_threshold: value.consecutive_failure_threshold,
+        failure_cooldown_seconds: value.failure_cooldown_seconds,
+        max_account_attempts: value.max_account_attempts,
+    }
+}
+function fillAccountRuleExamples() {
+    accountErrorPolicy.rules = defaultAccountErrorRules
+    accountErrorPolicyError.value = ''
+}
+function vidsConfigPayload(value = vidsConfig) {
+    return {
+        keepalive_enabled: value.keepalive_enabled,
+        keepalive_interval_minutes: value.keepalive_interval_minutes,
+        repair_cooldown_seconds: value.repair_cooldown_seconds,
+        consecutive_failure_threshold: value.consecutive_failure_threshold,
+        failure_cooldown_seconds: value.failure_cooldown_seconds,
+        rules: value.rules,
+    }
+}
+const tracked = (id, value) => id === 'errorPolicy' ? accountErrorPolicyPayload(value) : id === 'vidsConfig' ? vidsConfigPayload(value) : value
 function markSnapshot(id, value) {
     snapshots[id] = string(tracked(id, value))
 }
@@ -129,7 +195,7 @@ function dirty(id, value) {
 }
 const dirtyCount = computed(
     () =>
-        configSources.filter((item) => dirty(item.id, item.target)).length +
+        configSources.filter((item) => !item.readOnly && dirty(item.id, item.target)).length +
         Number(dirty('debug', { enabled: admin.debug_enabled })) +
         Number(!!newKey.value.trim()) +
         Number(
@@ -323,6 +389,67 @@ async function saveCaptcha() {
         window.dispatchEvent(new Event('captcha-config-saved'))
     }
 }
+function validateAccountErrorPolicy(value) {
+    const bounds = [
+        ['consecutive_failure_threshold', 1, 100, '连续失败保护阈值'],
+        ['failure_cooldown_seconds', 1, 86400, '连续失败冷却时间'],
+        ['max_account_attempts', 1, 10, '最多账号尝试次数'],
+    ]
+    for (const [field, min, max, label] of bounds) {
+        if (!Number.isInteger(value[field]) || value[field] < min || value[field] > max)
+            return `${label}需为 ${min}–${max} 之间的整数`
+    }
+    return ''
+}
+async function saveAccountErrorPolicy() {
+    if (busy.has('errorPolicy')) return
+    if (!loaded.has('errorPolicy')) return ElMessage.warning('请先成功读取此组配置，再保存修改')
+    const submitted = accountErrorPolicyPayload()
+    accountErrorPolicyError.value = validateAccountErrorPolicy(submitted)
+    if (accountErrorPolicyError.value) return
+    busy.add('errorPolicy')
+    try {
+        ensure(await api.post('/api/account-error-policy', submitted))
+        markSnapshot('errorPolicy', submitted)
+        savedAt.errorPolicy = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+        ElMessage.success('错误规则与账号保护已保存')
+    } catch (error) {
+        accountErrorPolicyError.value = error.message || '规则保存失败，请检查后重试'
+        notifyError(error)
+    } finally {
+        busy.delete('errorPolicy')
+    }
+}
+async function saveVidsConfig() {
+    if (busy.has('vidsConfig')) return
+    if (!loaded.has('vidsConfig')) return ElMessage.warning('请先成功读取 Vids 配置，再保存修改')
+    const submitted = vidsConfigPayload()
+    const bounds = [
+        ['keepalive_interval_minutes', 1, 1440, 'Vids 维护间隔'],
+        ['repair_cooldown_seconds', 30, 86400, 'Vids 修复退避时间'],
+        ['consecutive_failure_threshold', 1, 100, 'Vids 连续失败保护阈值'],
+        ['failure_cooldown_seconds', 1, 86400, 'Vids 连续失败冷却时间'],
+    ]
+    vidsConfigError.value = ''
+    for (const [field, min, max, label] of bounds) {
+        if (!Number.isInteger(submitted[field]) || submitted[field] < min || submitted[field] > max) {
+            vidsConfigError.value = `${label}需为 ${min}–${max} 之间的整数`
+            return
+        }
+    }
+    busy.add('vidsConfig')
+    try {
+        ensure(await api.post('/api/admin/vids/config', submitted))
+        markSnapshot('vidsConfig', submitted)
+        savedAt.vidsConfig = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+        ElMessage.success('Vids 会话维护与账号保护已保存')
+    } catch (error) {
+        vidsConfigError.value = error.message || 'Vids 配置保存失败，请检查后重试'
+        notifyError(error)
+    } finally {
+        busy.delete('vidsConfig')
+    }
+}
 watch(
     [() => route.query.section, loading],
     async ([section, isLoading]) => {
@@ -339,7 +466,7 @@ onMounted(load)
 </script>
 
 <template>
-    <div class="settings-view" :class="{ 'settings-all': group === 'all' && !settingsQuery.trim() }">
+    <div class="settings-view">
         <header class="page-heading">
             <div>
                 <h1>工作室设置</h1>
@@ -368,7 +495,6 @@ onMounted(load)
                 aria-label="搜索设置"
             />
             <nav class="settings-nav" aria-label="设置分区" role="tablist">
-                <button role="tab" :aria-selected="group === 'all' && !settingsQuery.trim()" :class="{ active: group === 'all' }" @click="jumpToSection('all')">全部设置</button>
                 <button
                     v-for="item in groups"
                     :key="item.id"
@@ -507,54 +633,6 @@ onMounted(load)
                                     </el-button>
                                 </div>
                             </section>
-                            <section
-                                v-show="cardVisible('health')"
-                                data-setting-card="health"
-                                class="surface settings-card"
-                            >
-                                <div class="card-heading">
-                                    <div>
-                                        <h3>账号健康策略</h3>
-                                        <p>连续失败达到阈值时自动暂停账号</p>
-                                    </div>
-                                    <el-tag v-if="dirty('admin', admin)" type="warning" size="small">未保存</el-tag>
-                                </div>
-                                <el-form label-position="top">
-                                    <el-form-item label="连续错误暂停阈值">
-                                        <el-input-number
-                                            v-model="admin.error_ban_threshold"
-                                            :min="1"
-                                            :max="100"
-                                            controls-position="right"
-                                        />
-                                        <span class="field-note">
-                                            当前设置：连续 {{ admin.error_ban_threshold }} 次错误后暂停分配任务
-                                        </span>
-                                    </el-form-item>
-                                </el-form>
-                                <div class="save-row">
-                                    <span>
-                                        {{
-                                            savedAt.admin ? '已保存于 ' + savedAt.admin : '修复会话后可手动重新启用账号'
-                                        }}
-                                    </span>
-                                    <el-button
-                                        type="primary"
-                                        :loading="busy.has('admin')"
-                                        :disabled="!loaded.has('admin')"
-                                        @click="
-                                            save(
-                                                'admin',
-                                                '/api/admin/config',
-                                                { error_ban_threshold: admin.error_ban_threshold },
-                                                admin,
-                                            )
-                                        "
-                                    >
-                                        保存健康策略
-                                    </el-button>
-                                </div>
-                            </section>
                         </div>
                     </section>
                     <section
@@ -653,7 +731,7 @@ onMounted(load)
                                 <el-radio-group v-model="callLogic.call_mode" class="mode-options">
                                     <el-radio value="default" border>
                                         <strong>默认调度</strong>
-                                        <span>沿用当前可用账号分配逻辑</span>
+                                        <span>优先低负载；相同负载按会话就绪、剩余槽位与最久未使用排序</span>
                                     </el-radio>
                                     <el-radio value="polling" border>
                                         <strong>轮询调度</strong>
@@ -665,7 +743,7 @@ onMounted(load)
                                         {{
                                             savedAt.callLogic
                                                 ? '已保存于 ' + savedAt.callLogic
-                                                : '两种模式均遵循账号能力与并发设置'
+                                                : '两种模式均跳过冷却、异常、停用及本次已失败的账号'
                                         }}
                                     </span>
                                     <el-button
@@ -692,55 +770,167 @@ onMounted(load)
                             >
                                 <div class="card-heading">
                                     <div>
-                                        <h3>登录态自动刷新</h3>
-                                        <p>定期使用保存的 Google Cookies 刷新 Session Token</p>
+                                        <h3>Profile 登录态维护</h3>
+                                        <p>按每个账号的自动维护开关和会话维护间隔执行，已有账号沿用各自设置。</p>
                                     </div>
-                                    <el-tag v-if="dirty('refresh', refreshConfig)" type="warning" size="small">
+                                </div>
+                                <p class="field-note">新建 Profile 账号默认每 30 分钟维护一次；已有账号按各自保存的间隔执行。后台每分钟扫描到期账号。</p>
+                                <p class="field-note">日常优先通过 HTTP 校验会话；到维护时间后由后台无头浏览器访问 Flow 续期并正常关闭。Google 登录已失效时需重新登录。</p>
+                                <div class="save-row">
+                                    <span>在账号管理中修改单个账号的维护开关和间隔。</span>
+                                    <RouterLink to="/accounts" class="el-button">管理账号维护设置</RouterLink>
+                                </div>
+                            </section>
+                        </div>
+                    </section>
+                    <section
+                        v-show="sectionVisible('rules')"
+                        id="settings-rules"
+                        class="settings-section"
+                        data-section="rules"
+                    >
+                        <div class="settings-grid">
+                            <section
+                                v-show="cardVisible('errorPolicy')"
+                                data-setting-card="errorPolicy"
+                                class="surface settings-card error-policy-card"
+                            >
+                                <div class="card-heading">
+                                    <div>
+                                        <h3>Flow 自定义规则</h3>
+                                        <p>每行一条规则，按顺序匹配；修改、删除或清空后保存即可生效。</p>
+                                    </div>
+                                    <el-tag v-if="dirty('errorPolicy', accountErrorPolicy)" type="warning" size="small">
                                         未保存
                                     </el-tag>
                                 </div>
-                                <div class="switch-row">
-                                    <div>
-                                        <strong>启用协议 ST 自动刷新</strong>
-                                        <p>Access Token 自动刷新始终开启</p>
-                                    </div>
-                                    <el-switch v-model="refreshConfig.enabled" />
-                                </div>
-                                <el-form label-position="top">
-                                    <el-form-item label="默认刷新间隔（分钟）">
-                                        <el-input-number
-                                            v-model="refreshConfig.refresh_interval_minutes"
-                                            :min="1"
-                                            :max="1440"
-                                            :disabled="!refreshConfig.enabled"
-                                            controls-position="right"
+                                <el-form label-position="top" @submit.prevent="saveAccountErrorPolicy">
+                                    <el-form-item label="自定义错误规则" :error="accountErrorPolicyError">
+                                        <el-input
+                                            v-model="accountErrorPolicy.rules"
+                                            type="textarea"
+                                            :rows="6"
+                                            :maxlength="65536"
+                                            placeholder="每行一条：报错关键字|操作|时间，例如 PUBLIC_ERROR_USER_QUOTA_REACHED|LIMIT|24h"
+                                            class="error-policy-input" spellcheck="false"
+                                            aria-label="自定义错误规则"
+                                            :disabled="!loaded.has('errorPolicy')"
+                                            @input="accountErrorPolicyError = ''"
                                         />
-                                        <span class="field-note">账号详情中可以设置独立的刷新间隔</span>
+                                        <span class="field-note">
+                                            格式：关键字|操作|时间。不区分大小写，首条匹配生效；清空后不使用关键词规则。
+                                        </span>
                                     </el-form-item>
+                                    <div class="error-policy-actions" aria-label="错误规则操作说明">
+                                        <div><code>LIMIT|24h</code><span>账号冷却指定时间并换号；<code>LIMIT|0s</code> 只在本次请求中跳过该账号。</span></div>
+                                        <div><code>DEACTIVE</code><span>标记账号异常并换号，需要处理异常后恢复。</span></div>
+                                        <div><code>RETRY</code><span>不修改账号状态，直接重试。</span></div>
+                                        <div><code>DISABLE</code><span>停用账号并换号，需要手动启用。</span></div>
+                                        <div><code>DELAY|10s</code><span>等待指定时间后重试本次请求，最多 300 秒。</span></div>
+                                    </div>
+                                    <p class="field-note error-policy-units">时间使用 s、m、h，例如 3s、5m、24h；LIMIT 最长 7 天。</p>
+                                    <div class="error-policy-example-row">
+                                        <span class="field-note">示例只是可编辑内容，不会在删除后隐式生效。</span>
+                                        <el-button text :disabled="!loaded.has('errorPolicy')" @click="fillAccountRuleExamples">填入示例规则</el-button>
+                                    </div>
+                                    <div class="settings-form-grid error-policy-limits">
+                                        <el-form-item label="最多账号尝试次数（含首次）">
+                                            <el-input-number
+                                                v-model="accountErrorPolicy.max_account_attempts"
+                                                :min="1"
+                                                :max="10"
+                                                controls-position="right"
+                                            />
+                                            <span class="field-note">每份作品的账号尝试上限，达到后返回最后的错误。</span>
+                                        </el-form-item>
+                                        <el-form-item label="连续失败保护阈值">
+                                            <el-input-number
+                                                v-model="accountErrorPolicy.consecutive_failure_threshold"
+                                                :min="1"
+                                                :max="100"
+                                                controls-position="right"
+                                            />
+                                            <span class="field-note">同一账号连续失败达到此次数后暂停分配；成功会清零。</span>
+                                        </el-form-item>
+                                        <el-form-item label="连续失败冷却时间（秒）">
+                                            <el-input-number
+                                                v-model="accountErrorPolicy.failure_cooldown_seconds"
+                                                :min="1"
+                                                :max="86400"
+                                                controls-position="right"
+                                            />
+                                            <span class="field-note">保护冷却到期后可重新参与调度。</span>
+                                        </el-form-item>
+                                    </div>
                                 </el-form>
+                                <p class="field-note error-policy-safety">仅对明确未受理的生成请求自动重试；已受理、已返回作品或提交结果未知时，不会重复发起生成。</p>
                                 <div class="save-row">
-                                    <span>
-                                        {{
-                                            savedAt.refresh
-                                                ? '已保存于 ' + savedAt.refresh
-                                                : '登录过期时请重新同步 Google 会话'
-                                        }}
-                                    </span>
+                                    <span>{{ savedAt.errorPolicy ? '已保存于 ' + savedAt.errorPolicy : '保存后对新请求生效' }}</span>
                                     <el-button
                                         type="primary"
-                                        :loading="busy.has('refresh')"
-                                        :disabled="!loaded.has('refresh')"
-                                        @click="
-                                            save(
-                                                'refresh',
-                                                '/api/token-refresh/config',
-                                                { ...refreshConfig },
-                                                refreshConfig,
-                                            )
-                                        "
+                                        :loading="busy.has('errorPolicy')"
+                                        :disabled="!loaded.has('errorPolicy')"
+                                        @click="saveAccountErrorPolicy"
                                     >
-                                        保存刷新设置
+                                        保存错误规则
                                     </el-button>
+                                </div>
+                            </section>
+                            <section
+                                v-show="cardVisible('vidsConfig')"
+                                data-setting-card="vidsConfig"
+                                class="surface settings-card error-policy-card"
+                            >
+                                <div class="card-heading">
+                                    <div>
+                                        <h3>Vids 会话维护与账号保护</h3>
+                                        <p>独立维护已绑定的 Vids 账号，保护状态和统计单独记录。</p>
+                                    </div>
+                                    <el-tag v-if="dirty('vidsConfig', vidsConfig)" type="warning" size="small">未保存</el-tag>
+                                </div>
+                                <el-form label-position="top" :disabled="!loaded.has('vidsConfig')" @submit.prevent="saveVidsConfig">
+                                    <el-form-item label="后台维护已绑定 Vids 会话">
+                                        <el-switch v-model="vidsConfig.keepalive_enabled" aria-label="后台维护已绑定 Vids 会话" />
+                                        <span class="field-note">空闲且启用的账号会定期校验会话；会话失效时按退避时间尝试修复。</span>
+                                    </el-form-item>
+                                    <div class="settings-form-grid error-policy-limits">
+                                        <el-form-item label="Vids 维护间隔（分钟）">
+                                            <el-input-number v-model="vidsConfig.keepalive_interval_minutes" :min="1" :max="1440" controls-position="right" />
+                                        </el-form-item>
+                                        <el-form-item label="Vids 修复退避时间（秒）">
+                                            <el-input-number v-model="vidsConfig.repair_cooldown_seconds" :min="30" :max="86400" controls-position="right" />
+                                            <span class="field-note">连续修复失败时逐步延长等待，避免频繁打开登录会话。</span>
+                                        </el-form-item>
+                                        <el-form-item label="Vids 连续失败保护阈值">
+                                            <el-input-number v-model="vidsConfig.consecutive_failure_threshold" :min="1" :max="100" controls-position="right" />
+                                            <span class="field-note">明确属于账号的生成失败达到阈值后暂停分配；生成成功会清零。</span>
+                                        </el-form-item>
+                                        <el-form-item label="Vids 连续失败冷却时间（秒）">
+                                            <el-input-number v-model="vidsConfig.failure_cooldown_seconds" :min="1" :max="86400" controls-position="right" />
+                                            <span class="field-note">冷却到期后可重新分配，也可在账号详情中手动解除保护。</span>
+                                        </el-form-item>
+                                    </div>
+                                    <el-form-item label="Vids 自定义错误规则" :error="vidsConfigError">
+                                        <el-input
+                                            v-model="vidsConfig.rules"
+                                            type="textarea" :rows="4" :maxlength="65536"
+                                            placeholder="每行一条：报错关键字|操作|时间，例如 upstream_http_429|LIMIT|5m"
+                                            class="error-policy-input" spellcheck="false"
+                                            aria-label="Vids 自定义错误规则"
+                                            @input="vidsConfigError = ''"
+                                        />
+                                        <span class="field-note">按顺序匹配，清空后不使用关键词规则。仅支持 LIMIT、DEACTIVE、DISABLE。</span>
+                                    </el-form-item>
+                                    <div class="error-policy-actions" aria-label="Vids 错误规则操作说明">
+                                        <div><code>LIMIT|5m</code><span>暂停该账号的 Vids 新任务，冷却到期后恢复；时间可用 s、m、h，最长 7 天。</span></div>
+                                        <div><code>DEACTIVE</code><span>标记 Vids 账号异常，处理后手动解除保护。</span></div>
+                                        <div><code>DISABLE</code><span>停用 Vids 新任务，手动解除保护后恢复。</span></div>
+                                    </div>
+                                </el-form>
+                                <p class="field-note error-policy-safety">已受理、结果未知和下载失败会保留原任务记录；维护、查询和下载异常不计入账号连续失败。</p>
+                                <div class="save-row">
+                                    <span>{{ savedAt.vidsConfig ? '已保存于 ' + savedAt.vidsConfig : '保存后对后续维护和新请求生效' }}</span>
+                                    <el-button type="primary" :loading="busy.has('vidsConfig')" :disabled="!loaded.has('vidsConfig')" @click="saveVidsConfig">保存 Vids 配置</el-button>
                                 </div>
                             </section>
                         </div>
@@ -848,14 +1038,14 @@ onMounted(load)
                                 <div class="card-heading">
                                     <div>
                                         <h3>作品媒体缓存</h3>
-                                        <p>将生成作品保存在服务端，返回可访问的媒体链接</p>
+                                        <p>Flow 与 Vids 共用缓存保留时间；清理不删除登录资料、生成收据或未确认任务。</p>
                                     </div>
                                     <el-tag v-if="dirty('cache', cache)" type="warning" size="small">未保存</el-tag>
                                 </div>
                                 <div class="switch-row">
                                     <div>
-                                        <strong>启用媒体缓存</strong>
-                                        <p>图片与视频生成完成后自动写入缓存</p>
+                                        <strong>启用 Flow 媒体链接缓存</strong>
+                                        <p>Flow 生成后缓存媒体并返回链接；Vids 为下载接口保留本地成品，不受此开关影响。</p>
                                     </div>
                                     <el-switch v-model="cache.enabled" />
                                 </div>
@@ -867,9 +1057,8 @@ onMounted(load)
                                             :max="86400"
                                             :step="600"
                                             controls-position="right"
-                                            :disabled="!cache.enabled"
                                         />
-                                        <span class="field-note">0 表示持续保留；7200 秒等于 2 小时</span>
+                                        <span class="field-note">Flow 缓存与 Vids 已完成媒体均使用此期限；0 表示持续保留，7200 秒等于 2 小时。修改后自动生效，已清理文件不因延长期限恢复。</span>
                                     </el-form-item>
                                     <el-form-item label="公开访问地址">
                                         <el-input
@@ -1017,756 +1206,157 @@ onMounted(load)
 </template>
 
 <style scoped>
-.settings-alert {
-    margin-bottom: 20px;
-}
-.settings-layout {
-    display: block;
-}
-.settings-nav {
+.settings-view { min-width: 0; }
+.settings-alert { margin-bottom: 12px; }
+.page-heading { margin-bottom: 14px; }
+.settings-toolbar {
     display: flex;
-    flex-wrap: wrap;
-    gap: 5px;
+    align-items: center;
+    gap: 14px;
+    position: sticky;
+    top: 72px;
+    z-index: 10;
+    padding: 8px 12px;
+    margin-bottom: 12px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
 }
+.settings-nav { order: -1; display: flex; gap: 3px; flex: 1; min-width: 0; overflow-x: auto; }
 .settings-nav > button {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
-    padding: 9px 10px;
-    margin: 0;
+    white-space: nowrap;
+    padding: 9px 12px;
     border: 0;
-    border-radius: 8px;
+    border-radius: 6px;
     color: var(--muted);
     background: transparent;
-    font: inherit;
-    font-size: 12px;
-}
-.settings-nav > button:hover,
-.settings-nav > button.active {
-    color: var(--accent);
-    background: var(--pink-soft);
-}
-.settings-toolbar {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-    flex-wrap: wrap;
-    padding: 10px 12px;
-    border: 1px solid var(--line);
-    background: var(--surface);
-    border-radius: 12px;
-    margin-bottom: 14px;
-    position: sticky;
-    top: 76px;
-    z-index: 10;
-}
-.settings-search {
-    width: min(340px, 100%);
-}
-.settings-match-count {
-    color: var(--muted);
-    font-size: 11px;
-    margin-left: auto;
-    white-space: nowrap;
-}
-.settings-main {
-    display: block;
-    min-width: 0;
-    align-items: start;
-}
-.settings-section {
-    min-width: 0;
-    scroll-margin-top: 164px;
-    margin-bottom: 18px;
-}
-.settings-section[data-section='cache'],
-.settings-section[data-section='integration'] {
-    grid-column: auto;
-}
-.settings-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 16px;
-    align-items: start;
-}
-.settings-section[data-section='cache'] .settings-grid,
-.settings-section[data-section='integration'] .settings-grid {
-    grid-template-columns: minmax(0, 1fr);
-}
-.settings-section[data-section='captcha'] .settings-grid {
-    grid-template-columns: minmax(0, 1fr);
-}
-.settings-section[data-section='captcha'] .settings-card > .el-form {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0 20px;
-}
-.settings-section[data-section='captcha'] .settings-card > .el-form > .settings-form-grid {
-    grid-column: 1 / -1;
-}
-.captcha-steps {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px 32px;
-    margin: 0 0 22px;
-    padding: 14px 18px 14px 34px;
-    color: var(--ink);
-    background: var(--surface-soft);
-    border-radius: 10px;
-    font-size: 13px;
-    line-height: 1.7;
-}
-.captcha-steps a,
-.captcha-service-address a {
-    color: var(--accent-strong);
-    text-decoration: underline;
-    text-underline-offset: 3px;
-}
-.captcha-service-address {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px 16px;
-    min-height: 34px;
-}
-.captcha-service-address a {
-    overflow-wrap: anywhere;
-}
-.settings-card {
-    container: settings-card / inline-size;
-}
-.settings-grid > .settings-card {
-    display: flex;
-    flex-direction: column;
-    height: auto;
-}
-.settings-grid > .release-card {
-    grid-column: 1 / -1;
-}
-.release-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 16px 34px;
-    margin: 2px 0 20px;
-}
-.release-meta > div {
-    display: grid;
-    gap: 6px;
-}
-.release-meta span,
-.release-entry-heading > span,
-.release-note {
-    color: var(--muted);
-    font-size: 13px;
-}
-.release-meta strong {
-    font-size: 16px;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-}
-.release-entry + .release-entry {
-    border-top: 1px solid var(--line);
-    padding-top: 16px;
-}
-.release-entry-heading {
-    display: flex;
-    align-items: baseline;
-    gap: 12px;
     cursor: pointer;
-    padding: 2px 0 10px;
-    list-style: none;
-}
-.release-entry-heading::-webkit-details-marker {
-    display: none;
-}
-.release-entry-heading .release-entry-toggle {
-    margin-left: auto;
-    font-size: 12px;
-}
-.release-entry ul {
-    margin: 12px 0 18px;
-    padding-left: 20px;
-    color: var(--muted);
-    font-size: 14px;
-    line-height: 1.8;
-}
-.release-entry li + li {
-    margin-top: 7px;
-}
-.release-links {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 12px 18px;
-    border-top: 1px solid var(--line);
-    padding-top: 16px;
-    font-size: 14px;
-}
-.release-links a {
-    color: var(--accent);
-}
-.release-note {
-    line-height: 1.7;
-    margin: 0 0 18px;
-}
-.settings-section-title {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    margin-bottom: 12px;
-}
-.settings-section-title h2 {
-    font-size: 18px;
-    margin: 0;
-}
-.settings-section-title > p {
+    font: inherit;
     font-size: 13px;
-    color: var(--muted);
-    margin: 0 0 0 5px;
 }
-.settings-card {
-    padding: 12px 14px;
-    margin: 0;
-}
-.card-heading {
-    display: flex;
-    justify-content: space-between;
-    gap: 16px;
-    align-items: flex-start;
-    margin-bottom: 16px;
-}
-.card-heading h3 {
-    font-size: 15px;
-    margin: 0;
-    line-height: 1.6;
-    font-weight: 700;
-}
-.card-heading p {
-    font-size: 13px;
-    color: var(--muted);
-    line-height: 1.8;
-    margin: 7px 0 0;
-}
-.settings-form-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 14px;
-}
-.settings-card :deep(.el-form-item__label) {
-    font-size: 14px;
-    font-weight: 550;
-}
-.settings-card :deep(.el-form-item) {
-    margin-bottom: 15px;
-}
-.settings-card :deep(.el-input-number) {
-    width: 180px;
-}
-.settings-card :deep(.el-select) {
-    width: 100%;
-}
-.input-with-action {
-    display: flex;
-    gap: 9px;
-    width: 100%;
-}
-.input-with-action > .el-input {
-    flex: 1;
-}
-.field-note {
+.settings-nav > button:hover { color: var(--ink); background: var(--surface-soft); }
+.settings-nav > button.active { color: var(--accent-strong); background: var(--pink-soft); font-weight: 650; }
+.settings-nav > button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.settings-search { width: 250px; flex: 0 0 auto; }
+.settings-match-count { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.settings-match-count:empty { display: none; }
+.settings-main { min-width: 0; }
+.settings-section { margin: 0; scroll-margin-top: 150px; }
+.settings-section-title { display: none; }
+.settings-grid {
     display: block;
-    width: 100%;
-    font-size: 13px;
-    color: var(--muted);
-    line-height: 1.8;
-    margin-top: 7px;
-}
-.save-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 15px;
-    padding-top: 14px;
-    margin-top: 0;
-    flex-wrap: wrap;
-}
-.save-row > span {
-    font-size: 13px;
-    color: var(--muted);
-    line-height: 1.7;
-    margin-right: auto;
-}
-.switch-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 18px;
-    padding-bottom: 11px;
-    margin-bottom: 13px;
-}
-.switch-row strong {
-    font-size: 14px;
-    font-weight: 650;
-}
-.switch-row p {
-    font-size: 13px;
-    color: var(--muted);
-    line-height: 1.8;
-    margin: 7px 0 0;
-}
-.mode-options {
-    width: 100%;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 14px;
-}
-.mode-options :deep(.el-radio) {
-    height: auto;
-    min-height: 62px;
-    margin: 0;
-    padding: 13px 12px;
-    border-radius: 13px;
-}
-.mode-options strong {
-    display: block;
-    font-size: 13px;
-}
-.mode-options span {
-    display: block;
-    font-size: 13px;
-    color: var(--muted);
-    margin-top: 7px;
-    white-space: normal;
-    line-height: 1.6;
-}
-.effective-address {
-    display: flex;
-    align-items: center;
-    gap: 15px;
-    background: var(--surface-soft);
-    padding: 14px 16px;
-    border-radius: 12px;
-    margin-bottom: 24px;
-    flex-wrap: wrap;
-}
-.effective-address > span {
-    font-size: 13px;
-    color: var(--muted);
-}
-.effective-address code {
-    font-size: 13px;
-    overflow-wrap: anywhere;
-    flex: 1;
-}
-.settings-skeleton {
-    padding: 30px;
-}
-.settings-main {
     min-width: 0;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
 }
-
-@media (min-width: 1600px) {
-    .settings-section[data-section='general'] .settings-grid,
-    .settings-section[data-section='generation'] .settings-grid {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-    .settings-section[data-section='cache'] {
-        grid-column: auto;
-    }
-    .settings-section[data-section='integration'] .settings-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
+.settings-section + .settings-section { margin-top: 12px; }
+.settings-card {
+    display: block;
+    min-width: 0;
+    padding: 18px 22px;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
 }
-@media (max-width: 1200px) {
-    .settings-search {
-        width: 100%;
-    }
-    .settings-toolbar {
-        top: 72px;
-    }
-    .settings-nav {
-        flex: 1;
-    }
+.settings-card + .settings-card { border-top: 1px solid var(--line); }
+.card-heading { display: flex; justify-content: space-between; gap: 14px; align-items: center; margin-bottom: 14px; }
+.card-heading h3 { margin: 0; font-size: 14px; line-height: 1.6; font-weight: 650; }
+.card-heading p { margin: 3px 0 0; font-size: 12px; color: var(--muted); line-height: 1.65; }
+.settings-form-grid { display: contents; }
+.settings-card :deep(.el-form-item) {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    align-items: start;
+    column-gap: 22px;
+    margin-bottom: 14px;
 }
-@media (min-width: 1100px) and (max-width: 1599px) {
-    .settings-grid > [data-setting-card='health'] {
-        grid-column: 1 / -1;
-        display: grid;
-        grid-template-columns: minmax(180px, 1fr) minmax(220px, 1fr) auto;
-        gap: 18px;
-        align-items: center;
-    }
-    [data-setting-card='health'] .card-heading,
-    [data-setting-card='health'] :deep(.el-form-item) {
-        margin: 0;
-    }
-    [data-setting-card='health'] .save-row {
-        padding: 0;
-    }
-    [data-setting-card='health'] .save-row > span {
-        display: none;
-    }
-}
-@media (max-width: 900px) {
-    .settings-main {
-        grid-template-columns: 1fr;
-    }
-    .settings-section[data-section='cache'],
-    .settings-section[data-section='integration'] {
-        grid-column: 1;
-    }
-    .settings-toolbar {
-        position: static;
-    }
-    .settings-section {
-        scroll-margin-top: 90px;
-    }
-}
-@media (max-width: 1100px) {
-    .settings-grid {
-        grid-template-columns: minmax(0, 1fr);
-    }
-}
-@media (max-width: 650px) {
-    .settings-section[data-section='captcha'] .settings-card > .el-form {
-        grid-template-columns: minmax(0, 1fr);
-        gap: 0;
-    }
-    .settings-grid,
-    .settings-section[data-section='integration'] .settings-grid {
-        grid-template-columns: minmax(0, 1fr);
-    }
-    .settings-card {
-        padding: 17px 16px;
-    }
-    .settings-search {
-        width: 100%;
-    }
-    .settings-nav {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        width: 100%;
-    }
-    .settings-nav > button {
-        justify-content: center;
-        font-size: 11px;
-        padding: 9px 6px;
-    }
-    .settings-match-count {
-        width: 100%;
-        margin-left: 0;
-    }
-    .settings-section-title {
-        flex-wrap: wrap;
-    }
-    .settings-section-title > p {
-        margin-left: auto;
-    }
-    .mode-options {
-        grid-template-columns: minmax(0, 1fr);
-    }
-    .card-heading {
-        gap: 10px;
-    }
-    .save-row {
-        gap: 10px;
-    }
-    .save-row > span {
-        flex: 1 1 130px;
-    }
-    .save-row .el-button {
-        margin-left: auto;
-    }
-}
-@container settings-card (max-width: 360px) {
-    .settings-form-grid {
-        grid-template-columns: minmax(0, 1fr);
-        gap: 0;
-    }
-    .mode-options {
-        grid-template-columns: minmax(0, 1fr);
-    }
-}
-
-.settings-nav strong,
-.switch-row strong,
-.mode-options strong,
 .settings-card :deep(.el-form-item__label) {
-    font-size: 14px;
+    float: none;
+    width: auto;
+    height: auto;
+    margin: 0;
+    padding: 6px 0 0;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 20px;
+    color: var(--ink);
 }
-.settings-card :deep(.el-input__inner) {
-    font-size: 14px;
+.settings-card :deep(.el-form-item__content) { min-width: 0; display: flex; align-items: center; flex-wrap: wrap; line-height: 1.6; }
+.settings-card :deep(.el-input), .settings-card :deep(.el-select) { width: 100%; }
+.settings-card :deep(.el-input-number) { width: 170px; }
+.settings-card :deep(.el-input-number .el-input) { width: 100%; }
+.input-with-action { display: flex; width: 100%; gap: 8px; }
+.input-with-action > .el-input { min-width: 0; flex: 1; }
+.field-note { display: block; flex-basis: 100%; width: 100%; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.save-row { display: flex; align-items: center; gap: 16px; padding-top: 2px; margin-top: 0; }
+.save-row > span { color: var(--muted); font-size: 12px; line-height: 1.6; margin-right: auto; }
+.save-row .el-button { min-width: 104px; }
+.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 2px 0 12px; margin-bottom: 8px; }
+.switch-row strong { font-size: 13px; font-weight: 500; }
+.switch-row p { margin: 3px 0 0; font-size: 12px; color: var(--muted); line-height: 1.7; }
+.mode-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; width: 100%; margin-bottom: 12px; }
+.mode-options :deep(.el-radio) { height: auto; margin: 0; padding: 10px 12px; border-radius: 6px; }
+.mode-options strong { display: block; font-size: 13px; }
+.mode-options span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.6; white-space: normal; }
+.error-policy-card > .card-heading { margin-bottom: 12px; }
+.error-policy-card :deep(.el-form-item:first-child) { display: block; }
+.error-policy-card :deep(.el-form-item:first-child .el-form-item__label) { display: block; padding: 0; margin-bottom: 7px; }
+.error-policy-input { width: 100%; }
+.error-policy-input :deep(textarea) { width: 100%; min-height: 150px; font-family: Consolas, 'SFMono-Regular', monospace; font-size: 13px; line-height: 1.8; padding: 11px 13px; }
+.error-policy-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 26px; font-size: 12px; line-height: 1.7; }
+.error-policy-actions > div { display: grid; grid-template-columns: 106px minmax(0, 1fr); gap: 10px; }
+.error-policy-actions code { color: var(--accent-strong); font-family: Consolas, 'SFMono-Regular', monospace; }
+.error-policy-example-row { display: flex; align-items: center; gap: 14px; margin: 0 0 14px; padding: 0 0 12px; border-bottom: 1px solid var(--line); }
+.error-policy-example-row .field-note { flex: 1; margin: 0; }
+.error-policy-limits { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+.error-policy-limits :deep(.el-form-item) { display: block; margin-bottom: 8px; }
+.error-policy-limits :deep(.el-form-item__label) { display: block; padding: 0; margin-bottom: 7px; }
+.error-policy-safety { margin-bottom: 12px; }
+.captcha-steps { display: flex; flex-wrap: wrap; gap: 4px 30px; margin: 0 0 14px; padding-left: 20px; font-size: 12px; line-height: 1.8; color: var(--muted); }
+.captcha-steps a, .captcha-service-address a, .release-links a { color: var(--accent-strong); }
+.captcha-service-address { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; min-height: 32px; }
+.captcha-service-address a { overflow-wrap: anywhere; }
+.effective-address { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0 0 12px; font-size: 12px; color: var(--muted); }
+.effective-address code { overflow-wrap: anywhere; flex: 1; color: var(--ink); }
+.release-meta { display: flex; flex-wrap: wrap; gap: 14px 35px; margin: 0 0 12px; }
+.release-meta > div { display: flex; align-items: baseline; gap: 9px; }
+.release-meta span, .release-note { color: var(--muted); font-size: 12px; }
+.release-meta strong { font-size: 14px; font-weight: 600; }
+.release-note { margin: 0 0 10px; line-height: 1.7; }
+.release-links { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; font-size: 12px; }
+.settings-skeleton { padding: 22px; }
+@media (max-width: 1200px) {
+    .settings-toolbar { flex-wrap: wrap; gap: 8px; }
+    .settings-nav { flex: 1 1 100%; }
+    .settings-search { width: 100%; }
 }
-
-html.dark .settings-nav > button:hover {
-    background: var(--surface-soft);
-}
-html.dark .settings-nav > button.active {
-    background: var(--pink-soft);
-}
-
-.empty-mascot {
-    width: 96px;
-    height: 96px;
-    margin: 0 auto;
-    border-radius: 24px;
-    background: var(--pink-soft);
-}
-.empty-mascot :deep(img) {
-    animation: none;
-}
-.settings-view :deep(.el-empty__description p) {
-    font-size: 14px;
-}
-.settings-view :deep(.el-empty__image) {
-    width: 96px;
-}
-.settings-nav > button:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 3px;
-}
-@media (min-width: 1051px) {
-    .settings-view .page-heading {
-        margin-bottom: 14px;
-    }
-    .settings-toolbar {
-        position: static;
-        margin-bottom: 14px;
-        padding: 7px 10px;
-        gap: 8px;
-    }
-    .settings-search {
-        width: 230px;
-    }
-    .settings-nav {
-        flex: 1;
-        gap: 2px;
-    }
-    .settings-nav > button {
-        padding: 7px 8px;
-        font-size: 12px;
-    }
-    .settings-match-count {
-        display: none;
-    }
-    .settings-main { display: block; }
-    .settings-section-title {
-        margin-bottom: 10px;
-    }
-    .settings-grid,
-    .settings-section[data-section='general'] .settings-grid,
-    .settings-section[data-section='generation'] .settings-grid {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 12px;
-    }
-    .settings-grid > [data-setting-card='health'] {
-        grid-column: auto;
-        display: flex;
-        gap: 0;
-        align-items: stretch;
-    }
-    .settings-section[data-section='integration'] .settings-grid {
-        grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
-    }
-    .settings-grid > .release-card {
-        grid-column: auto;
-    }
-    .card-heading {
-        margin-bottom: 12px;
-    }
-    .settings-card :deep(.el-form-item) {
-        margin-bottom: 10px;
-    }
-    .settings-card :deep(.el-form-item__label) {
-        padding-bottom: 3px;
-        font-size: 13px;
-    }
-    .settings-card .field-note,
-    .settings-card .card-heading p {
-        font-size: 12px;
-        line-height: 1.5;
-    }
-    .settings-form-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 8px;
-    }
-    .settings-grid > .settings-card > .save-row {
-        padding-top: 10px;
-        gap: 8px;
-    }
-    .settings-grid > .settings-card > .save-row > span {
-        font-size: 11px;
-    }
-    .settings-main > .settings-section + .settings-section {
-        margin-top: 18px;
-    }
-    .settings-view > .page-heading p,
-    .settings-section-title {
-        display: none;
-    }
-    .settings-nav > button .el-icon {
-        display: none;
-    }
-    .settings-card :deep(.el-input-number) {
-        max-width: 100%;
-    }
-    .settings-section[data-section='cache'] .settings-card > .el-form {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        column-gap: 20px;
-    }
-    .settings-card .mode-options {
-        grid-template-columns: 1fr;
-        gap: 8px;
-    }
-    .mode-options :deep(.el-radio) {
-        min-height: 48px;
-        padding: 8px;
-    }
-    .mode-options span {
-        margin-top: 3px;
-        font-size: 11px;
-    }
-    .settings-card .card-heading p {
-        margin-top: 3px;
-    }
-    .settings-grid > .settings-card > .save-row > span {
-        width: 100%;
-    }
-    .settings-grid > .settings-card > .save-row .el-button {
-        margin-left: auto;
-    }
-    .settings-section[data-section='captcha'] .settings-card > .el-form > .settings-form-grid {
-        grid-column: auto;
-    }
-}
-@media (min-width: 1051px) and (max-height: 740px) {
-    .settings-view > .page-heading {
-        margin-bottom: 8px;
-    }
-    .settings-view > .page-heading h1 {
-        font-size: 24px;
-    }
-    .settings-toolbar {
-        margin-bottom: 8px;
-    }
-    .settings-card {
-        padding-top: 10px;
-        padding-bottom: 10px;
-    }
-    .settings-card .switch-row {
-        padding-bottom: 6px;
-        margin-bottom: 6px;
-    }
-    .settings-card .effective-address {
-        margin-top: 8px;
-    }
-    .settings-section[data-section='cache'] .save-row > span {
-        width: auto;
-    }
-}
-@media (max-width: 800px) {
-    .settings-view > .page-heading {
-        flex-direction: column;
-        align-items: stretch;
-    }
-    .page-actions {
-        justify-content: flex-start;
-    }
-}
-
-/* Wide workspaces show the available settings instead of an empty tab canvas. */
-@media (min-width: 1051px) {
-    .settings-toolbar {
-        padding: 0;
-        border: 0;
-        background: transparent;
-        gap: 12px;
-    }
-    .settings-search { width: 250px; }
-    .settings-main {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 16px;
-        align-items: start;
-    }
-    .settings-section { margin: 0; }
-    .settings-main > .settings-section + .settings-section { margin-top: 0; }
-    .settings-section-title { display: none; }
-    .settings-grid,
-    .settings-section[data-section='general'] .settings-grid,
-    .settings-section[data-section='generation'] .settings-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 12px;
-        align-items: start;
-    }
-    .settings-grid > [data-setting-card='health'],
-    .settings-grid > [data-setting-card='refresh'] {
-        grid-column: 1 / -1;
-    }
-    .settings-grid > [data-setting-card='health'] {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
-        gap: 12px;
-        align-items: center;
-    }
-    [data-setting-card='health'] .card-heading,
-    [data-setting-card='health'] :deep(.el-form-item),
-    [data-setting-card='health'] .save-row { margin: 0; padding: 0; }
-    [data-setting-card='health'] .field-note,
-    [data-setting-card='health'] .save-row > span { display: none; }
-    .settings-grid > .settings-card { height: auto; }
-    .settings-main > .settings-skeleton,
-    .settings-main > .el-empty { grid-column: 1 / -1; }
-}
-@media (min-width: 1051px) and (max-width: 1399px) {
-    .settings-main { grid-template-columns: minmax(0, 1fr); }
-    .settings-grid,
-    .settings-section[data-section='general'] .settings-grid,
-    .settings-section[data-section='generation'] .settings-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .settings-grid > [data-setting-card='health'],
-    .settings-grid > [data-setting-card='refresh'] { grid-column: auto; }
-    .settings-grid > [data-setting-card='health'] { display: flex; align-items: stretch; gap: 0; }
-}
-@media (max-width: 1050px) {
-    .settings-section + .settings-section { margin-top: 18px; }
-    .settings-toolbar { position: static; }
-}
-@media (min-width: 1051px) {
-    .settings-main { grid-template-columns: minmax(0, 1fr); }
-    .settings-grid,
-    .settings-section[data-section='general'] .settings-grid,
-    .settings-section[data-section='generation'] .settings-grid {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-    .settings-grid > [data-setting-card='health'],
-    .settings-grid > [data-setting-card='refresh'] { grid-column: auto; }
-    .settings-grid > [data-setting-card='health'] { display: flex; align-items: stretch; gap: 0; }
-    .settings-all .settings-main {
-        display: block;
-        columns: 3;
-        column-gap: 16px;
-    }
-    .settings-all .settings-section,
-    .settings-all .settings-grid { display: contents; }
-    .settings-all .settings-card {
-        display: inline-flex;
-        width: 100%;
-        margin-bottom: 16px;
-        break-inside: avoid;
-        vertical-align: top;
-    }
-    .settings-all .settings-card .settings-form-grid,
-    .settings-all .settings-card > .el-form {
-        display: block;
-    }
-    .settings-all .settings-card .settings-form-grid { gap: 0; }
-    .settings-all [data-setting-card='health'] .save-row { padding-top: 10px; }
-}
-@media (min-width: 1800px) {
-    .settings-all .settings-main { columns: 4; }
-}
-@media (min-width: 1051px) and (max-width: 1399px) {
-    .settings-all .settings-main { columns: 2; }
+@media (max-width: 760px) {
+    .settings-toolbar { position: static; padding: 7px; }
+    .settings-nav { overflow-x: auto; padding-bottom: 2px; gap: 2px; }
+    .settings-nav > button { padding: 8px 10px; font-size: 12px; }
+    .settings-nav .el-icon { display: none; }
+    .settings-card { padding: 15px 14px; }
+    .settings-card :deep(.el-form-item) { display: block; margin-bottom: 13px; }
+    .settings-card :deep(.el-form-item__label) { display: block; padding: 0; margin-bottom: 6px; }
+    .settings-card :deep(.el-input-number) { width: 160px; }
+    .settings-section { scroll-margin-top: 90px; }
+    .mode-options, .error-policy-actions, .error-policy-limits { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+    .error-policy-actions > div { grid-template-columns: 92px minmax(0, 1fr); }
+    .error-policy-example-row { flex-wrap: wrap; gap: 4px; }
+    .error-policy-example-row .field-note { flex-basis: 100%; }
+    .error-policy-input :deep(textarea) { min-height: 180px; font-size: 12px; }
+    .save-row { align-items: start; flex-wrap: wrap; gap: 8px; }
+    .save-row > span { flex: 1 1 100%; }
+    .save-row .el-button { margin-left: auto; }
+    .release-meta > div { flex-wrap: wrap; gap: 4px 8px; }
+    .switch-row { align-items: start; }
 }
 </style>

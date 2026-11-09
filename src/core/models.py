@@ -1,8 +1,9 @@
 """Data models for lay4flow"""
 
-from pydantic import BaseModel, ConfigDict
-from typing import Optional, List, Union, Any, Literal
 from datetime import datetime
+from typing import Any, List, Literal, Optional, Union
+
+from pydantic import BaseModel, ConfigDict
 
 from .config import REMOTE_BROWSER_BASE_URL
 
@@ -139,6 +140,10 @@ class RequestLog(BaseModel):
     duration: float
     status_text: Optional[str] = None
     progress: int = 0
+    # None means this older request did not record attempt statistics.
+    attempt_count: Optional[int] = None
+    retry_count: Optional[int] = None
+    account_count: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

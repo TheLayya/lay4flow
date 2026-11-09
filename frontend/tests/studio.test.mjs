@@ -9,6 +9,7 @@ import { createApi } from '../src/lib/http.js'
 import {
     STUDIO_HISTORY_KEY,
     STUDIO_HISTORY_OWNER_KEY,
+    canRemoveStudioEntry,
     readStudioHistory,
     selectStudioHistory,
     studioHistoryKey,
@@ -87,6 +88,7 @@ function makeStudio({
         },
         STUDIO_HISTORY_KEY,
         STUDIO_HISTORY_OWNER_KEY,
+        canRemoveStudioEntry,
         readStudioHistory,
         studioHistoryKey,
         studioMediaNamespace: () => 'creator',
@@ -154,7 +156,7 @@ function makeStudio({
     class FixtureReader {
         readAsDataURL(file) {
             queueMicrotask(() => {
-                this.result = file.fixtureData || 'data:image/png;base64,AAAA'
+                this.result = file.fixtureData || `data:${file.type || 'image/png'};base64,AAAA`
                 this.onload()
             })
         }
@@ -219,6 +221,7 @@ test('Flow enforces mode image limits and emits the real generation contract', a
     const { studio } = makeStudio()
     studio.kind.value = 'video'
     studio.provider.value = 'flow'
+    await flush()
     studio.selectedId.value = 'veo_3_1'
     studio.selectModel()
     await flush()
@@ -591,6 +594,62 @@ test('download recovery never POSTs an unknown receipt and invalid output indexe
     assert.equal(current.status, 'unknown')
 })
 
+test('expired completed Vids media retains its receipt and recovers only through the original download endpoint', async () => {
+    const receipt = 'vids_' + 'a'.repeat(64)
+    const { studio, requests } = makeStudio({ responder: async (path) => {
+        assert.equal(path, `/api/admin/vids/v1/vids/generations/${receipt}/download`)
+        return new Response(JSON.stringify({ id: receipt, kind: 'image', status: 'completed', media_expired: true,
+            content_url: null, outputs: [{ index: 0, content_url: null }, { index: 1, content_url: null }] }))
+    } })
+    const entry = { receipt, provider: 'vids', kind: 'image', status: 'completed', outputs: [] }
+    studio.applyReceipt(entry, { id: receipt, kind: 'image', status: 'completed', media_expired: true,
+        content_url: null, outputs: [{ index: 0, content_url: null }, { index: 1, content_url: null }] })
+    assert.equal(entry.status, 'completed')
+    assert.equal(entry.mediaExpired, true)
+    assert.equal(entry.outputs.length, 0)
+    assert.match(entry.message, /缓存保留时间清理/)
+    await studio.inspect(entry, true)
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].options.method, 'POST')
+    assert.match(entry.message, /生成收据仍保留/)
+    studio.applyReceipt(entry, { id: receipt, kind: 'image', status: 'completed', content_url: null })
+    assert.equal(entry.mediaExpired, false)
+})
+
+test('older job polls cannot replace directly observed Vids expiry or restored download state', async () => {
+    let resolvePoll
+    const { studio } = makeStudio({ responder: async (path) => {
+        assert.equal(path, '/api/admin/studio/jobs')
+        return new Promise((resolve) => { resolvePoll = resolve })
+    } })
+    const receipt = 'vids_' + 'c'.repeat(64)
+    const job = fixtureJob({ provider: 'vids', count: 1, request_id: 'expiry-snapshot' }, 99)
+    const item = job.items[0]
+    item.status = 'completed'
+    item.receipt = receipt
+    item.vids_receipt = { id: receipt, kind: 'image', status: 'completed',
+        content_url: `/api/admin/vids/v1/vids/generations/${receipt}/content` }
+    studio.applyGenerationJob(job)
+    const entry = studio.history.value[0]
+    const oldLivePoll = studio.refreshGenerationJobs()
+    await flush()
+    studio.applyReceipt(entry, { id: receipt, kind: 'image', status: 'completed', media_expired: true, content_url: null })
+    resolvePoll(new Response(JSON.stringify({ jobs: [job] })))
+    await oldLivePoll
+    assert.equal(entry.mediaExpired, true)
+    assert.equal(entry.outputs.length, 0)
+    assert.match(entry.message, /缓存保留时间清理/)
+    item.vids_receipt = { id: receipt, kind: 'image', status: 'completed', media_expired: true, content_url: null }
+    const oldExpiredPoll = studio.refreshGenerationJobs()
+    await flush()
+    studio.applyReceipt(entry, { id: receipt, kind: 'image', status: 'completed',
+        content_url: `/api/admin/vids/v1/vids/generations/${receipt}/content` })
+    resolvePoll(new Response(JSON.stringify({ jobs: [job] })))
+    await oldExpiredPoll
+    assert.equal(entry.mediaExpired, false)
+    assert.equal(entry.outputs.length, 1)
+})
+
 test('Flow and Vids uploads enforce their distinct byte ceilings before reading', async () => {
     const { studio } = makeStudio()
     studio.kind.value = 'image'
@@ -651,12 +710,129 @@ test('keyboard media tabs wrap, move focus after updates, and ignore actions dur
 test('a material-dependent mode retains its required image inputs', async () => {
     const { studio } = makeStudio()
     studio.kind.value = 'video'
+    await flush()
     studio.selectedId.value = 'veo_3_1'
     studio.selectModel()
     await flush()
     studio.params.mode = 'first_last_frame'
     await flush()
     assert.equal(studio.modeLimits.value.minImages, 2)
+})
+
+test('Omni 1.2 exposes observed durations, first-last limits and preserves explicit legacy selection', async () => {
+    const { studio } = makeStudio()
+    studio.kind.value = 'video'
+    await flush()
+    assert.equal(studio.model.value.id, 'omni_1.2_flash')
+    studio.prompt.value = 'Synthetic video'
+    studio.params.mode = 'text_to_video'
+    studio.params.durationSeconds = 15
+    await flush()
+    assert.equal(studio.validation.value, '')
+    assert.deepEqual(Array.from(studio.durations.value).sort((a, b) => a - b), Array.from({ length: 13 }, (_, i) => i + 3))
+    assert.match(studio.flowModelHint.value, /60 点/)
+    assert.match(studio.flowModelHint.value, /Plus、Pro 或 Ultra/)
+    assert.equal(studio.buildBody().model, 'omni_1.2_flash')
+    studio.params.mode = 'first_last_frame'
+    await flush()
+    studio.materials.value = [{ data: 'data:image/png;base64,A' }, { data: 'data:image/png;base64,B' }]
+    studio.params.durationSeconds = 15
+    assert.match(studio.validation.value, /时长与清晰度组合/)
+    assert.equal(studio.durations.value.includes(15), false)
+    studio.params.durationSeconds = 10
+    assert.equal(studio.validation.value, '')
+    assert.match(studio.flowModelHint.value, /首尾帧支持 3–10 秒/)
+    studio.selectedId.value = 'omni_1.1_flash'
+    studio.selectModel()
+    await flush()
+    assert.equal(studio.model.value.id, 'omni_1.1_flash')
+    assert.match(studio.flowModelHint.value, /12 月 5 日停用/)
+    assert.deepEqual(Array.from(studio.durations.value).sort((a, b) => a - b), [4, 6, 8, 10])
+})
+
+test('Omni 1.2 edit trim uses catalog bounds while legacy edits remain limited to ten seconds', async () => {
+    const { studio } = makeStudio()
+    studio.kind.value = 'video'
+    studio.selectedId.value = 'omni_1.2_flash'
+    studio.selectModel()
+    await flush()
+    studio.params.mode = 'edit'
+    await flush()
+    studio.prompt.value = 'Synthetic edit'
+    studio.sourceVideo.value = { data: 'data:video/mp4;base64,A', duration: 30 }
+    studio.videoMetadata({ target: { duration: 30 } })
+    assert.equal(studio.params.trimEndMs, 15000)
+    assert.equal(studio.editTrimMaximum.value, 15000)
+    assert.equal(studio.validation.value, '')
+    const body = studio.buildBody()
+    assert.equal(body.generationConfig.videoConfig.trimEndMs, 15000)
+    assert.equal(body.generationConfig.videoConfig.durationSeconds, undefined)
+    studio.params.trimEndMs = 2000
+    assert.match(studio.validation.value, /3–15 秒/)
+    studio.params.trimEndMs = 16000
+    assert.match(studio.validation.value, /3–15 秒/)
+    studio.selectedId.value = 'omni_1.1_flash'
+    studio.selectModel()
+    await flush()
+    studio.params.mode = 'edit'
+    await flush()
+    studio.sourceVideo.value = { data: 'data:video/mp4;base64,A', duration: 30 }
+    studio.params.trimEndMs = 15000
+    assert.match(studio.validation.value, /最长 10 秒/)
+})
+
+test('Omni 1.2 Extend retains three references and submits the uploaded original without technical identifiers', async () => {
+    const { studio } = makeStudio()
+    studio.kind.value = 'video'
+    studio.selectedId.value = 'omni_1.2_flash'
+    studio.selectModel()
+    await flush()
+    studio.params.mode = 'reference_to_video'
+    await flush()
+    studio.materials.value = Array.from({ length: 4 }, (_, i) => ({ data: `data:image/png;base64,${i}` }))
+    studio.params.mode = 'extend'
+    await flush()
+    assert.equal(studio.materials.value.length, 3)
+    assert.equal(studio.modeLimits.value.videoInput, true)
+    studio.sourceVideo.value = { data: 'data:video/mp4;base64,ORIGINAL', duration: 10 }
+    studio.params.durationSeconds = 3
+    studio.params.resolution = '360p'
+    studio.prompt.value = 'Continue the same scene'
+    assert.equal(studio.validation.value, '')
+    assert.match(studio.flowModelHint.value, /3 点/)
+    const body = studio.buildBody()
+    assert.equal(body.generationConfig.videoConfig.mode, 'extend')
+    assert.equal(body.generationConfig.videoConfig.quality, undefined)
+    assert.equal(body.messages[0].content.filter((part) => part.type === 'image_url').length, 3)
+    assert.equal(body.messages[0].content.at(-1).video_url.url, 'data:video/mp4;base64,ORIGINAL')
+    studio.params.resolution = '1080p'
+    studio.params.durationSeconds = 8
+    assert.match(studio.validation.value, /合计不能超过 15 秒/)
+    studio.params.resolution = '720p'
+    studio.sourceVideo.value.duration = 61
+    assert.match(studio.validation.value, /3–60 秒/)
+    studio.sourceVideo.value.duration = 10
+    studio.materials.value.push({ data: 'data:image/png;base64,extra' })
+    assert.match(studio.validation.value, /最多接受 3 张图片/)
+})
+
+test('picking an existing video prepares an uploaded Extend source without submitting generation', async () => {
+    const receipt = 'vids_' + 'b'.repeat(64)
+    const path = `/api/admin/vids/v1/vids/generations/${receipt}/content`
+    const { studio, requests } = makeStudio({ responder: async (url) => {
+        if (url === '/api/admin/studio/models') return new Response(JSON.stringify({ data: [] }))
+        assert.equal(url, path)
+        return new Response(new Blob([new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112, 105, 115, 111, 109])], { type: 'video/mp4' }))
+    } })
+    const entry = { provider: 'vids', kind: 'video', status: 'completed', receipt, title: 'Original scene', outputs: [] }
+    await studio.extendOutput({ entry, output: { kind: 'video', path }, index: 0 })
+    assert.equal(studio.provider.value, 'flow')
+    assert.equal(studio.model.value.id, 'omni_1.2_flash')
+    assert.equal(studio.params.mode, 'extend')
+    assert.match(studio.sourceVideo.value.data, /^data:video\/mp4;base64,/)
+    assert.equal(studio.prompt.value, 'Original scene')
+    assert.equal(requests.some((request) => request.options.method === 'POST'), false)
+    assert.doesNotMatch(source, /label="源视频媒体 ID"/)
 })
 
 test('the workspace Chinese copy survives source encoding and retains readable media labels', () => {
@@ -953,17 +1129,101 @@ test('a lost acknowledgement is reconciled from the server request ID before ret
     assert.equal(requests.filter((entry) => entry.options.method === 'POST').length, 1)
 })
 
-test('a removed backend result stays removed when polling and reloading', async () => {
-    const { studio } = makeStudio()
-    const job = fixtureJob({ provider: 'flow', count: 1, request_id: 'remove-fixture' }, 1)
-    job.state = 'failed'
-    job.items[0].status = 'failed'
+for (const status of ['failed', 'unknown', 'received', 'download_failed']) {
+    test(`a removed ${status} backend result stays removed when polling and reloading`, async () => {
+        const { studio, localStore, requests } = makeStudio()
+        const job = fixtureJob({ provider: 'flow', count: 1, request_id: 'remove-fixture' }, 1)
+        job.state = 'failed'
+        job.items[0].status = status
+        studio.applyGenerationJob(job)
+        const saved = localStore.get(studioHistoryKey('creator'))
+        assert.equal(await studio.removeEntry(studio.history.value[0]), true)
+        studio.applyGenerationJob(job)
+        assert.equal(studio.history.value.length, 0)
+        // A saved stale history mirror must not bypass the durable hidden marker.
+        localStore.set(studioHistoryKey('creator'), saved)
+        studio.hiddenGenerationKeys.clear()
+        studio.restoreHistory()
+        studio.applyGenerationJob(job)
+        assert.equal(studio.history.value.length, 0)
+        assert.equal(job.items[0].status, status)
+        assert.equal(requests.length, 0)
+    })
+}
+
+test('batch cleanup removes unresolved cards but keeps active tasks and server receipts', async () => {
+    const { studio, requests } = makeStudio()
+    const job = fixtureJob({ provider: 'vids', count: 5, request_id: 'mixed-cleanup' }, 2)
+    const statuses = ['unknown', 'received', 'download_failed', 'queued', 'generating']
+    for (const [index, item] of job.items.entries()) {
+        item.status = statuses[index]
+        item.receipt = 'vids_' + String(index).repeat(64)
+    }
     studio.applyGenerationJob(job)
-    await studio.removeEntry(studio.history.value[0])
-    studio.applyGenerationJob(job)
-    assert.equal(studio.history.value.length, 0)
+    await studio.removeMany([...studio.history.value])
+    assert.equal(studio.history.value.length, 2)
+    assert.ok(studio.history.value.every((entry) => ['queued', 'generating'].includes(entry.status)))
     studio.restoreHistory()
     studio.applyGenerationJob(job)
+    assert.equal(studio.history.value.length, 2)
+    assert.deepEqual(job.items.map((item) => item.status), statuses)
+    assert.ok(job.items.every((item) => item.receipt.startsWith('vids_')))
+    assert.equal(requests.length, 0)
+})
+
+test('a hidden-marker storage failure retains the interrupted card for a safe retry', async () => {
+    const { studio } = makeStudio({ storageFailure: true })
+    const job = fixtureJob({ provider: 'flow', count: 1, request_id: 'blocked-cleanup' }, 3)
+    job.items[0].status = 'unknown'
+    studio.applyGenerationJob(job)
+    const entry = studio.history.value[0]
+    assert.equal(await studio.removeEntry(entry), false)
+    assert.equal(studio.history.value[0], entry)
+    assert.equal(studio.hiddenGenerationKeys.size, 0)
+    assert.match(studio.error.value, /删除未完成/)
+})
+
+test('a local receipt is retained when both history stores reject deletion', async () => {
+    const { studio } = makeStudio({ storageFailure: true })
+    studio.history.value = [{ provider: 'vids', kind: 'video', status: 'unknown', started: 1, receipt: 'vids_' + 'a'.repeat(64), outputs: [] }]
+    const entry = studio.history.value[0]
+    studio.task.value = entry
+    assert.equal(await studio.removeEntry(entry), false)
+    assert.equal(studio.history.value[0], entry)
+    assert.equal(studio.task.value, entry)
+    assert.match(studio.error.value, /删除未完成/)
+})
+
+test('a late receipt response never revives a directly removed unresolved card', async () => {
+    let resolveReceipt
+    const { studio, localStore, requests } = makeStudio({
+        responder: async () => new Promise((resolve) => { resolveReceipt = resolve }),
+    })
+    const receipt = 'vids_' + '9'.repeat(64)
+    studio.history.value = [{ provider: 'vids', kind: 'video', status: 'unknown', started: 1, receipt, outputs: [] }]
+    studio.queueReceiptRestore(studio.history.value[0])
+    await flush()
+    assert.equal(await studio.removeEntry(studio.history.value[0]), true)
+    resolveReceipt(new Response(JSON.stringify({ id: receipt, kind: 'video', status: 'completed', content_url: `/api/admin/vids/v1/vids/generations/${receipt}/content` })))
+    await flush()
+    assert.equal(studio.history.value.length, 0)
+    assert.equal(JSON.parse(localStore.get(studioHistoryKey('creator'))).length, 0)
+    studio.restoreHistory()
+    assert.equal(studio.history.value.length, 0)
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].options.method, undefined)
+})
+
+test('a stale durable history cannot revive a removed legacy receipt without a background job', async () => {
+    const { studio, localStore } = makeStudio()
+    const receipt = 'vids_' + '7'.repeat(64)
+    studio.history.value = [{ provider: 'vids', kind: 'video', status: 'unknown', started: 1, receipt, outputs: [] }]
+    studio.persistHistory()
+    const saved = localStore.get(studioHistoryKey('creator'))
+    assert.equal(await studio.removeEntry(studio.history.value[0]), true)
+    localStore.set(studioHistoryKey('creator'), saved)
+    studio.hiddenGenerationKeys.clear()
+    studio.restoreHistory()
     assert.equal(studio.history.value.length, 0)
 })
 

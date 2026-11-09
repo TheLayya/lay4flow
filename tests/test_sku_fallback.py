@@ -14,7 +14,9 @@ class SkuFallbackTests(unittest.TestCase):
         expected = render_catalog()
         self.assertEqual(OUTPUT.read_text(encoding="utf-8"), expected)
         payload = json.loads(expected.split("const FALLBACK_MEDIA_SKUS = ", 1)[1].rstrip(";\n"))
-        self.assertEqual(len(payload), 37)
+        self.assertEqual(len(payload), 125)
+        self.assertIn("flow-omni-1-2-flash-15s-720p", {item["id"] for item in payload})
+        self.assertIn("flow-omni-1-2-flash-extend-3s-360p", {item["id"] for item in payload})
         self.assertEqual({item["id"] for item in payload}, set(MEDIA_SKUS))
         server = {item["id"]: item for item in list_sku_models()}
         for item in payload:
@@ -27,7 +29,10 @@ class SkuFallbackTests(unittest.TestCase):
                 self.assertEqual(set(item["locked_spec"]), {"imageSize"})
             else:
                 self.assertTrue({"resolution", "priority"} <= set(item["locked_spec"]))
-                self.assertNotIn("extend", item["allowed_modes"])
+                if item["public_model"] == "omni_1.2_flash" and "-extend-" in item["id"]:
+                    self.assertEqual(item["allowed_modes"], ["extend"])
+                else:
+                    self.assertNotIn("extend", item["allowed_modes"])
                 prepared = prepare_sku_request({"model": item["id"]})
                 options = prepared["generationConfig"]["videoConfig"]
                 if item["allowed_modes"] == ["edit"]:

@@ -13,7 +13,8 @@ Example:
 
 import re
 from io import BytesIO
-from typing import Optional, Dict, Any, Tuple
+from typing import Any, Dict, Optional, Tuple
+
 from ..core.logger import debug_logger
 
 # ──────────────────────────────────────────────
@@ -438,6 +439,24 @@ for _seconds in (4, 6, 8, 10):
             ("omni_i2v", ""),
             ("omni_i2v", "_first_last"),
         ):
+            _suffix = f"_{_seconds}s{_frames}{_resolution}"
+            VIDEO_BASE_MODELS[f"{_base}{_suffix}"] = {
+                "landscape": f"{_base}{_suffix}",
+                "portrait": f"{_base}_portrait{_suffix}",
+            }
+
+for _seconds in range(3, 16):
+    for _resolution in ("", "_360p", "_1080p", "_4k"):
+        for _base, _frames in (
+            ("omni_1_2", ""),
+            ("omni_1_2_r2v", ""),
+            ("omni_1_2_i2v", ""),
+            ("omni_1_2_i2v", "_first_last"),
+            ("omni_1_2_edit", ""),
+            ("omni_1_2_extend", ""),
+        ):
+            if _seconds > 10 and (_frames or _base.endswith("_extend")):
+                continue
             _suffix = f"_{_seconds}s{_frames}{_resolution}"
             VIDEO_BASE_MODELS[f"{_base}{_suffix}"] = {
                 "landscape": f"{_base}{_suffix}",

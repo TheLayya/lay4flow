@@ -1,5 +1,6 @@
 """Validate current Flow credentials inside a verified browser Profile."""
 
+import asyncio
 import contextvars
 import json
 from contextlib import asynccontextmanager
@@ -7,6 +8,7 @@ from typing import Any, Protocol
 
 from ..flow.flow_rpc import FlowRPCError
 from ..flow.google_cookies import GoogleCookieJar
+from ..project_pool import flow_session_binding
 from ..proxy_manager import ProxyManager
 from .flow_session import account_http_session
 from .profile_verifier import ProfileVerifier
@@ -129,12 +131,69 @@ class ProfileSessionRefresher:
             "google_cookies": json.dumps(GoogleCookieJar(google_rows).export()),
         }
 
-    async def refresh(self, token: AccountLike, force: bool = False) -> dict[str, Any]:
+    async def _owned_profile_snapshot(self, token: AccountLike, proxy: str):
+        """Reject changed credentials or exits before using an owned Profile."""
+        current = await self.token_manager.db.get_token(token.id)
+        if (
+            current is None
+            or flow_session_binding(current) != flow_session_binding(token)
+            or await self._proxy_url(current) != proxy
+        ):
+            raise ProfileNotReadyError(str(token.email), "account_changed")
+        return current
+
+    async def _sync_owned_profile_cookies(self, token: AccountLike, context: Any, proxy: str):
+        """Catch an exclusively owned Profile up with verified HTTP cookie rotations."""
+        if not getattr(token, "google_cookies", ""):
+            return
+        current = await self._owned_profile_snapshot(token, proxy)
+        rows = _browser_cookie_rows(GoogleCookieJar(current.google_cookies).export())
+        if rows:
+            await context.add_cookies(rows)
+        # The caller commits against the credential snapshot actually used for
+        # renewal. HTTP rotations before this exclusive lease are valid; using
+        # the older snapshot would discard a successful renewal as a race.
+        token.google_cookies = current.google_cookies
+
+    async def _renew_owned_profile(self, token: AccountLike, context: Any, proxy: str):
+        # A validation RPC can report the current session but does not execute
+        # the browser's normal session-renewal navigation. Only use an owned
+        # page here: a manual login/viewer must never be redirected.
+        await self._owned_profile_snapshot(token, proxy)
+        page = None
+        try:
+            page = await asyncio.wait_for(context.new_page(), 10)
+            await asyncio.wait_for(
+                page.goto("https://flow.google.com/", wait_until="domcontentloaded", timeout=30000),
+                35,
+            )
+            try:
+                result = await self.refresh_in_context(token, context, force=True)
+            except ProfileNotReadyError as error:
+                # A just-completed viewer login outlives the DB cookie snapshot;
+                # never overwrite those fresh cookies pre-emptively. Only sync the
+                # DB snapshot back in when the persisted Profile session is stale.
+                if error.reason not in {"login_required", "session_invalid"}:
+                    raise
+                await self._sync_owned_profile_cookies(token, context, proxy)
+                result = await self.refresh_in_context(token, context, force=True)
+            return {**result, "_browser_renewed": True}
+        finally:
+            if page is not None:
+                await asyncio.wait_for(page.close(), 10)
+
+    async def refresh(
+        self, token: AccountLike, force: bool = False, *, renew_browser: bool = False
+    ) -> dict[str, Any]:
         active = self._active_context.get()
         if active and active[0] == str(token.email).strip().casefold():
             if force:
-                return await self.refresh_active(token, force=True)
-            return await self.refresh_active(token)
+                result = await self.refresh_active(token, force=True)
+            else:
+                result = await self.refresh_active(token)
+            # An interactive page is borrowed for validation only. Never claim
+            # scheduled renewal or navigate away from a manual login in progress.
+            return {**result, "_browser_renewed": False} if renew_browser else result
 
         provider = self.active_context_provider
         if provider is not None:
@@ -142,10 +201,12 @@ class ProfileSessionRefresher:
                 if context is not None:
                     async with self.use_context(str(token.email), context):
                         if force:
-                            return await self.refresh_active(token, force=True)
-                        return await self.refresh_active(token)
+                            result = await self.refresh_active(token, force=True)
+                        else:
+                            result = await self.refresh_active(token)
+                        return {**result, "_browser_renewed": False} if renew_browser else result
         proxy_url = await self._proxy_url(token)
-        if getattr(token, "google_cookies", ""):
+        if getattr(token, "google_cookies", "") and not renew_browser:
             try:
                 async with account_http_session(
                     self.token_manager, token, proxy_url, persist=False
@@ -161,7 +222,11 @@ class ProfileSessionRefresher:
                         raise failure from None
                     raise
         session_factory = getattr(self.manager, "warm_session", None)
-        warm = getattr(self.manager, "warm_slots", 0) > 0 and callable(session_factory)
+        warm = (
+            not (renew_browser or getattr(token, "google_cookies", ""))
+            and getattr(self.manager, "warm_slots", 0) > 0
+            and callable(session_factory)
+        )
         if warm:
             session = session_factory(str(token.email), proxy_url=proxy_url)
         else:
@@ -179,9 +244,16 @@ class ProfileSessionRefresher:
                 if result != "environment_stable":
                     await self.manager.mark_blocked(str(token.email), result)
                     raise ProfileNotReadyError(str(token.email), result)
-            if force:
+            if renew_browser or getattr(token, "google_cookies", ""):
+                renewed = await self._renew_owned_profile(token, context, proxy_url)
+            elif force:
                 return await self.refresh_in_context(token, context, force=True)
-            return await self.refresh_in_context(token, context)
+            else:
+                return await self.refresh_in_context(token, context)
+        # The HTTP attempt may have marked stale authentication blocked. Publish
+        # recovery only after Chromium closed normally and flushed the Profile.
+        await self.manager.mark_verified(str(token.email))
+        return renewed
 
     async def bootstrap(
         self,

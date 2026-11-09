@@ -1,0 +1,1 @@
+var e,t=0;function n(){return t}function r(t=Date.now()){return e&&t-e.savedAt<6e4?e.data:null}function i(n,r,i=Date.now()){r===t&&(e={savedAt:i,data:n})}function a(){e=void 0,t++}export{i,a as n,r,n as t};

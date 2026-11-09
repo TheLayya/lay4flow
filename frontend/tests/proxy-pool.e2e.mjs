@@ -172,8 +172,7 @@ await context.route('**/*', async (route) => {
 })
 
 const panel = () => page.locator('.proxy-pool-panel')
-const visibleRows = () =>
-    page.locator('.pool-table-wrap:visible tbody tr.el-table__row, .pool-mobile-list:visible .pool-mobile-card')
+const visibleRows = () => page.locator('.pool-table-wrap:visible tbody tr.el-table__row')
 const noOverflow = async () => {
     const value = await page.evaluate(() => ({ document: document.documentElement.scrollWidth, viewport: innerWidth }))
     assert.ok(value.document <= value.viewport + 1, `horizontal overflow ${JSON.stringify(value)}`)
@@ -213,9 +212,8 @@ try {
     await search.fill('出口 21')
     await page.waitForFunction(
         () =>
-            [...document.querySelectorAll('.pool-table-wrap tbody tr, .pool-mobile-list .pool-mobile-card')].filter(
-                (item) => item.getClientRects().length,
-            ).length === 1,
+            [...document.querySelectorAll('.pool-table-wrap tbody tr')].filter((item) => item.getClientRects().length)
+                .length === 1,
     )
     assert.match(await visibleRows().innerText(), /出口 21/)
     await search.fill('')
@@ -443,34 +441,59 @@ try {
     await page.setViewportSize({ width: 390, height: 844 })
     await page.evaluate(() => document.querySelector('.proxy-pool-panel').scrollIntoView({ block: 'start' }))
     await noOverflow()
-    assert.ok((await panel().locator('.pool-mobile-list:visible .pool-mobile-card').count()) > 0)
-    assert.ok((await panel().locator('.pool-mobile-list:visible .row-actions button').count()) >= 3)
-    const mobileList = await panel()
-        .locator('.pool-mobile-list:visible')
-        .evaluate((element) => ({ client: element.clientHeight, scroll: element.scrollHeight }))
+    assert.equal(await panel().locator('.pool-mobile-list').count(), 0)
+    assert.ok((await visibleRows().count()) > 0)
+    const narrowScroll = panel().locator('.pool-table-dense .el-scrollbar__wrap').first()
+    const mobileList = await narrowScroll.evaluate((element) => ({
+        client: element.clientWidth,
+        scroll: element.scrollWidth,
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        tabindex: element.getAttribute('tabindex'),
+    }))
     assert.ok(
-        mobileList.client <= 365 && mobileList.scroll > mobileList.client,
-        `Mobile list uses its own bounded scroll: ${JSON.stringify(mobileList)}`,
+        mobileList.scroll > mobileList.client && mobileList.scrollHeight > mobileList.clientHeight,
+        `Narrow table scrolls in both directions: ${JSON.stringify(mobileList)}`,
     )
-    record('Mobile cards stay bounded with visible edit/check/delete actions')
+    assert.equal(mobileList.tabindex, '0')
+    await narrowScroll.focus()
+    await page.keyboard.press('ArrowRight')
+    await page.waitForTimeout(200)
+    assert.ok(
+        await narrowScroll.evaluate((element) => element.scrollLeft > 0),
+        'Keyboard scroll reaches offscreen columns',
+    )
+    await narrowScroll.evaluate((element) => {
+        element.scrollLeft = element.scrollWidth
+    })
+    record('Narrow proxy table retains all columns with local horizontal and keyboard scrolling')
     await page.screenshot({ path: resolve(output, 'proxies-390.png'), fullPage: false, animations: 'disabled' })
     await panel()
-        .locator('.pool-mobile-list:visible .pool-mobile-card')
+        .locator('.pool-table-wrap .el-table__row')
         .first()
-        .getByRole('button', { name: '编辑' })
+        .getByRole('button', { name: '编辑', exact: true })
         .click()
     await dialog.waitFor()
+    await narrowScroll.evaluate((element) => {
+        element.scrollLeft = 0
+    })
     await noOverflow()
     const mobileEditorBounds = await dialog.boundingBox()
     assert.ok(mobileEditorBounds && mobileEditorBounds.x >= 0 && mobileEditorBounds.x + mobileEditorBounds.width <= 391)
     assert.equal(await hostInput.inputValue(), '203.0.113.42')
     assert.equal(await usernameInput.inputValue(), 'fresh@user')
     assert.equal(await passwordInput.getAttribute('type'), 'text')
-    for (const input of [hostInput, portInput, usernameInput, passwordInput, noteInput])
+    for (const input of [hostInput, portInput, usernameInput, passwordInput, noteInput]) {
         assert.ok(await input.isVisible())
+        const bounds = await input.boundingBox()
+        assert.ok(
+            bounds && bounds.x >= 0 && bounds.x + bounds.width <= 391,
+            `Editor field outside narrow viewport: ${JSON.stringify(bounds)}`,
+        )
+    }
     await page.screenshot({ path: resolve(output, 'proxy-edit-fields-390.png'), animations: 'disabled' })
     await dialog.getByRole('button', { name: '取消', exact: true }).click()
-    record('Mobile inline editor keeps full credentials visible inside the viewport without navigation')
+    record('Narrow table opens the same inline editor and preserves decoded credential fields')
     assert.deepEqual(
         mutations.filter((item) => item.method !== 'PUT' || item.path !== '/api/proxy/pool/1'),
         [],

@@ -157,7 +157,7 @@ try {
         await page.goto(`${base}/manage#/settings`)
         await page.locator('.settings-view h1').waitFor()
         await page.locator('.settings-skeleton').waitFor({ state: 'hidden' })
-        for (const label of ['基础与访问', '生成与调度', '远程有头打码', '媒体缓存', '运行诊断']) {
+        for (const label of ['基础与访问', '生成与调度', '自定义规则', '远程有头打码', '媒体缓存', '运行诊断']) {
             await page.locator('.settings-nav button').filter({ hasText: label }).click()
             assert.equal(await page.locator('.settings-section:visible').count(), 1)
             await verify(`settings-${label}`, '.settings-view')

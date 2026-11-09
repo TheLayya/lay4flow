@@ -121,7 +121,7 @@ class MediaSKUAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({entry["owned_by"] for entry in catalog.json()["data"]}, {"lay4flow"})
         names = {entry["id"] for entry in catalog.json()["data"]}
         self.assertEqual(names, set(MEDIA_SKUS))
-        self.assertEqual(len(names), 37)
+        self.assertEqual(len(names), 125)
         self.assertFalse(any(name.endswith("-standard") for name in names))
         self.assertIn("flow-veo-3-1-fast-8s-720p-relaxed", names)
         aggregate = await self.client.get("/v1/models", headers=headers)

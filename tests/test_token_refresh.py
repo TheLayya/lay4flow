@@ -137,6 +137,140 @@ class TokenRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.refresh_status, "retrying")
         self.assertIsNotNone(saved.next_refresh_at)
 
+    async def test_verified_profile_auth_rejection_has_bounded_recovery_before_manual_login(self):
+        token_id = await self.add(
+            browser_profile_source="cloak",
+            protocol_mode="session",
+            browser_profile_verified_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+            browser_profile_status="ready",
+            auto_refresh_enabled=True,
+        )
+        await self.db.update_token(
+            token_id,
+            browser_profile_verified_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+            browser_profile_status="ready",
+        )
+        self.manager.profile_refresher = Mock()
+        self.manager.profile_refresher.refresh = AsyncMock(
+            side_effect=ProfileNotReadyError("synthetic", "login_required")
+        )
+        for attempt in range(1, 4):
+            self.assertFalse(await self.manager._refresh_at(token_id, force=True))
+            saved = await self.db.get_token(token_id)
+            self.assertFalse(saved.is_active)
+            self.assertTrue(saved.auto_refresh_enabled)
+            self.assertEqual(saved.refresh_failures, attempt)
+            if attempt < 3:
+                self.assertEqual(saved.refresh_status, "retrying")
+                self.assertIsNotNone(saved.next_refresh_at)
+                await self.db.update_token(token_id, next_refresh_at=datetime.now(timezone.utc))
+            else:
+                self.assertEqual(saved.refresh_status, "login_required")
+                self.assertIsNone(saved.next_refresh_at)
+
+    async def test_due_profile_renewal_requests_browser_but_validation_probe_does_not(self):
+        token_id = await self.add(
+            browser_profile_source="cloak",
+            protocol_mode="session",
+            browser_profile_status="ready",
+            browser_profile_verified_at=datetime.now(timezone.utc) - timedelta(minutes=40),
+            at=None,
+            at_expires=None,
+        )
+        calls = []
+
+        async def refresh(token, force=False, *, renew_browser=False):
+            calls.append(renew_browser)
+            return self.profile_result()
+
+        self.manager.profile_refresher = Mock()
+        self.manager.profile_refresher.refresh = refresh
+        self.assertTrue(await self.manager._refresh_at(token_id))
+        self.assertEqual(calls, [True])
+        token = await self.db.get_token(token_id)
+        self.manager._clear_at_validation_cache(token_id)
+        self.assertTrue(await self.manager._refresh_at(token_id, validation_only=True, force=True))
+        self.assertEqual(calls, [True, False])
+
+    async def test_borrowed_browser_validation_keeps_the_original_renewal_deadline(self):
+        anchor = datetime.now(timezone.utc) - timedelta(minutes=35)
+        deadline = anchor + timedelta(minutes=30)
+        token_id = await self.add(
+            browser_profile_source="cloak",
+            protocol_mode="session",
+            at=None,
+            at_expires=None,
+            refresh_interval_minutes=30,
+            last_st_refresh_at=anchor,
+            last_st_refresh_result="success",
+            next_refresh_at=deadline,
+        )
+        await self.db.update_token(
+            token_id,
+            browser_profile_status="ready",
+            browser_profile_verified_at=anchor,
+            browser_profile_next_at=deadline,
+        )
+        self.manager.profile_refresher = Mock()
+        self.manager.profile_refresher.refresh = AsyncMock(
+            return_value={**self.profile_result(), "_browser_renewed": False}
+        )
+        self.assertTrue(await self.manager._refresh_at(token_id, force=True))
+        saved = await self.db.get_token(token_id)
+        self.assertEqual(saved.last_st_refresh_at, anchor)
+        self.assertEqual(saved.next_refresh_at, deadline)
+        self.assertEqual(saved.browser_profile_next_at, deadline)
+        self.assertEqual(saved.refresh_status, "ready")
+
+    async def test_cookie_rotation_waits_for_browser_renewal_and_credential_commit(self):
+        from src.services.browser.flow_session import save_session_cookies
+
+        token_id = await self.add(
+            browser_profile_source="cloak",
+            protocol_mode="session",
+            at=None,
+            at_expires=None,
+            google_cookies=json.dumps(
+                [{"name": "SID", "value": "initial", "domain": ".google.com", "path": "/"}]
+            ),
+        )
+        initial = await self.db.get_token(token_id)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def renew(token, force=False, *, renew_browser=False):
+            self.assertTrue(renew_browser)
+            entered.set()
+            await release.wait()
+            return {
+                **self.profile_result(),
+                "_browser_renewed": True,
+                "google_cookies": json.dumps(
+                    [{"name": "SID", "value": "renewed", "domain": ".google.com", "path": "/"}]
+                ),
+            }
+
+        self.manager.profile_refresher = Mock()
+        self.manager.profile_refresher.refresh = renew
+        renewal = asyncio.create_task(self.manager._refresh_at(token_id, force=True))
+        await asyncio.wait_for(entered.wait(), 3)
+        rotation = asyncio.create_task(
+            save_session_cookies(
+                self.manager,
+                initial,
+                initial.google_cookies,
+                [{"name": "SID", "value": "late", "domain": ".google.com", "path": "/"}],
+            )
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(rotation.done())
+        release.set()
+        self.assertTrue(await renewal)
+        await rotation
+        saved = await self.db.get_token(token_id)
+        self.assertIn("renewed", saved.google_cookies)
+        self.assertNotIn('"late"', saved.google_cookies)
+        self.assertEqual(saved.refresh_status, "ready")
+
     async def test_signed_out_profile_with_usable_old_at_pauses_retries(self):
         token_id = await self.add(
             browser_profile_source="cloak", protocol_mode="session", google_cookies=""

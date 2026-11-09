@@ -8,6 +8,17 @@ API_GUIDE = "docs/API.md"
 
 
 class PublicOpenAPIMetadataTests(unittest.TestCase):
+    def test_flow_video_schema_advertises_omni12_and_explicit_extend_source(self):
+        import asyncio
+
+        schema = asyncio.run(public_openapi())
+        body = schema["paths"]["/v1/videos"]["post"]["requestBody"]["content"]
+        properties = body["application/json"]["schema"]["properties"]
+        self.assertIn("omni_1.2_flash", properties["model"]["enum"])
+        self.assertIn("input_video_media_id", properties)
+        self.assertIn("added duration", properties["seconds"]["description"])
+        self.assertIn("input_video_media_id", body["multipart/form-data"]["schema"]["properties"])
+
     def test_vids_schema_uses_pooled_upload_api_without_account_parameter(self):
         import asyncio
 

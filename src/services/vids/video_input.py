@@ -103,17 +103,20 @@ def _presentation_bounds(data, mdia, media_ticks):
     return first, last
 
 
-def mp4_metadata(data, *, minimum_duration=3, maximum_duration=60):
+def mp4_metadata(data, *, minimum_duration=3, maximum_duration=60, max_bytes=None):
     """Validate MP4 and return the displayed video-track duration and size.
 
     The movie header can include trailing audio.  Trust the video track's
     movie-time duration (``tkhd``), cross-checking its media duration
     (``mdhd``); this inspects metadata only and never decodes samples.
     """
+    max_bytes = MAX_VIDEO_BYTES if max_bytes is None else max_bytes
     try:
         if (
             not isinstance(data, bytes)
-            or not 0 < len(data) <= MAX_VIDEO_BYTES
+            or type(max_bytes) is not int
+            or not 0 < max_bytes <= 100 * 1024**2
+            or not 0 < len(data) <= max_bytes
             or type(minimum_duration) not in (int, float)
             or type(maximum_duration) not in (int, float)
             or not 0 < minimum_duration < maximum_duration <= 60

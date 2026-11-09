@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { Check, Delete, Edit, Plus, Refresh, Search } from '@element-plus/icons-vue'
+import { Check, Delete, Plus, Refresh, Search } from '@element-plus/icons-vue'
 
 const props = defineProps({
     rows: { type: Array, default: () => [] },
@@ -86,6 +86,7 @@ const allPageSelected = computed(() => pageIds.value.length > 0 && pageIds.value
 const somePageSelected = computed(() => pageIds.value.some((id) => selected.value.has(id)))
 const selectedCount = computed(() => selected.value.size)
 const pageCountLabel = computed(() => `${filteredRows.value.length} 个出口`)
+const checkTimeLabel = (row) => (row.last_check_at ? String(row.last_check_at).replace('T', ' ').slice(0, 19) : '—')
 
 function resetPage() {
     const max = Math.max(1, Math.ceil(filteredRows.value.length / pageSize.value))
@@ -139,55 +140,53 @@ watch(
 <template>
     <section class="proxy-pool-panel" aria-label="统一代理池">
         <header class="pool-panel-heading">
-            <div>
-                <div class="pool-title-line">
-                    <h3>代理出口</h3>
-                    <el-tag size="small" round>{{ rows.length }}</el-tag>
+            <dl class="pool-stats" aria-label="代理池统计">
+                <div>
+                    <dt>全部</dt>
+                    <dd>{{ rows.length }}</dd>
                 </div>
-                <p>连接、账号绑定与生成调度；冷却出口自动重探</p>
-            </div>
+                <div class="is-enabled">
+                    <dt>已启用</dt>
+                    <dd>{{ enabledCount }}</dd>
+                </div>
+                <div class="is-healthy">
+                    <dt>健康</dt>
+                    <dd>{{ healthyCount }}</dd>
+                </div>
+                <div class="is-failed">
+                    <dt>异常</dt>
+                    <dd>{{ failedCount }}</dd>
+                </div>
+                <div>
+                    <dt>未检测</dt>
+                    <dd>{{ unknownCount }}</dd>
+                </div>
+            </dl>
             <div class="pool-heading-actions">
-                <el-button :icon="Refresh" :loading="loading" :disabled="operationsLocked" @click="emit('reload')">
+                <el-button
+                    size="small"
+                    :icon="Refresh"
+                    :loading="loading"
+                    :disabled="operationsLocked"
+                    @click="emit('reload')"
+                >
                     刷新
                 </el-button>
-                <el-button :disabled="operationsLocked" @click="emit('import')">批量导入</el-button>
-                <el-button type="primary" :icon="Plus" :disabled="operationsLocked" @click="emit('add')">
+                <el-button size="small" :disabled="operationsLocked" @click="emit('import')">批量导入</el-button>
+                <el-button size="small" type="primary" :icon="Plus" :disabled="operationsLocked" @click="emit('add')">
                     添加出口
                 </el-button>
             </div>
         </header>
 
-        <div class="pool-stats" aria-label="代理池统计">
-            <div>
-                <strong>{{ rows.length }}</strong>
-                <span>全部</span>
-            </div>
-            <div class="is-enabled">
-                <strong>{{ enabledCount }}</strong>
-                <span>已启用</span>
-            </div>
-            <div class="is-healthy">
-                <strong>{{ healthyCount }}</strong>
-                <span>健康</span>
-            </div>
-            <div class="is-failed">
-                <strong>{{ failedCount }}</strong>
-                <span>异常</span>
-            </div>
-            <div>
-                <strong>{{ unknownCount }}</strong>
-                <span>未检测</span>
-            </div>
-        </div>
-
         <div class="pool-toolbar">
-            <el-input v-model="search" clearable :prefix-icon="Search" placeholder="搜索地址或备注" />
-            <el-select v-model="stateFilter" aria-label="启用状态" style="width: 112px">
+            <el-input v-model="search" size="small" clearable :prefix-icon="Search" placeholder="搜索地址或备注" />
+            <el-select v-model="stateFilter" size="small" aria-label="启用状态">
                 <el-option label="全部状态" value="all" />
                 <el-option label="已启用" value="enabled" />
                 <el-option label="已停用" value="disabled" />
             </el-select>
-            <el-select v-model="healthFilter" aria-label="健康状态" style="width: 112px">
+            <el-select v-model="healthFilter" size="small" aria-label="健康状态">
                 <el-option label="全部健康" value="all" />
                 <el-option label="连接正常" value="healthy" />
                 <el-option label="连接异常" value="failed" />
@@ -215,40 +214,40 @@ watch(
             <el-button v-if="selectedCount" size="small" text :disabled="operationsLocked" @click="clearSelection">
                 清除选择
             </el-button>
-        </div>
-        <div v-if="selectedCount || bulkState?.running" class="pool-bulkbar">
-            <span v-if="bulkState?.running" class="bulk-progress">正在处理 {{ bulkState.total }} 个出口…</span>
-            <template v-else>
-                <el-button
-                    size="small"
-                    type="primary"
-                    :disabled="!selectedCount || operationsLocked"
-                    @click="emitBulk('enable')"
-                >
-                    批量启用
-                </el-button>
-                <el-button size="small" :disabled="!selectedCount || operationsLocked" @click="emitBulk('disable')">
-                    批量停用
-                </el-button>
-                <el-button
-                    size="small"
-                    :icon="Check"
-                    :disabled="!selectedCount || operationsLocked"
-                    @click="emitBulk('check')"
-                >
-                    批量检测
-                </el-button>
-                <el-button
-                    size="small"
-                    type="danger"
-                    plain
-                    :icon="Delete"
-                    :disabled="!selectedCount || operationsLocked"
-                    @click="emitBulk('delete')"
-                >
-                    批量删除
-                </el-button>
-            </template>
+            <div v-if="selectedCount || bulkState?.running" class="pool-bulkbar">
+                <span v-if="bulkState?.running" class="bulk-progress">正在处理 {{ bulkState.total }} 个出口…</span>
+                <template v-else>
+                    <el-button
+                        size="small"
+                        type="primary"
+                        :disabled="!selectedCount || operationsLocked"
+                        @click="emitBulk('enable')"
+                    >
+                        批量启用
+                    </el-button>
+                    <el-button size="small" :disabled="!selectedCount || operationsLocked" @click="emitBulk('disable')">
+                        批量停用
+                    </el-button>
+                    <el-button
+                        size="small"
+                        :icon="Check"
+                        :disabled="!selectedCount || operationsLocked"
+                        @click="emitBulk('check')"
+                    >
+                        批量检测
+                    </el-button>
+                    <el-button
+                        size="small"
+                        type="danger"
+                        plain
+                        :icon="Delete"
+                        :disabled="!selectedCount || operationsLocked"
+                        @click="emitBulk('delete')"
+                    >
+                        批量删除
+                    </el-button>
+                </template>
+            </div>
         </div>
 
         <div class="pool-table-wrap">
@@ -257,6 +256,8 @@ watch(
                 row-key="id"
                 :max-height="expandedId == null ? 640 : undefined"
                 :expand-row-keys="expandedId == null ? [] : [expandedId]"
+                :scrollbar-tabindex="0"
+                scrollbar-always-on
                 @expand-change="
                     (row, expanded) =>
                         emit(
@@ -265,13 +266,13 @@ watch(
                             expanded.some((item) => item.id === row.id),
                         )
                 "
-                class="pool-table-dense"
-                :header-cell-style="{ height: '38px' }"
+                class="pool-table-dense management-table"
+                size="small"
             >
-                <el-table-column type="expand" width="40">
+                <el-table-column type="expand" width="32">
                     <template #default="{ row }"><slot name="details" :row="row" /></template>
                 </el-table-column>
-                <el-table-column width="46" align="center">
+                <el-table-column width="38" align="center">
                     <template #header>
                         <el-checkbox
                             :model-value="allPageSelected"
@@ -290,18 +291,20 @@ watch(
                         />
                     </template>
                 </el-table-column>
-                <el-table-column label="代理出口" min-width="320">
+                <el-table-column prop="id" label="ID" width="54" />
+                <el-table-column prop="proxy_url" label="出口地址" min-width="270" show-overflow-tooltip>
                     <template #default="{ row }">
-                        <div class="proxy-cell">
-                            <code>{{ row.proxy_url }}</code>
-                            <small>{{ row.note || `出口 #${row.id}` }}</small>
-                        </div>
+                        <code class="proxy-address">{{ row.proxy_url }}</code>
                     </template>
                 </el-table-column>
-                <el-table-column label="启用" min-width="92">
+                <el-table-column prop="note" label="备注" min-width="120" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.note || '—' }}</template>
+                </el-table-column>
+                <el-table-column label="启用" width="64" align="center">
                     <template #default="{ row }">
                         <el-switch
                             :model-value="row.enabled"
+                            size="small"
                             :aria-label="'启用出口 ' + row.id"
                             :disabled="operationsLocked"
                             :loading="isBusy(row, 'toggle')"
@@ -309,7 +312,7 @@ watch(
                         />
                     </template>
                 </el-table-column>
-                <el-table-column label="绑定账号" min-width="110" align="right">
+                <el-table-column label="绑定账号" width="86" align="right">
                     <template #default="{ row }">
                         <el-button
                             class="pool-bind-trigger"
@@ -323,36 +326,49 @@ watch(
                         </el-button>
                     </template>
                 </el-table-column>
-                <el-table-column label="健康 / 最后检测" min-width="170">
+                <el-table-column label="连接状态" width="98">
                     <template #default="{ row }">
-                        <el-tag :type="healthType(row)" size="small">{{ healthLabel(row) }}</el-tag>
-                        <span class="last-check">
-                            {{
-                                row.last_check_at
-                                    ? String(row.last_check_at).replace('T', ' ').slice(5, 16)
-                                    : '尚未检测'
-                            }}
+                        <el-tag :type="healthType(row)" size="small" effect="plain">{{ healthLabel(row) }}</el-tag>
+                    </template>
+                </el-table-column>
+                <el-table-column label="最后检测" width="150">
+                    <template #default="{ row }">
+                        <time class="pool-timestamp" :datetime="row.last_check_at || undefined">
+                            {{ checkTimeLabel(row) }}
+                        </time>
+                    </template>
+                </el-table-column>
+                <el-table-column label="提交调度" width="110">
+                    <template #default="{ row }">
+                        <el-tag v-if="row.circuit_state" :type="circuitType(row)" size="small" effect="plain">
+                            {{ circuitLabel(row) }}
+                        </el-tag>
+                        <span v-else class="pool-muted">暂无记录</span>
+                    </template>
+                </el-table-column>
+                <el-table-column label="成功率" width="80" align="right">
+                    <template #default="{ row }">
+                        <span class="pool-number">{{ successLabel(row) }}</span>
+                    </template>
+                </el-table-column>
+                <el-table-column label="连败" width="58" align="right">
+                    <template #default="{ row }">
+                        <span class="pool-number">{{ row.consecutive_failures || 0 }}</span>
+                    </template>
+                </el-table-column>
+                <el-table-column label="处理中" width="70" align="right">
+                    <template #default="{ row }">
+                        <span class="pool-number">{{ row.inflight || 0 }}</span>
+                    </template>
+                </el-table-column>
+                <el-table-column label="重探时间" width="156">
+                    <template #default="{ row }">
+                        <span class="pool-timestamp">
+                            {{ row.circuit_state === 'cooling' ? probeLabel(row) || '—' : '—' }}
                         </span>
                     </template>
                 </el-table-column>
-                <el-table-column label="提交调度" min-width="216">
-                    <template #default="{ row }">
-                        <div v-if="row.circuit_state" class="pool-scheduling">
-                            <div>
-                                <el-tag :type="circuitType(row)" size="small" effect="plain">
-                                    {{ circuitLabel(row) }}
-                                </el-tag>
-                                <span>{{ row.inflight || 0 }} 份处理中</span>
-                            </div>
-                            <small>近期成功 {{ successLabel(row) }} · 连败 {{ row.consecutive_failures || 0 }}</small>
-                            <small v-if="row.cooldown_until && row.circuit_state === 'cooling'">
-                                {{ probeLabel(row) }}
-                            </small>
-                        </div>
-                        <span v-else class="pool-scheduling-empty">尚无调度记录</span>
-                    </template>
-                </el-table-column>
-                <el-table-column label="操作" min-width="258" fixed="right">
+                <el-table-column label="操作" width="196" fixed="right">
                     <template #default="{ row }">
                         <div class="row-actions">
                             <el-button text size="small" @click="emit('expand', row, expandedId !== row.id)">
@@ -386,87 +402,8 @@ watch(
                         </div>
                     </template>
                 </el-table-column>
-                <template #empty>
-                    <el-empty :image-size="48" description="没有匹配的代理出口" />
-                </template>
+                <template #empty><el-empty :image-size="48" description="没有匹配的代理出口" /></template>
             </el-table>
-        </div>
-
-        <div class="pool-mobile-list" :class="{ 'has-expanded': expandedId != null }" aria-label="代理出口列表">
-            <article v-for="row in pageRows" :key="rowId(row)" class="pool-mobile-card">
-                <div class="mobile-card-top">
-                    <el-checkbox
-                        :model-value="selected.has(rowId(row))"
-                        :aria-label="'选择出口 ' + row.id"
-                        :disabled="operationsLocked"
-                        @change="(value) => toggleRow(row, value)"
-                    />
-                    <code>{{ row.proxy_url }}</code>
-                    <el-tag :type="healthType(row)" size="small">{{ healthLabel(row) }}</el-tag>
-                </div>
-                <p>
-                    {{ row.note || `出口 #${row.id}` }}
-                    <el-button
-                        class="pool-bind-trigger"
-                        text
-                        size="small"
-                        :disabled="operationsLocked"
-                        :aria-label="`为出口 ${row.id} 绑定账号`"
-                        @click="emit('bind', row)"
-                    >
-                        绑定 {{ row.bound_account_count || 0 }} 个账号
-                    </el-button>
-                </p>
-                <div class="mobile-card-meta">
-                    <span>最后检测 {{ row.last_check_at || '—' }}</span>
-                    <el-switch
-                        :model-value="row.enabled"
-                        :aria-label="'启用出口 ' + row.id"
-                        :disabled="operationsLocked"
-                        :loading="isBusy(row, 'toggle')"
-                        @change="emit('toggle', row)"
-                    />
-                </div>
-                <div v-if="row.circuit_state" class="pool-scheduling pool-mobile-scheduling">
-                    <div>
-                        <el-tag :type="circuitType(row)" size="small" effect="plain">{{ circuitLabel(row) }}</el-tag>
-                        <span>{{ row.inflight || 0 }} 份处理中</span>
-                    </div>
-                    <small>近期成功 {{ successLabel(row) }} · 连败 {{ row.consecutive_failures || 0 }}</small>
-                    <small v-if="row.cooldown_until && row.circuit_state === 'cooling'">{{ probeLabel(row) }}</small>
-                </div>
-                <footer class="row-actions">
-                    <el-button size="small" @click="emit('expand', row, expandedId !== row.id)">
-                        {{ expandedId === row.id ? '收起' : '展开' }}
-                    </el-button>
-                    <el-button size="small" @click="emit('copy', row.proxy_url, '代理地址')">复制</el-button>
-                    <el-button size="small" :disabled="operationsLocked" :icon="Edit" @click="emit('edit', row)">
-                        编辑
-                    </el-button>
-                    <el-button
-                        size="small"
-                        :disabled="operationsLocked"
-                        :icon="Check"
-                        :loading="isBusy(row, 'check')"
-                        @click="emit('check', row)"
-                    >
-                        检测
-                    </el-button>
-                    <el-button
-                        size="small"
-                        type="danger"
-                        plain
-                        :icon="Delete"
-                        :disabled="operationsLocked"
-                        :loading="isBusy(row, 'delete')"
-                        @click="emit('remove', row)"
-                    >
-                        删除
-                    </el-button>
-                </footer>
-                <slot v-if="expandedId === row.id" name="details" :row="row" />
-            </article>
-            <el-empty v-if="!pageRows.length" :image-size="48" description="没有匹配的代理出口" />
         </div>
 
         <footer class="pool-pagination">
@@ -485,29 +422,9 @@ watch(
 </template>
 
 <style scoped>
-.pool-scheduling {
-    display: grid;
-    gap: 5px;
-    font-size: 12px;
-    line-height: 1.5;
-}
-.pool-scheduling > div {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-}
-.pool-scheduling small,
-.pool-scheduling-empty {
-    color: var(--muted);
-    font-size: 12px;
-}
-.pool-mobile-scheduling {
-    margin: 10px 0;
-}
 .proxy-pool-panel {
     min-width: 0;
-    container: proxy-pool / inline-size;
+    container-type: inline-size;
 }
 .pool-panel-heading,
 .pool-toolbar,
@@ -515,68 +432,66 @@ watch(
 .pool-bulkbar,
 .pool-pagination,
 .pool-heading-actions,
-.pool-title-line,
-.row-actions,
-.mobile-card-top,
-.mobile-card-meta {
+.row-actions {
     display: flex;
     align-items: center;
+    gap: 8px;
 }
 .pool-panel-heading {
     justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 12px;
-}
-.pool-title-line {
-    gap: 8px;
-}
-.pool-title-line h3 {
-    font-size: 15px;
-}
-.pool-panel-heading p {
-    color: var(--muted);
-    font-size: 12px;
-    margin-top: 2px;
-}
-.pool-heading-actions,
-.pool-toolbar {
-    gap: 8px;
-}
-.pool-stats {
-    display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 8px;
-    margin-bottom: 12px;
-}
-.pool-stats > div {
-    background: var(--surface-soft);
-    border-radius: 10px;
-    padding: 8px 12px;
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 8px;
-}
-.pool-stats strong {
-    font-size: 18px;
-    line-height: 1;
-}
-.pool-stats span {
-    color: var(--muted);
-    font-size: 12px;
-}
-.pool-stats .is-enabled strong,
-.pool-stats .is-healthy strong {
-    color: var(--success);
-}
-.pool-stats .is-failed strong {
-    color: var(--el-color-danger);
-}
-.pool-toolbar {
+    flex-wrap: wrap;
+    gap: 8px 16px;
     margin-bottom: 8px;
 }
+.pool-stats {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    margin: 0;
+    font-size: 12px;
+    line-height: 24px;
+}
+.pool-stats > div {
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+}
+.pool-stats dt,
+.pool-muted {
+    color: var(--muted);
+}
+.pool-stats dd {
+    margin: 0;
+    color: var(--ink);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+.pool-stats .is-enabled dd,
+.pool-stats .is-healthy dd {
+    color: var(--success);
+}
+.pool-stats .is-failed dd {
+    color: var(--el-color-danger);
+}
+.pool-heading-actions {
+    margin-left: auto;
+}
+.pool-heading-actions .el-button + .el-button,
+.pool-bulkbar .el-button + .el-button,
+.row-actions .el-button + .el-button {
+    margin-left: 0;
+}
+.pool-toolbar {
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+}
 .pool-toolbar .el-input {
-    max-width: 280px;
+    width: 240px;
+    max-width: 100%;
+}
+.pool-toolbar .el-select {
+    width: 112px;
 }
 .pool-result-count {
     color: var(--muted);
@@ -584,297 +499,115 @@ watch(
     margin-left: auto;
 }
 .pool-selectionbar {
-    gap: 10px;
     flex-wrap: wrap;
-    margin-bottom: 7px;
+    min-height: 28px;
+    margin-bottom: 6px;
+    gap: 4px 8px;
 }
 .pool-selectionbar .el-checkbox {
+    height: 24px;
     margin-right: 0;
 }
 .pool-selectionbar > span {
-    color: var(--accent);
+    color: var(--muted);
     font-size: 12px;
 }
 .pool-bulkbar {
-    gap: 8px;
     flex-wrap: wrap;
-    padding: 8px 10px;
-    margin-bottom: 8px;
-    background: var(--pink-soft);
-    border: 1px solid var(--el-color-primary-light-8);
-    border-radius: 10px;
+    margin-left: auto;
+    gap: 5px;
 }
-.pool-bulkbar .el-checkbox {
-    margin-right: 4px;
-}
-.bulk-progress {
+.bulk-progress,
+.selected-hint {
     color: var(--accent);
     font-size: 12px;
-    margin-left: auto;
 }
 .pool-table-wrap {
+    width: 100%;
+    min-width: 0;
     border: 1px solid var(--line);
-    border-radius: 10px;
+    border-radius: 4px;
     overflow: hidden;
 }
 .pool-table-dense :deep(.el-table__inner-wrapper::before) {
     display: none;
 }
 .pool-table-dense :deep(.el-table__cell) {
-    padding: 7px 0;
+    padding: 4px 0;
 }
-.pool-mobile-list.has-expanded {
-    max-height: none;
-    overflow-y: visible;
+.pool-table-dense :deep(.cell) {
+    padding-inline: 7px;
+    line-height: 24px;
+    white-space: nowrap;
 }
-.pool-table-dense :deep(td:nth-child(3) .cell) {
-    overflow: visible;
-    text-overflow: clip;
+.pool-table-dense :deep(.el-checkbox) {
+    height: 24px;
 }
-.pool-pagination :deep(.el-pagination__sizes .el-select) {
-    width: 108px;
+.pool-table-dense :deep(.el-scrollbar__wrap:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
 }
-.proxy-cell {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-}
-.proxy-cell code,
-.mobile-card-top code {
-    color: var(--ink);
+.proxy-address,
+.pool-timestamp {
     font-size: 12px;
-    overflow-wrap: anywhere;
-    white-space: normal;
+    color: var(--ink);
 }
-.proxy-cell small {
+.pool-number,
+.pool-timestamp {
+    font-variant-numeric: tabular-nums;
+}
+.pool-timestamp {
     color: var(--muted);
     font-size: 11px;
-}
-.last-check {
-    display: block;
-    color: var(--muted);
-    font-size: 10px;
-    white-space: nowrap;
-    line-height: 1.5;
-    margin-top: 2px;
 }
 .row-actions {
     gap: 1px;
     white-space: nowrap;
 }
-.row-actions .el-button + .el-button {
-    margin-left: 0;
-}
 .row-actions .el-button {
-    padding-inline: 5px;
-}
-.pool-mobile-list {
-    display: none;
+    padding-inline: 4px;
 }
 .pool-pagination {
     justify-content: flex-end;
     gap: 12px;
-    padding-top: 10px;
+    padding-top: 8px;
+    flex-wrap: wrap;
+}
+.pool-pagination :deep(.el-pagination__sizes .el-select) {
+    width: 108px;
 }
 .selected-hint {
-    color: var(--accent);
-    font-size: 12px;
     margin-right: auto;
 }
-
-@media (max-width: 760px) {
-    .pool-panel-heading {
-        align-items: flex-start;
-    }
-    .pool-heading-actions .el-button:first-child {
-        padding-inline: 8px;
-    }
-    .pool-heading-actions .el-button:first-child span {
-        display: none;
-    }
+@media (max-width: 640px) {
     .pool-stats {
-        grid-template-columns: repeat(5, minmax(0, 1fr));
-        gap: 4px;
-    }
-    .pool-stats > div {
-        flex-direction: column;
-        gap: 5px;
-        padding: 9px 6px;
-        align-items: center;
-    }
-    .pool-stats strong {
-        font-size: 16px;
-    }
-    .pool-stats span {
-        font-size: 11px;
-    }
-    .pool-toolbar {
-        flex-wrap: wrap;
+        gap: 3px 12px;
     }
     .pool-toolbar .el-input {
         width: 100%;
-        max-width: none;
     }
     .pool-toolbar .el-select {
         flex: 1;
+        min-width: 100px;
     }
-    .pool-result-count {
+    .pool-bulkbar {
+        width: 100%;
         margin-left: 0;
-    }
-    .pool-table-wrap {
-        display: none;
-    }
-    .pool-mobile-list {
-        display: grid;
-        gap: 8px;
-        max-height: 360px;
-        overflow-y: auto;
-        padding-right: 2px;
-    }
-    .pool-mobile-card {
-        min-width: 0;
-        border: 1px solid var(--line);
-        background: var(--surface);
-        border-radius: 10px;
-        padding: 10px;
-    }
-    .mobile-card-top {
-        gap: 6px;
-        min-width: 0;
-    }
-    .mobile-card-top code {
-        flex: 1;
-        min-width: 0;
-    }
-    .pool-mobile-card > p {
-        color: var(--muted);
-        font-size: 12px;
-        margin: 5px 0 8px 24px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-    .mobile-card-meta {
-        justify-content: space-between;
-        margin-left: 24px;
-        color: var(--muted);
-        font-size: 11px;
-    }
-    .pool-mobile-card footer {
-        justify-content: flex-end;
-        margin-top: 8px;
-        padding-top: 7px;
-        border-top: 1px solid var(--line);
     }
     .pool-pagination {
-        justify-content: center;
+        justify-content: flex-start;
     }
-    .pool-pagination .selected-hint {
-        display: none;
-    }
-    .pool-pagination :deep(.el-pagination__sizes) {
-        display: none;
-    }
-}
-
-@container proxy-pool (max-width: 620px) {
-    .pool-panel-heading {
-        align-items: flex-start;
+    .pool-pagination :deep(.el-pagination) {
+        max-width: 100%;
         flex-wrap: wrap;
-        gap: 10px;
-    }
-    .pool-heading-actions {
-        width: 100%;
-        justify-content: flex-end;
         gap: 5px;
     }
-    .pool-heading-actions .el-button {
-        padding-inline: 9px;
+    .pool-table-dense :deep(.el-table__cell.el-table-fixed-column--right) {
+        position: static !important;
     }
-    .pool-heading-actions .el-button + .el-button {
-        margin-left: 0;
-    }
-    .pool-stats {
-        gap: 4px;
-    }
-    .pool-stats > div {
-        flex-direction: column;
-        gap: 5px;
-        padding: 9px 6px;
-        align-items: center;
-    }
-    .pool-stats strong {
-        font-size: 16px;
-    }
-    .pool-stats span {
-        font-size: 11px;
-    }
-    .pool-toolbar {
-        flex-wrap: wrap;
-    }
-    .pool-toolbar .el-input {
-        width: 100%;
-        max-width: none;
-    }
-    .pool-toolbar .el-select {
-        flex: 1;
-    }
-    .pool-result-count {
-        margin-left: 0;
-    }
-    .pool-table-wrap {
-        display: none;
-    }
-    .pool-mobile-list {
-        display: grid;
-        gap: 8px;
-        max-height: 360px;
-        overflow-y: auto;
-        padding-right: 2px;
-    }
-    .pool-mobile-card {
-        min-width: 0;
-        border: 1px solid var(--line);
-        background: var(--surface);
-        border-radius: 10px;
-        padding: 10px;
-    }
-    .mobile-card-top {
-        gap: 6px;
-        min-width: 0;
-    }
-    .mobile-card-top code {
-        flex: 1;
-        min-width: 0;
-    }
-    .pool-mobile-card > p {
-        color: var(--muted);
-        font-size: 12px;
-        margin: 5px 0 8px 24px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-    .mobile-card-meta {
-        justify-content: space-between;
-        margin-left: 24px;
-        color: var(--muted);
-        font-size: 11px;
-    }
-    .pool-mobile-card footer {
-        justify-content: flex-end;
-        margin-top: 8px;
-        padding-top: 7px;
-        border-top: 1px solid var(--line);
-    }
-    .pool-pagination {
-        justify-content: center;
-    }
-    .pool-pagination .selected-hint {
-        display: none;
-    }
-    .pool-pagination :deep(.el-pagination__sizes) {
+    .pool-table-dense :deep(.el-table__fixed-right-patch),
+    .pool-table-dense :deep(.el-table__fixed-right),
+    .pool-table-dense :deep(.el-table-fixed-column--right.is-first-column::before) {
         display: none;
     }
 }
@@ -885,21 +618,10 @@ watch(
         min-height: 0;
     }
     .pool-panel-heading,
-    .pool-stats,
     .pool-toolbar,
     .pool-selectionbar,
-    .pool-bulkbar,
     .pool-pagination {
         flex-shrink: 0;
-    }
-    .pool-panel-heading {
-        margin-bottom: 10px;
-    }
-    .pool-panel-heading p {
-        display: none;
-    }
-    .pool-stats > div {
-        padding-block: 6px;
     }
     .pool-table-wrap {
         flex: 1;
@@ -918,10 +640,6 @@ watch(
     .pool-table-wrap :deep(.el-table__body-wrapper) {
         flex: 1;
         min-height: 0;
-    }
-    .pool-pagination {
-        padding-top: 10px;
-        margin-top: 0;
     }
 }
 </style>

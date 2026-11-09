@@ -626,6 +626,54 @@ def _apply_omni_model_updates() -> None:
 _apply_omni_model_updates()
 
 
+def _apply_omni_12_model_updates() -> None:
+    """Exact Omni 1.2 usage keys observed in Flow GetModels on 2026-11-09."""
+    for seconds in range(3, 16):
+        for orientation, aspect in (
+            ("", "VIDEO_ASPECT_RATIO_LANDSCAPE"),
+            ("_portrait", "VIDEO_ASPECT_RATIO_PORTRAIT"),
+        ):
+            for resolution_suffix in ("", "_360p"):
+                for alias, upstream, video_type, minimum, maximum, frames in (
+                    ("omni_1_2", "macaron_cookie_t2v", "t2v", 0, 0, ""),
+                    ("omni_1_2_i2v", "macaron_cookie_i2v", "i2v", 1, 1, ""),
+                    ("omni_1_2_i2v", "macaron_cookie_i2v_fl", "i2v", 2, 2, "_first_last"),
+                    ("omni_1_2_r2v", "macaron_cookie_r2v", "r2v", 1, 7, ""),
+                    ("omni_1_2_extend", "macaron_cookie_extend", "extend", 0, 3, ""),
+                    ("omni_1_2_edit", "macaron_cookie_edit", "edit", 0, 5, ""),
+                ):
+                    if seconds > 10 and (frames or video_type == "extend"):
+                        continue
+                    key = f"{upstream}{'' if video_type == 'edit' else f'_{seconds}s'}{resolution_suffix}"
+                    MODEL_CONFIG[f"{alias}{orientation}_{seconds}s{frames}{resolution_suffix}"] = {
+                        "type": "video",
+                        "video_type": video_type,
+                        "model_key": key,
+                        "aspect_ratio": aspect,
+                        "supports_images": maximum > 0,
+                        "supports_video": video_type in {"edit", "extend"},
+                        "min_images": minimum,
+                        "max_images": maximum,
+                        "duration_seconds": seconds,
+                        "use_v2_model_config": True,
+                        "allow_tier_upgrade": False,
+                        **({"max_trim_ms": 15000} if video_type == "edit" else {}),
+                    }
+    for alias, spec in list(MODEL_CONFIG.items()):
+        if alias.startswith("omni_1_2_") and not alias.endswith("_360p"):
+            for resolution in ("1080p", "4k"):
+                MODEL_CONFIG[f"{alias}_{resolution}"] = {
+                    **spec,
+                    "upsample": {
+                        "resolution": f"VIDEO_RESOLUTION_{resolution.upper()}",
+                        "model_key": f"veo_3_1_upsampler_{resolution}",
+                    },
+                }
+
+
+_apply_omni_12_model_updates()
+
+
 for _aspect in ("landscape", "portrait", "square", "four-three", "three-four"):
     MODEL_CONFIG[f"gemini-3.1-flash-image-lite-{_aspect}"] = {
         **MODEL_CONFIG[f"gemini-3.1-flash-image-{_aspect}"],

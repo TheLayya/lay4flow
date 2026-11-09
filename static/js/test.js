@@ -37,7 +37,7 @@ function selectModel(id) {
     fillSelect('imageAspect', cap.aspectRatios, defaults.aspectRatio);
     fillSelect('imageSize', cap.imageSizes, defaults.imageSize, size => size === '1k' ? '原生（1K 档）' : size.toUpperCase());
   } else {
-    fillSelect('videoMode', ['auto', ...Object.keys(cap.modes)], defaults.mode, mode => MODE_LABELS[mode] || mode);
+    fillSelect('videoMode', ['auto', ...Object.keys(cap.modes).filter(mode => mode !== 'extend' || cap.modes[mode].videoInput)], defaults.mode, mode => MODE_LABELS[mode] || mode);
     fillSelect('videoPriority', cap.priorities || [], defaults.priority, priority => PRIORITY_LABELS[priority] || priority);
     fillSelect('videoQuality', cap.qualities, defaults.quality, quality => QUALITY_LABELS[quality] || quality);
     fillSelect('videoAspect', cap.aspectRatios, defaults.aspectRatio);
@@ -45,7 +45,7 @@ function selectModel(id) {
     fillSelect('videoResolution', unique(cap.combinations.flatMap(row => row.resolutions)), defaults.resolution, value => value.toUpperCase());
     visible('videoQualityGroup', cap.qualities.length > 0);
     visible('videoPriorityGroup', !!cap.priorities?.length);
-    $('trimStartMs').value = '0'; $('trimEndMs').value = '10000'; $('videoMediaId').value = '';
+    $('trimStartMs').value = '0'; $('trimEndMs').value = '10000';
   }
   renderImagePreviews(); renderVideoPreview(); updateParameters();
 }
@@ -61,6 +61,10 @@ function inputLimits() {
   if ($('videoMode').value === 'auto' && !STATE.video.source && !STATE.video.images.length) return cap.modes.reference_to_video || {minImages: 0, maxImages: 0};
   return cap.modes[selectedMode()] || {minImages: 0, maxImages: 0};
 }
+function editTrimBounds() {
+  const limits = currentModel()?.capabilities?.modes?.edit || {};
+  return {minimum: limits.minTrimMs || 1, maximum: limits.maxTrimMs || 10000};
+}
 function matchingCombinations() {
   const model = currentModel(), quality = model.capabilities.qualities.length ? $('videoQuality').value : null;
   const priority = model.capabilities.priorities?.length ? $('videoPriority').value : 'standard';
@@ -71,15 +75,21 @@ function parameterError() {
   if (model.type === 'image') return STATE.image.images.length > model.capabilities.maxImages ? `图片素材最多 ${model.capabilities.maxImages} 张。` : '';
   const mode = selectedMode(), rows = matchingCombinations();
   const limits = inputLimits(), count = STATE.video.images.length;
+  if (mode === 'extend' && !limits.videoInput) return '请选择 Omni 1.2 并上传原视频续写。';
   if (count > (limits.maxImages || 0)) return `当前生成方式需要 ${limits.minImages || 0}–${limits.maxImages || 0} 张图片。`;
   if (limits.videoInput && !STATE.video.source) return '请上传要编辑的视频。';
   if (!limits.videoInput && STATE.video.source) return '当前生成方式不接受上传视频。';
   if (!rows.length) return '当前生成方式不支持所选档位，请调整生成方式或档位。';
   if (!rows.some(row => row.resolutions.includes($('videoResolution').value) && (mode === 'edit' || row.durations.includes(Number($('videoDuration').value))))) return '当前时长与清晰度组合不受支持，请选择可用选项。';
-  if (STATE.video.source && STATE.video.images.length && mode !== 'edit') return '视频素材与图片素材不能同时提交。';
+  if (mode === 'extend' && limits.videoInput) {
+    if (!Number.isFinite(STATE.video.durationMs)) return '正在读取原视频时长，请稍候。';
+    if (STATE.video.durationMs < 3000 || STATE.video.durationMs > (limits.maxInputVideoSeconds || 60) * 1000) return '续写原视频请使用 3–60 秒 MP4。';
+    if (['1080p', '4k'].includes($('videoResolution').value) && STATE.video.durationMs / 1000 + Number($('videoDuration').value) > 15) return '高清续写的原视频与追加时长合计不能超过 15 秒。';
+  }
+  if (STATE.video.source && STATE.video.images.length && !['edit', 'extend'].includes(mode)) return '视频素材与图片素材不能同时提交。';
   if (mode === 'edit') {
-    const start = Number($('trimStartMs').value), end = Number($('trimEndMs').value);
-    if ($('trimStartMs').value === '' || $('trimEndMs').value === '' || !Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end - start > 10000) return '裁剪时间必须为整数毫秒，开始不小于 0，结束大于开始，片段最多 10 秒。';
+    const start = Number($('trimStartMs').value), end = Number($('trimEndMs').value), bounds = editTrimBounds();
+    if ($('trimStartMs').value === '' || $('trimEndMs').value === '' || !Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end - start > bounds.maximum || end - start < bounds.minimum) return `裁剪时间必须为整数毫秒，开始不小于 0，结束大于开始，${bounds.minimum > 1 ? `片段 ${bounds.minimum / 1000}–${bounds.maximum / 1000} 秒。` : `片段最多 ${bounds.maximum / 1000} 秒。`}`;
     if (STATE.video.durationMs !== null && end > STATE.video.durationMs) return `片段结束不能超过源视频时长 ${formatDuration(STATE.video.durationMs)}。`;
   }
   return '';
@@ -88,7 +98,7 @@ function updateParameters() {
   const model = currentModel(); if (!model) return;
   const limits = inputLimits(), video = model.type === 'video', mode = selectedMode();
   visible('imageUploadGroup', limits.maxImages > 0); visible('videoUploadGroup', video && !!limits.videoInput);
-  visible('videoTrimGroup', video && mode === 'edit'); visible('mediaIdGroup', video && !!limits.mediaId && !limits.videoInput);
+  visible('videoTrimGroup', video && mode === 'edit');
   visible('videoDurationGroup', video && mode !== 'edit');
   $('imageLimit').textContent = `（${limits.minImages || 0}–${limits.maxImages || 0} 张）`;
   if (video) {
@@ -108,9 +118,11 @@ function updateParameters() {
     for (const option of $('videoDuration').children) option.disabled = !rows.some(row => row.durations.includes(Number(option.value)) && (!resolutionValid || row.resolutions.includes($('videoResolution').value)));
     for (const option of $('videoResolution').children) option.disabled = !rows.some(row => row.resolutions.includes(option.value) && (mode === 'edit' || !durationValid || row.durations.includes(Number($('videoDuration').value))));
     const hasUpscaling = rows.some(row => row.resolutions.some(value => ['1080p', '4k'].includes(value)));
-    const hint = mode === 'edit' ? 'Omni 视频编辑支持 1 个视频和最多 5 张参考图；编辑片段最长 10 秒。' : mode === 'first_last_frame' ? '按顺序上传首帧、尾帧各 1 张。' + (qualities.includes('lite') ? '轻量档位对应插值 Lite。' : '') : mode === 'extend' ? 'Extend 使用已有 Flow 视频的媒体 ID 续写。' : $('videoMode').value === 'auto' ? '自动识别：无素材为文生视频，有图片为参考素材生视频；首帧和首尾帧请明确选择。' : '按需要选择清晰度与时长。';
+    const hint = mode === 'edit' ? `Omni 视频编辑支持 1 个视频和最多 ${limits.maxImages || 0} 张参考图；编辑片段最长 ${editTrimBounds().maximum / 1000} 秒。` : mode === 'first_last_frame' ? '按顺序上传首帧、尾帧各 1 张。' + (qualities.includes('lite') ? '轻量档位对应插值 Lite。' : '') : mode === 'extend' ? `上传 3–60 秒 MP4 续写${limits.maxImages ? `，可加最多 ${limits.maxImages} 张参考图` : ''}。` : $('videoMode').value === 'auto' ? '自动识别：无素材为文生视频，有图片为参考素材生视频；首帧和首尾帧请明确选择。' : '按需要选择清晰度与时长。';
+    const versionHint = STATE.selectedModel === 'omni_1.2_flash' ? ' Omni 1.2：11–15 秒及续写需 Plus、Pro 或 Ultra；首尾帧最多 10 秒。' : STATE.selectedModel === 'omni_1.1_flash' ? ' Omni 1.1 将于 2026 年 12 月 5 日停用。' : '';
     const priorityHint = priority === 'relaxed' ? ' Relaxed 需要 Ultra 账号，支持快速档位、8 秒、720P。' : cap.priorities?.includes('relaxed') && mode === 'extend' ? ' 续写仅支持标准执行模式。' : '';
-    $('modeHint').textContent = hint + priorityHint + (hasUpscaling && ['1080p', '4k'].includes($('videoResolution').value) ? ' 高清输出会额外放大，需要更长时间及相应账号权限。' : '');
+    $('modeHint').textContent = hint + priorityHint + versionHint + (hasUpscaling && ['1080p', '4k'].includes($('videoResolution').value) ? ' 高清输出会额外放大，需要更长时间及相应账号权限。' : '');
+    $('videoHint').textContent = mode === 'extend' ? 'MP4 · 3–60 秒 · 最大 100 MiB；续写使用完整原视频。' : `MP4、WebM 或 QuickTime；编辑片段不超过 ${editTrimBounds().maximum / 1000} 秒。`;
   }
   const error = parameterError(); $('parameterError').textContent = error;
   $('btnGenerate').disabled = STATE.generating || !!error;
@@ -119,8 +131,8 @@ function updateParameters() {
 function changeMode() {
   STATE.mediaRevision++;
   const mode = $('videoMode').value;
-  if (mode !== 'auto' && mode !== 'edit') STATE.video.source = null;
-  if (mode === 'extend' || mode === 'text_to_video') STATE.video.images = [];
+  if (mode !== 'auto' && mode !== 'edit' && !(mode === 'extend' && inputLimits().videoInput)) STATE.video.source = null;
+  if (mode === 'text_to_video' || (mode === 'extend' && !inputLimits().maxImages)) STATE.video.images = [];
   updateParameters();
   const rows = matchingCombinations(), duration = Number($('videoDuration').value), resolution = $('videoResolution').value;
   const row = rows.find(item => (mode === 'edit' || item.durations.includes(duration)) && item.resolutions.includes(resolution))
@@ -155,7 +167,7 @@ async function handleFiles(files) {
 function readFile(file) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = event => resolve(event.target.result); reader.onerror = reject; reader.readAsDataURL(file); }); }
 async function handleVideoFile(file) {
   if (!file || !inputLimits().videoInput) return;
-  if (!['video/mp4', 'video/webm', 'video/quicktime'].includes(file.type)) { alert('只支持 MP4、WebM 或 QuickTime 视频。'); return; }
+  if (!(selectedMode() === 'extend' ? ['video/mp4'] : ['video/mp4', 'video/webm', 'video/quicktime']).includes(file.type)) { alert(selectedMode() === 'extend' ? '续写只支持 MP4 原视频。' : '只支持 MP4、WebM 或 QuickTime 视频。'); return; }
   if (file.size > 100 * 1024 * 1024) { alert('视频不能超过 100 MiB。'); return; }
   const revision = STATE.mediaRevision;
   try { const url = await readFile(file); if (revision !== STATE.mediaRevision) return; STATE.video.source = url; STATE.video.durationMs = null; renderVideoPreview(); updateParameters(); }
@@ -166,17 +178,18 @@ function renderVideoPreview() {
   const item = document.createElement('div'); item.className = 'video-preview-item';
   const video = document.createElement('video'); video.src = STATE.video.source; video.controls = true; video.preload = 'metadata';
   video.onloadedmetadata = () => {
-    if (selectedMode() !== 'edit' || !Number.isFinite(video.duration) || video.duration <= 0) return;
+    if (!Number.isFinite(video.duration) || video.duration <= 0) return;
     STATE.video.durationMs = Math.round(video.duration * 1000);
-    const usableMs = Math.min(10000, STATE.video.durationMs);
+    if (selectedMode() !== 'edit') { updateParameters(); return; }
+    const usableMs = Math.min(editTrimBounds().maximum, STATE.video.durationMs);
     $('trimStartMs').value = '0'; $('trimEndMs').value = String(usableMs);
-    $('videoHint').textContent = `已读取源视频时长 ${formatDuration(STATE.video.durationMs)}；可编辑片段范围 0–${formatDuration(usableMs)}，最长 10 秒。`;
+    $('videoHint').textContent = `已读取源视频时长 ${formatDuration(STATE.video.durationMs)}；可编辑片段范围 0–${formatDuration(usableMs)}，最长 ${editTrimBounds().maximum / 1000} 秒。`;
     updateParameters();
   };
   item.appendChild(video);
   const button = document.createElement('button'); button.className = 'remove-btn'; button.textContent = '×'; button.type = 'button'; button.setAttribute('aria-label', '移除视频'); button.onclick = removeVideo; item.appendChild(button); $('videoPreviewList').appendChild(item);
 }
-function removeVideo() { STATE.video.source = null; STATE.video.durationMs = null; STATE.mediaRevision++; $('videoHint').textContent = 'MP4、WebM 或 QuickTime；编辑片段不超过 10 秒。'; renderVideoPreview(); updateParameters(); }
+function removeVideo() { STATE.video.source = null; STATE.video.durationMs = null; STATE.mediaRevision++; $('videoHint').textContent = `MP4、WebM 或 QuickTime；编辑片段不超过 ${editTrimBounds().maximum / 1000} 秒。`; renderVideoPreview(); updateParameters(); }
 function buildRequest(prompt) {
   const model = currentModel(), error = parameterError(); if (error) throw new Error(error);
   const content = [{type: 'text', text: prompt}], generationConfig = {};
@@ -197,7 +210,6 @@ function buildRequest(prompt) {
     generationConfig.videoConfig = options;
     STATE.video.images.forEach(url => content.push({type: 'image_url', image_url: {url}}));
     if (limits.videoInput) content.push({type: 'video_url', video_url: {url: STATE.video.source}});
-    if (limits.mediaId && !limits.videoInput) { const id = $('videoMediaId').value.trim().replace(/^extend:\/\//, ''); if (!id || /\s/.test(id)) throw new Error('请填写有效的源视频媒体 ID。'); content.push({type: 'video_url', video_url: {url: `extend://${id}`}}); }
   }
   return {model: STATE.selectedModel, messages: [{role: 'user', content: content.length === 1 ? prompt : content}], generationConfig, stream: true};
 }

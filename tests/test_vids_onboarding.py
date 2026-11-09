@@ -43,6 +43,21 @@ class VidsOnboardingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.proxy = SimpleNamespace(get_request_proxy_url=AsyncMock(return_value=None))
         self.dispatcher = VidsProviderDispatcher(self.db)
+
+        async def switches(token_ids):
+            return {
+                token_id: {
+                    "token_id": token_id,
+                    "email": token.email,
+                    "enabled": getattr(token, "is_active", False),
+                    "image_enabled": getattr(token, "image_enabled", False),
+                    "video_enabled": getattr(token, "video_enabled", False),
+                }
+                for token_id in token_ids
+                if (token := self.tokens.get(token_id)) is not None
+            }
+
+        self.dispatcher.account_switches = AsyncMock(side_effect=switches)
         self.runtime = VidsRuntime(self.dispatcher, self.proxy)
         await self.runtime.start({})
         self.page = SimpleNamespace(close=AsyncMock())

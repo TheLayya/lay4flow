@@ -4,7 +4,7 @@ import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, Depends, FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer
 
 from ..services.vids.client import PRESET_VOICES, VidsProtocolError, VidsTransportError
@@ -13,6 +13,7 @@ from ..services.vids.gateway import (
     GatewayError,
     VidsGateway,
 )
+from ..services.vids.media_cleanup import VidsFileResponse as FileResponse
 from .openai_common import APIError, OpenAIRoute, read_json_body
 from .vids_media import (
     image_generation_body,

@@ -1,28 +1,31 @@
 """Account tier and model capability helpers."""
 
+import re
 from typing import Optional
-
 
 PAYGATE_TIER_NOT_PAID = "PAYGATE_TIER_NOT_PAID"
 PAYGATE_TIER_ONE = "PAYGATE_TIER_ONE"
 PAYGATE_TIER_TWO = "PAYGATE_TIER_TWO"
+PAYGATE_TIER_ZERO = "PAYGATE_TIER_ZERO"
 
 
 def normalize_user_paygate_tier(user_paygate_tier: Optional[str]) -> str:
     """Normalize an account tier, defaulting unknown values to free tier."""
     normalized = (user_paygate_tier or "").strip()
-    if normalized in {PAYGATE_TIER_NOT_PAID, PAYGATE_TIER_ONE, PAYGATE_TIER_TWO}:
+    if normalized in {PAYGATE_TIER_NOT_PAID, PAYGATE_TIER_ZERO, PAYGATE_TIER_ONE, PAYGATE_TIER_TWO}:
         return normalized
     return PAYGATE_TIER_NOT_PAID
 
 
-def get_paygate_tier_rank(user_paygate_tier: Optional[str]) -> int:
+def get_paygate_tier_rank(user_paygate_tier: Optional[str]) -> float:
     """Map account tier to a comparable rank."""
     normalized = normalize_user_paygate_tier(user_paygate_tier)
     if normalized == PAYGATE_TIER_TWO:
         return 2
     if normalized == PAYGATE_TIER_ONE:
         return 1
+    if normalized == PAYGATE_TIER_ZERO:
+        return 0.5
     return 0
 
 
@@ -33,6 +36,8 @@ def get_paygate_tier_label(user_paygate_tier: Optional[str]) -> str:
         return "Ult"
     if normalized == PAYGATE_TIER_ONE:
         return "Pro"
+    if normalized == PAYGATE_TIER_ZERO:
+        return "Plus"
     return "Free"
 
 
@@ -44,6 +49,16 @@ def get_required_paygate_tier_for_model(model_name: Optional[str]) -> str:
 
     if normalized.endswith("-4k") or normalized.endswith("_4k") or "_ultra" in normalized:
         return PAYGATE_TIER_TWO
+
+    if normalized.startswith("omni_1_2_"):
+        duration = re.search(r"_(\d+)s(?:_|$)", normalized)
+        if (
+            "_extend_" in normalized
+            or normalized.endswith("_1080p")
+            or duration
+            and int(duration[1]) > 10
+        ):
+            return PAYGATE_TIER_ZERO
 
     if normalized.endswith("-2k") or normalized.endswith("_1080p"):
         return PAYGATE_TIER_ONE

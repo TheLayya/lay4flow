@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, List, Optional
 from ..core.database import Database
 from ..core.logger import debug_logger
 from ..core.models import Project, Token
+from .flow.flow_rpc import FlowRPCError
 
 
 def profile_project_binding(token: Token) -> dict[str, Any]:
@@ -186,7 +187,37 @@ class ProjectPool:
                 target_size = pool_size if pool_size is not None else self.pool_size()
                 creator = create_project or self.create_project_for_token
                 while len(projects) < target_size:
-                    project = await creator(token, len(projects) + 1)
+                    try:
+                        project = await creator(token, len(projects) + 1)
+                    except Exception as exc:
+                        temporary = isinstance(exc, (TimeoutError, ConnectionError)) or (
+                            isinstance(exc, FlowRPCError) and exc.retryable
+                        )
+                        if not temporary:
+                            raise
+                        # A pool is usable before it reaches the preferred size.
+                        # Re-read persisted rows; never replay an uncertain write
+                        # or publish a project returned by a failed operation.
+                        available = sorter(
+                            [
+                                row
+                                for row in await self.db.get_projects_by_token(token_id)
+                                if row.is_active
+                            ]
+                        )
+                        if not available:
+                            raise
+                        current = await self.db.get_token(token_id)
+                        if current is None or flow_session_binding(current) != flow_session_binding(
+                            token
+                        ):
+                            raise ValueError("Account binding changed while preparing projects")
+                        projects = available
+                        debug_logger.log_warning(
+                            f"[PROJECT] Pool expansion interrupted for token {token_id}; "
+                            f"using {len(projects)} saved project(s)"
+                        )
+                        break
                     projects.append(project)
                     projects = sorter(projects)
                 selector = select_project or self.select_next_project
@@ -211,5 +242,9 @@ class ProjectPool:
                 else:
                     await self.db.update_token(token_id, **updates)
                 return selected_project.project_id
+            except FlowRPCError:
+                # Keep bounded reason/network diagnostics for callers that need
+                # to distinguish an expired login from a temporary outage.
+                raise
             except Exception as exc:
                 raise ValueError(f"Failed to prepare project pool: {exc}") from exc

@@ -1,6 +1,9 @@
 """Request-log routes built with explicit database and authentication dependencies."""
 
 import json
+import math
+import re
+from datetime import datetime
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -61,6 +64,116 @@ def _extract_error_summary(payload: Any) -> str:
     return _truncate_text(payload)
 
 
+def _attempt_count(value: Any) -> int | None:
+    """Unknown legacy counts remain unknown; booleans are not counted attempts."""
+    return value if type(value) is int and 0 <= value <= 1_000_000 else None
+
+
+def _safe_attempt_text(value: Any, limit: int = 240) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = " ".join(value.split())
+    text = re.sub(r"\bcookie\s*[:=]\s*[^\r\n]*", "Cookie=[redacted]", text, flags=re.I)
+    text = re.sub(r"(?:https?|socks4a?|socks5h?)://\S+", "[URL]", text, flags=re.I)
+    text = re.sub(r"\bBearer\s+\S+", "Bearer [redacted]", text, flags=re.I)
+    text = re.sub(
+        r"\b(cookie|authorization|password|token|api[_-]?key)\s*[:=]\s*\S+",
+        r"\1=[redacted]",
+        text,
+        flags=re.I,
+    )
+    # Opaque credential echoes may have no identifying label. Public Flow
+    # error identifiers are safe evidence and must stay visible in the trace.
+    text = re.sub(
+        r"[A-Za-z0-9_+/=.-]{48,}",
+        lambda match: (
+            match.group(0)
+            if re.fullmatch(r"PUBLIC_ERROR_[A-Z0-9_]+", match.group(0))
+            else "[redacted]"
+        ),
+        text,
+    )
+    return _truncate_text(text, limit)
+
+
+def _extract_attempt_history(payload: Any) -> dict | None:
+    """Expose bounded structured evidence, never guess retries from log rows."""
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (ValueError, TypeError, RecursionError):
+            return None
+    if not isinstance(payload, dict):
+        return None
+    history = payload.get("attempt_history")
+    if history is None and isinstance(payload.get("performance"), dict):
+        history = payload["performance"].get("attempt_history")
+    if (
+        not isinstance(history, dict)
+        or type(history.get("version")) is not int
+        or history["version"] != 1
+        or not isinstance(history.get("attempts"), list)
+    ):
+        return None
+    result = {"version": 1}
+    for name in ("total_attempts", "retry_count", "account_count", "limit", "accounts_limit"):
+        count = _attempt_count(history.get(name))
+        if count is not None:
+            result[name] = count
+    attempts = []
+    for record in history["attempts"][:100]:
+        if not isinstance(record, dict):
+            continue
+        number = _attempt_count(record.get("attempt"))
+        if not number:
+            continue
+        row = {"attempt": number}
+        account_id = _attempt_count(record.get("account_id"))
+        if account_id:
+            row["account_id"] = account_id
+        if isinstance(record.get("account_email"), str):
+            row["account_email"] = " ".join(record["account_email"].split())[:320]
+        if record.get("stage") in {"captcha", "submit", "preflight", "polling"}:
+            row["stage"] = record["stage"]
+        if record.get("status") in {"success", "accepted", "failed", "in_progress", "cancelled"}:
+            row["status"] = record["status"]
+        if record.get("next_action") in {
+            "switch_account",
+            "retry_same_account",
+            "retry",
+            "delay",
+            "stop",
+            "completed",
+            "polling",
+        }:
+            row["next_action"] = record["next_action"]
+        if record.get("rule_action") in {"LIMIT", "DEACTIVE", "RETRY", "DISABLE", "DELAY"}:
+            row["rule_action"] = record["rule_action"]
+        for name, limit in (("error", 240), ("error_code", 128), ("rule_keyword", 256)):
+            if isinstance(record.get(name), str):
+                row[name] = _safe_attempt_text(record[name], limit)
+        started_at = record.get("started_at")
+        if isinstance(started_at, str) and len(started_at) <= 40:
+            try:
+                datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                row["started_at"] = started_at
+            except ValueError:
+                pass
+        for name, maximum in (
+            ("duration_ms", 604_800_000),
+            ("delay_seconds", 604_800),
+            ("rule_seconds", 604_800),
+        ):
+            value = record.get(name)
+            if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= maximum:
+                row[name] = value
+        attempts.append(row)
+    result["attempts"] = attempts
+    if len(history["attempts"]) > 100:
+        result["truncated"] = True
+    return result
+
+
 def create_log_router(get_database: Callable, verify_token: Callable, summarize_error: Callable):
     """Return the router and compatible direct-call endpoints; no service globals."""
     router = APIRouter()
@@ -89,6 +202,9 @@ def create_log_router(get_database: Callable, verify_token: Callable, summarize_
                     "duration": log.get("duration"),
                     "status_text": log.get("status_text") or "",
                     "progress": log.get("progress") or 0,
+                    "attempt_count": _attempt_count(log.get("attempt_count")),
+                    "retry_count": _attempt_count(log.get("retry_count")),
+                    "account_count": _attempt_count(log.get("account_count")),
                     "created_at": log.get("created_at"),
                     "updated_at": log.get("updated_at"),
                     "error_summary": summarize_error(log.get("response_body_excerpt"))
@@ -117,6 +233,10 @@ def create_log_router(get_database: Callable, verify_token: Callable, summarize_
             "duration": log.get("duration"),
             "status_text": log.get("status_text") or "",
             "progress": log.get("progress") or 0,
+            "attempt_count": _attempt_count(log.get("attempt_count")),
+            "retry_count": _attempt_count(log.get("retry_count")),
+            "account_count": _attempt_count(log.get("account_count")),
+            "attempt_history": _extract_attempt_history(log.get("response_body")),
             "created_at": log.get("created_at"),
             "updated_at": log.get("updated_at"),
             "error_summary": error_summary,

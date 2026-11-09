@@ -4,12 +4,13 @@ import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import * as Vue from 'vue'
 import { compileScript, parse } from '@vue/compiler-sfc'
+import { canRemoveStudioEntry } from '../src/lib/studio-history.js'
 
 function setupGallery(entries, overrides = {}) {
     const source = readFileSync(new URL('../src/components/StudioGallery.vue', import.meta.url), 'utf8')
     const { descriptor } = parse(source)
     const script = compileScript(descriptor, { id: 'gallery-test' }).content
-    const context = vm.createContext({ ...Vue, onMounted() {}, onUnmounted() {} })
+    const context = vm.createContext({ ...Vue, canRemove: canRemoveStudioEntry, onMounted() {}, onUnmounted() {} })
     for (const name of [
         'Picture',
         'VideoCamera',
@@ -83,7 +84,21 @@ test('the masonry gallery retains every output, pending request and correct glob
     assert.equal(gallery.visibleCards.value.length, 6)
 })
 
-test('gallery filters request states and prompt text before selecting unique completed or failed requests', () => {
+test('only available completed videos expose the prepare-Extend action and it never triggers generation', () => {
+    const entry = { key: 'original', status: 'completed', kind: 'video', outputs: [{ kind: 'video', path: '/original' }] }
+    const { gallery, events } = setupGallery([entry])
+    const card = gallery.cards.value[0]
+    assert.equal(gallery.canExtendVideo(card), true)
+    gallery.extendVideo(card)
+    assert.equal(events.length, 1)
+    assert.equal(events[0][0], 'extend-video')
+    assert.equal(events[0][1].entry.key, 'original')
+    assert.equal(gallery.canExtendVideo({ ...card, entry: { ...entry, mediaExpired: true } }), false)
+    assert.equal(gallery.canExtendVideo({ ...card, entry: { ...entry, status: 'unknown' } }), false)
+    assert.equal(gallery.canExtendVideo({ ...card, output: null }), false)
+})
+
+test('gallery filters request states and prompt text before selecting completed, failed or unresolved requests', () => {
     const entries = [
         {
             key: 'done',
@@ -104,29 +119,29 @@ test('gallery filters request states and prompt text before selecting unique com
     assert.equal(gallery.filteredEntries.value.length, 4)
     gallery.search.value = 'SAKURA'
     assert.equal(gallery.visibleCards.value.length, 3)
-    assert.equal(gallery.selectableEntries.value.length, 1)
+    assert.equal(gallery.selectableEntries.value.length, 2)
     gallery.toggleAll(true)
-    assert.equal(gallery.checkedEntries.value.length, 1, 'multiple outputs share a single request selection')
+    assert.equal(gallery.checkedEntries.value.length, 2, 'multiple outputs share a single request selection')
     assert.equal(gallery.downloadableEntries.value.length, 1)
     assert.equal(gallery.allChecked.value, true)
     gallery.search.value = ''
     assert.equal(gallery.someChecked.value, true)
     gallery.toggleEntry(entries[2], true)
-    assert.equal(gallery.checkedEntries.value.length, 1, 'unresolved receipts retain their history')
+    assert.equal(gallery.checkedEntries.value.length, 3, 'unresolved receipts can be selected for cleanup')
     gallery.statusFilter.value = 'failed'
     assert.equal(gallery.visibleCards.value.length, 1)
     assert.equal(gallery.failedEntries.value[0].key, 'failed')
     gallery.toggleAll(true)
-    assert.equal(gallery.checkedEntries.value.length, 2)
+    assert.equal(gallery.checkedEntries.value.length, 4)
     gallery.statusFilter.value = 'pending'
     assert.equal(gallery.visibleCards.value.length, 2)
-    assert.equal(gallery.selectableEntries.value.length, 0)
+    assert.equal(gallery.selectableEntries.value.length, 2)
     gallery.statusFilter.value = 'completed'
     assert.equal(gallery.visibleCards.value.length, 2)
     gallery.toggleAll(false)
     assert.equal(
         gallery.checkedEntries.value.length,
-        1,
+        3,
         'deselecting the current filter preserves other intentional selections',
     )
 })

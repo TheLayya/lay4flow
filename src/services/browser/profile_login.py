@@ -5,7 +5,7 @@ import json
 import re
 import secrets
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ...core.account_identity import same_google_identity
 from ...core.models import Token
@@ -376,19 +376,10 @@ class DirectProfileLogin:
                 at_expires=token.at_expires,
                 browser_profile_source="cloak",
             )
-            expected.pop("google_cookies", None)
-            try:
-                await self.tokens._flow_call_for_token(
-                    token, lambda: self.tokens.ensure_project_exists(token_id)
-                )
-            except Exception:
-                detail = self._failure_detail(
-                    "transient_error",
-                    stage="prepare_workspace",
-                    retryable=True,
-                    browser_open=False,
-                )
-                raise ViewerError(503, detail["message"], detail=detail) from None
+            # Project preparation belongs to generation. A failure creating or
+            # warming its pool must not invalidate this freshly verified login.
+            now = datetime.now(timezone.utc)
+            due = now + timedelta(minutes=token.refresh_interval_minutes)
             if not await self.tokens.db.update_token_if_credentials_match(
                 token_id,
                 expected,
@@ -401,9 +392,12 @@ class DirectProfileLogin:
                 remark="Cloak 直接登录",
                 browser_profile_status="ready",
                 browser_profile_error="",
-                browser_profile_verified_at=datetime.now(timezone.utc),
-                last_st_refresh_at=datetime.now(timezone.utc),
+                browser_profile_verified_at=now,
+                last_refresh_at=now,
+                last_st_refresh_at=now,
                 last_st_refresh_result="success",
+                next_refresh_at=due,
+                browser_profile_next_at=due,
                 refresh_status="ready",
                 refresh_error="",
                 refresh_reason="",
@@ -412,8 +406,10 @@ class DirectProfileLogin:
                 refresh_failures=0,
             ):
                 raise ViewerError(409, "账号配置已变化，已保留当前启用设置")
+            # No database/network read after activation may turn a committed,
+            # verified login into a failed completion response.
+            self.tokens.mark_profile_validated(token)
             self.tokens.notify_profile_ready(token_id)
-            self.tokens.mark_profile_validated(await self.tokens.db.get_token(token_id))
             pending["result"] = {
                 "success": True,
                 "session_id": session_id,

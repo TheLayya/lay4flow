@@ -19,6 +19,27 @@ from tests.test_vids_persistence_gateway import client, cookies
 
 
 class VidsRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_reconciles_only_validated_receipt_bindings(self):
+        self.dispatcher.account_policy = SimpleNamespace(reconcile=AsyncMock())
+        await self.start()
+        self.assertEqual(self.dispatcher.account_policy.reconcile.await_count, 2)
+        for call in self.dispatcher.account_policy.reconcile.await_args_list:
+            token_id, root = call.args
+            self.assertIs(self.dispatcher._accounts[token_id].gateway.root, root)
+
+    async def test_receipt_recovery_storage_failure_preserves_ready_sessions(self):
+        self.dispatcher.account_policy = SimpleNamespace(
+            reconcile=AsyncMock(side_effect=RuntimeError("Synthetic storage fault"))
+        )
+        await self.start()
+        self.assertEqual(set(self.dispatcher._accounts), {1, 2})
+        self.assertTrue(self.runtime._started)
+
+    async def test_read_retry_configuration_is_accepted_without_becoming_a_binding(self):
+        with patch("src.services.vids.gateway.VidsClient", side_effect=self.upstream):
+            await self.runtime.start({"accounts": self.rows, "read_max_attempts": 3})
+        self.assertEqual(set(self.dispatcher._accounts), {1, 2})
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
@@ -255,7 +276,7 @@ class VidsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await self.runtime.close()
                 self.assert_empty()
 
-    async def test_cancel_during_account_lookup_clears_the_started_sibling(self):
+    async def test_cancel_during_account_lookup_closes_prepared_sibling_without_starting_it(self):
         entered = asyncio.Event()
 
         async def pausing(identifier):
@@ -269,11 +290,17 @@ class VidsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             pending = asyncio.create_task(self.runtime.start({"accounts": self.rows}))
             await entered.wait()
             self.assertEqual(len(self.runtime._gateways), 1)
+            candidate = self.runtime._gateways[0]
+            close = AsyncMock(wraps=candidate.close)
+            candidate.close = close
             pending.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await pending
         self.assert_empty()
-        self.upstreams[0].session.close.assert_awaited_once()
+        close.assert_awaited_once()
+        self.assertEqual(self.upstreams, [])
+        self.assertFalse(candidate._ready)
+        self.assertIsNone(candidate._lock_file)
 
     async def test_proxy_resolution_preserves_account_global_and_explicit_policy(self):
         self.tokens[1].proxy_url = "socks5h://synthetic-account-proxy:1080"
@@ -910,6 +937,22 @@ class VidsMainIntegrationTests(unittest.IsolatedAsyncioTestCase):
         from src import main
 
         self.enterContext(patch.object(main.app.state, "vids_auto_onboarding", None))
+        # This suite tests ordering and startup failures using a fake Flow
+        # lifespan; filesystem recovery is covered with isolated fixtures.
+        self.enterContext(
+            patch.object(
+                main.app.state,
+                "profile_cache_maintenance",
+                SimpleNamespace(start=lambda: None, close=AsyncMock()),
+            )
+        )
+        self.enterContext(
+            patch.object(
+                main.app.state,
+                "vids_media_cleanup",
+                SimpleNamespace(start=lambda: None, close=AsyncMock()),
+            )
+        )
 
     async def test_vids_gateway_startup_failure_keeps_flow_and_management_running(self):
         from src import main

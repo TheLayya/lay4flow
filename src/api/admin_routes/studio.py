@@ -99,7 +99,7 @@ def create_studio_router(verify_token: Callable, get_vids=None):
         result["receipt_url"] = prefix + "/v1/vids/generations/" + identifier
         result["retry_download_url"] = (
             result["receipt_url"] + "/download"
-            if result["status"] in {"received", "download_failed"}
+            if result["status"] in {"received", "download_failed"} or result.get("media_expired")
             else None
         )
         if result.get("content_url"):
@@ -117,7 +117,9 @@ def create_studio_router(verify_token: Callable, get_vids=None):
         return {
             "status": receipt["status"],
             "vids_receipt": receipt,
-            "message": "作品已生成"
+            "message": "成品缓存已过期，可恢复原下载"
+            if receipt.get("media_expired")
+            else "作品已生成"
             if receipt["status"] == "completed"
             else receipt["error"] or receipt["status"],
         }

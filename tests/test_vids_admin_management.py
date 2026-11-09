@@ -38,6 +38,20 @@ class VidsAdminManagementTests(unittest.IsolatedAsyncioTestCase):
         self.token = Token()
         self.db = SimpleNamespace(get_token=AsyncMock(return_value=self.token))
         self.dispatcher = VidsProviderDispatcher(self.db)
+
+        async def switches(token_ids):
+            return {
+                token_id: {
+                    "token_id": token_id,
+                    "email": self.token.email,
+                    "enabled": self.token.is_active,
+                    "image_enabled": self.token.image_enabled,
+                    "video_enabled": self.token.video_enabled,
+                }
+                for token_id in token_ids
+            }
+
+        self.dispatcher.account_switches = AsyncMock(side_effect=switches)
         self.gateway = SimpleNamespace(
             quota=AsyncMock(side_effect=self.quota),
             generate=AsyncMock(),
@@ -118,6 +132,7 @@ class VidsAdminManagementTests(unittest.IsolatedAsyncioTestCase):
             response = await self.client.request(method, route)
             self.assertEqual(response.status_code, 401)
         self.db.get_token.assert_not_awaited()
+        self.dispatcher.account_switches.assert_not_awaited()
         self.gateway.quota.assert_not_awaited()
 
     async def test_empty_configuration_is_not_an_unavailable_account(self):
@@ -470,8 +485,12 @@ class VidsAdminManagementTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cached_quota_becomes_stale_without_implicitly_querying_upstream(self):
         observed = datetime(2026, 10, 15, tzinfo=timezone.utc)
-        with patch("src.api.admin_routes.vids.datetime", wraps=datetime) as clock:
+        with (
+            patch("src.api.admin_routes.vids.datetime", wraps=datetime) as clock,
+            patch("src.services.vids.dispatcher.datetime", wraps=datetime) as shared_clock,
+        ):
             clock.now.return_value = observed
+            shared_clock.now.return_value = observed
             await self.client.get("/api/admin/vids/accounts/detail?refresh=true")
             clock.now.return_value = observed + timedelta(seconds=QUOTA_REFRESH_SECONDS)
             detail = (await self.client.get("/api/admin/vids/accounts/detail")).json()

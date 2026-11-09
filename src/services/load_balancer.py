@@ -16,6 +16,7 @@ from ..core.logger import debug_logger
 from ..core.models import Token
 from ..core.observability import OBSERVABILITY
 from .concurrency_manager import ConcurrencyManager
+from .generation_attempts import CURRENT_ATTEMPTS
 from .proxy_manager import AccountProxyUnavailable
 
 
@@ -124,7 +125,9 @@ class LoadBalancer:
             remaining 为 None 表示无限制
         """
         if not self.concurrency_manager:
-            return 0, None
+            return await self._get_pending_count(
+                token_id, for_image_generation, for_video_generation
+            ), None
 
         if for_image_generation:
             inflight = await self.concurrency_manager.get_image_inflight(token_id)
@@ -227,8 +230,17 @@ class LoadBalancer:
         available_tokens = []
         filtered_reasons = {}
         required_tier = get_required_paygate_tier_for_model(model)
+        policy = getattr(self.token_manager, "generation_error_policy", None)
+        protection = await policy.public_states() if policy is not None else {}
 
-        for token in active_tokens:
+        for selection_order, token in enumerate(active_tokens):
+            attempts = CURRENT_ATTEMPTS.get()
+            if attempts is not None and token.id in attempts.excluded:
+                filtered_reasons[token.id] = "本次请求已尝试此账号"
+                continue
+            if token.id in protection:
+                filtered_reasons[token.id] = protection[token.id]["reason"]
+                continue
             normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
             if model and not supports_model_for_tier(model, normalized_tier):
                 filtered_reasons[token.id] = "账号等级不足，需要 " + get_paygate_tier_label(
@@ -272,6 +284,7 @@ class LoadBalancer:
                     "inflight": inflight,
                     "remaining": remaining,
                     "needs_refresh": self.token_manager.needs_at_refresh(token),
+                    "last_used_order": selection_order,
                     "random": random.random(),
                 }
             )
@@ -313,18 +326,14 @@ class LoadBalancer:
         else:
             available_tokens.sort(
                 key=lambda item: (
-                    1 if item["needs_refresh"] else 0,
                     item["inflight"],
+                    1 if item["needs_refresh"] else 0,
                     0 if item["remaining"] is None else 1,
                     -(item["remaining"] or 0),
+                    item["last_used_order"],
                     item["random"],
                 )
             )
-
-        ready_candidates = [item for item in available_tokens if not item["needs_refresh"]]
-        refresh_candidates = [item for item in available_tokens if item["needs_refresh"]]
-        if ready_candidates and refresh_candidates:
-            available_tokens = ready_candidates + refresh_candidates
 
         debug_logger.log_info("[LOAD_BALANCER] 候选Token负载:")
         for item in available_tokens:
@@ -348,6 +357,9 @@ class LoadBalancer:
             token = await self.token_manager.ensure_valid_token(token)
             if not token:
                 debug_logger.log_info(f"[LOAD_BALANCER] 跳过 Token {token_id}: AT无效或已过期")
+                continue
+
+            if policy is not None and await policy.availability(token.id, model=model):
                 continue
 
             if reserve and not await self._reserve_slot(
@@ -402,6 +414,11 @@ class LoadBalancer:
         active_tokens = await self.token_manager.get_active_tokens()
         if not active_tokens:
             return None
+        policy = getattr(self.token_manager, "generation_error_policy", None)
+        if policy is not None:
+            protected = await policy.public_states()
+            if all(token.id in protected for token in active_tokens):
+                return "账号全部处于冷却、异常或停用保护中，请在账号页查看原因与恢复时间"
 
         required_tier = get_required_paygate_tier_for_model(model)
         supported_tokens = []

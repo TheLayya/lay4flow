@@ -18,6 +18,7 @@ from ..core.auth import verify_openai_api_key
 from ..core.config import config
 from ..core.models import ChatCompletionRequest
 from ..core.public_models import PUBLIC_MODELS
+from ..services.flow.video_extend import expected_extension_duration_ms, source_media_id
 from ..services.video_jobs import VideoJobError
 from .openai_common import (
     APIError,
@@ -37,6 +38,7 @@ FIELDS = {
     "input_reference",
     "generationConfig",
     "input_video",
+    "input_video_media_id",
 }
 VIDEO_SIZES = {
     "640x360": ("16:9", "360p"),
@@ -102,7 +104,16 @@ async def read_video_request(request: Request, allowed_fields=FIELDS, array_refe
 
 
 async def normalize_video_request(request: Request):
-    body, files = await read_video_request(request)
+    body, files = await read_video_request(request, array_references=True)
+    references = files.get("input_reference")
+    if (
+        body.get("model") != "omni_1.2_flash"
+        and isinstance(references, list)
+        and len(references) > 1
+    ):
+        raise APIError(
+            400, "Multiple references require Omni 1.2 on this endpoint", param="input_reference"
+        )
     return await normalize_video_body(request, body, files)
 
 
@@ -140,7 +151,10 @@ async def normalize_video_body(
             options[name] = value
     seconds = body.get("seconds")
     if seconds is not None:
-        if str(seconds) not in {"4", "6", "8", "10"} or isinstance(seconds, bool):
+        allowed_seconds = (
+            set(map(str, range(3, 16))) if model == "omni_1.2_flash" else {"4", "6", "8", "10"}
+        )
+        if str(seconds) not in allowed_seconds or isinstance(seconds, bool):
             raise APIError(400, "Unsupported seconds for Flow video", param="seconds")
         if options.get("mode") == "edit":
             raise APIError(
@@ -150,6 +164,23 @@ async def normalize_video_body(
             raise APIError(400, "Conflicting duration parameters", param="seconds")
         options["durationSeconds"] = int(seconds)
     content = [{"type": "text", "text": prompt}]
+    if "input_video_media_id" in body:
+        if (
+            model != "omni_1.2_flash"
+            or options.get("mode") != "extend"
+            or "input_video" in files
+            or "input_video" in body
+        ):
+            raise APIError(
+                400,
+                "input_video_media_id is only supported for Omni 1.2 Extend without input_video",
+                param="input_video_media_id",
+            )
+        try:
+            identifier = source_media_id(body["input_video_media_id"])
+        except ValueError as exc:
+            raise APIError(400, str(exc), param="input_video_media_id") from None
+        content.append({"type": "image_url", "image_url": {"url": "extend://" + identifier}})
     if "input_reference" in files:
         references = files["input_reference"]
         if not isinstance(references, list):
@@ -168,43 +199,54 @@ async def normalize_video_body(
                 }
             )
     elif body.get("input_reference") is not None:
-        reference = parse_json_object_form(body["input_reference"], "input_reference")
-        if set(reference) != {"image_url"} or not isinstance(reference["image_url"], str):
-            raise APIError(
-                400,
-                "input_reference requires image_url; file_id is not supported",
-                param="input_reference",
+        references = body["input_reference"]
+        if not isinstance(references, list):
+            references = [references]
+        limit = 3 if options.get("mode") == "extend" else 7
+        if not 1 <= len(references) <= limit or (model != "omni_1.2_flash" and len(references) > 1):
+            raise APIError(400, "Unsupported number of reference images", param="input_reference")
+        total_bytes = 0
+        for reference in references:
+            reference = parse_json_object_form(reference, "input_reference")
+            if set(reference) != {"image_url"} or not isinstance(reference["image_url"], str):
+                raise APIError(
+                    400,
+                    "input_reference requires image_url; file_id is not supported",
+                    param="input_reference",
+                )
+            uri = reference["image_url"]
+            if not uri.startswith("data:image/"):
+                # Same public downloader guards apply to every image in the list.
+                data, _ = await load_generated_asset(uri, "image", allow_local=False)
+            else:
+                _, data = routes._decode_data_url(uri)
+            total_bytes += len(data)
+            if len(data) > 20 * 1024 * 1024 or total_bytes > 100 * 1024 * 1024:
+                raise APIError(413, "Reference images are too large")
+            dimensions = image_dimensions(data)
+            if not dimensions:
+                raise APIError(
+                    400, "Reference must be a PNG, JPEG or WebP image", param="input_reference"
+                )
+            _, _, mime = dimensions
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64," + base64.b64encode(data).decode()},
+                }
             )
-        uri = reference["image_url"]
-        if not uri.startswith("data:image/"):
-            # The public downloader rejects private destinations, redirects and large bodies.
-            data, _ = await load_generated_asset(uri, "image", allow_local=False)
-        else:
-            _, data = routes._decode_data_url(uri)
-        if len(data) > 20 * 1024 * 1024:
-            raise APIError(413, "Reference image is too large")
-        dimensions = image_dimensions(data)
-        if not dimensions:
-            raise APIError(
-                400, "Reference must be a PNG, JPEG or WebP image", param="input_reference"
-            )
-        _, _, mime = dimensions
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64," + base64.b64encode(data).decode()},
-            }
-        )
     if len(content) > 1 and "mode" not in options and "input_video" not in files:
         options["mode"] = "image_to_video" if len(content) == 2 else "reference_to_video"
     if "input_video" in files:
-        if model != "omni_1.1_flash":
+        if model not in {"omni_1.1_flash", "omni_1.2_flash"}:
             raise APIError(400, "input_video requires an Omni editing model", param="input_video")
         data, mime = files["input_video"]
-        if options.get("mode", "edit") != "edit":
+        upload_extend = model == "omni_1.2_flash" and options.get("mode") == "extend"
+        if not upload_extend and options.get("mode", "edit") != "edit":
             raise APIError(400, "input_video requires edit mode")
-        options["mode"] = "edit"
-        if "durationSeconds" in options:
+        if not upload_extend:
+            options["mode"] = "edit"
+        if not upload_extend and "durationSeconds" in options:
             raise APIError(
                 400, "Use trimStartMs/trimEndMs for editing, not seconds", param="seconds"
             )
@@ -349,6 +391,26 @@ async def execute_video(normalized, base_url, expected_duration=None):
                 "output_duration_mismatch",
                 "Generated video duration does not match the requested duration",
             )
+    if normalized.generation_options.get("mode") == "extend" and str(normalized.model).startswith(
+        "omni_1_2_"
+    ):
+        try:
+            expected_extension = expected_extension_duration_ms(
+                normalized.generation_options,
+                normalized.video_media_id,
+                media.get("extension"),
+                uploaded_video=getattr(normalized, "video_bytes", None),
+                mime=getattr(normalized, "video_mime_type", "video/mp4"),
+            )
+        except ValueError as exc:
+            raise VideoJobError(502, "extension_metadata_invalid", str(exc)) from None
+        actual_duration = routes._mp4_duration_ms(content)
+        if actual_duration is None or abs(actual_duration - expected_extension) > 250:
+            raise VideoJobError(
+                502,
+                "output_duration_mismatch",
+                "Generated extension duration does not match the original video plus added seconds",
+            )
     expires = int(time.time() + config.cache_timeout) if config.cache_timeout > 0 else None
     yield {"type": "completed", "media": {**media, "asset_path": str(path), "expires_at": expires}}
 
@@ -366,7 +428,97 @@ def create_videos_router(get_service, prefix="", normalize_request=None):
     def owner(key):
         return hashlib.sha256(key.encode()).hexdigest()
 
-    @router.post("/v1/videos")
+    @router.post(
+        "/v1/videos",
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["model", "prompt"],
+                            "properties": {
+                                "model": {
+                                    "type": "string",
+                                    "enum": [
+                                        name
+                                        for name, entry in PUBLIC_MODELS.items()
+                                        if entry["type"] == "video"
+                                    ],
+                                },
+                                "prompt": {"type": "string", "minLength": 1, "maxLength": 32000},
+                                "seconds": {
+                                    "oneOf": [{"type": "integer"}, {"type": "string"}],
+                                    "description": "Omni 1.2: 3–15; first/last frame and Extend: 3–10. Extend seconds are added duration. Legacy model combinations remain unchanged.",
+                                },
+                                "size": {"type": "string", "enum": list(VIDEO_SIZES)},
+                                "generationConfig": {
+                                    "type": "object",
+                                    "description": "videoConfig selects mode/aspect/resolution. Editing uses trimStartMs/trimEndMs, up to 15s for Omni 1.2 and 10s for 1.1.",
+                                },
+                                "input_video_media_id": {
+                                    "type": "string",
+                                    "description": "Existing Flow media ID for Omni 1.2 mode=extend; never a URL or uploaded video. Source plus extension must fit 15s for upscaled output.",
+                                },
+                                "input_reference": {
+                                    "oneOf": [
+                                        {
+                                            "type": "object",
+                                            "properties": {"image_url": {"type": "string"}},
+                                            "required": ["image_url"],
+                                        },
+                                        {
+                                            "type": "array",
+                                            "minItems": 1,
+                                            "maxItems": 7,
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {"image_url": {"type": "string"}},
+                                                "required": ["image_url"],
+                                            },
+                                        },
+                                    ],
+                                    "description": "Omni 1.2 accepts an image list; Extend accepts up to 3. Other models retain one input_reference on this endpoint.",
+                                },
+                            },
+                        }
+                    },
+                    "multipart/form-data": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["model", "prompt"],
+                            "properties": {
+                                "model": {"type": "string"},
+                                "prompt": {"type": "string"},
+                                "seconds": {"type": "string"},
+                                "size": {"type": "string"},
+                                "generationConfig": {
+                                    "type": "string",
+                                    "description": "JSON-encoded videoConfig",
+                                },
+                                "input_reference": {"type": "string", "format": "binary"},
+                                "input_reference[]": {
+                                    "type": "array",
+                                    "maxItems": 7,
+                                    "items": {"type": "string", "format": "binary"},
+                                },
+                                "input_video": {
+                                    "type": "string",
+                                    "format": "binary",
+                                    "description": "Upload an original video for Omni editing, or a 3–60 second MP4 up to 100 MiB for Omni 1.2 Extend. Source upload and media identifiers are handled automatically.",
+                                },
+                                "input_video_media_id": {
+                                    "type": "string",
+                                    "description": "Original Flow media ID for Omni 1.2 Extend",
+                                },
+                            },
+                        }
+                    },
+                },
+            }
+        },
+    )
     async def create_video(
         request: Request,
         api_key: str = Depends(verify_openai_api_key),

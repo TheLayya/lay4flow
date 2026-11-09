@@ -85,7 +85,8 @@ class VeoCatalogTests(unittest.TestCase):
                     entry.get("id", entry.get("name", "").removeprefix("models/"))
                     for entry in entries
                 }
-                self.assertEqual(len(names), 6)
+                self.assertEqual(len(names), 7)
+                self.assertIn("omni_1.2_flash", names)
                 self.assertEqual(
                     {name for name in names if name.startswith("veo")},
                     {"veo_3_1"},

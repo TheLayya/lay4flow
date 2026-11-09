@@ -92,7 +92,7 @@ class ProfileProxySwitchTests(unittest.IsolatedAsyncioTestCase):
             (self.spec.profile_dir / "environment_snapshot.json").read_bytes(),
             self.before["environment_snapshot.json"],
         )
-        metadata = json.loads((self.spec.profile_dir / "metadata.json").read_text())
+        metadata = json.loads((self.spec.profile_dir / "metadata.json").read_text(encoding="utf-8"))
         self.assertEqual(metadata["fingerprint_seed"], self.spec.fingerprint_seed)
         self.assertEqual(metadata["profile_dir"], str(self.spec.profile_dir))
         self.backend._check_launch_settings(

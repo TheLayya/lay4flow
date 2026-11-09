@@ -40,10 +40,17 @@ async def create_profile_project(tokens: Any, token: Any, title: str) -> Project
         projects = await flow_rpc(
             context, "UpteDb", ["projects/*", 21], network_step="flow_projects"
         )
-        if not isinstance(projects, list) or not projects or not isinstance(projects[0], list):
+        if not isinstance(projects, list):
+            raise FlowRPCError("account_probe_error", "flow_projects")
+        # Protobuf JSON arrays omit an empty repeated field, or encode it as
+        # null when later fields are present. Both mean there are no projects.
+        rows = projects[0] if projects else None
+        if rows is None:
+            rows = []
+        if not isinstance(rows, list):
             raise FlowRPCError("account_probe_error", "flow_projects")
         local_ids = {row.project_id for row in await tokens.db.get_projects_by_token(token.id)}
-        for row in projects[0]:
+        for row in rows:
             if not isinstance(row, list) or not row or not isinstance(row[0], str) or not row[0]:
                 raise FlowRPCError("account_probe_error", "flow_projects")
             if row[0] in local_ids:

@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from ...core.version import VERSION
+from ...services.account_error_policy import AccountErrorPolicy, PolicyValidationError
 from ..admin_schemas import (
     CallLogicConfigRequest,
     GenerationConfigRequest,
@@ -141,6 +142,49 @@ def create_settings_router(
     router = APIRouter()
     release_check_lock = asyncio.Lock()
     release_check_cache = {"at": 0.0, "result": None}
+
+    def account_error_policy():
+        database = get_database()
+        if not hasattr(database, "_account_error_policy"):
+            database._account_error_policy = AccountErrorPolicy(database)
+        return database._account_error_policy
+
+    @router.get("/api/account-error-policy")
+    async def get_account_error_policy(token: str = Depends(verify_token)):
+        return {"success": True, "config": await account_error_policy().get_config()}
+
+    @router.post("/api/account-error-policy/clear")
+    async def clear_account_error_policy(request: Request, token: str = Depends(verify_token)):
+        try:
+            value = await request.json()
+            token_id = value.get("token_id")
+        except (ValueError, AttributeError):
+            raise HTTPException(400, "账号参数无效") from None
+        if type(token_id) is not int or token_id < 1:
+            raise HTTPException(400, "账号参数无效")
+        if await get_database().get_token(token_id) is None:
+            raise HTTPException(404, "账号不存在")
+        await account_error_policy().clear(token_id)
+        return {"success": True, "message": "生成保护已解除，账号启用状态保持原样"}
+
+    @router.post("/api/account-error-policy")
+    async def update_account_error_policy(request: Request, token: str = Depends(verify_token)):
+        # Read a bounded body ourselves so malformed rules/JSON never echo
+        # administrator input through a generic validation response.
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > 128 * 1024:
+                raise HTTPException(413, "账号错误规则配置过大")
+        try:
+            value = json.loads(body)
+        except (ValueError, UnicodeDecodeError):
+            raise HTTPException(400, "账号错误规则 JSON 格式无效") from None
+        try:
+            settings = await account_error_policy().save_config(value)
+        except PolicyValidationError as error:
+            raise HTTPException(400, str(error)) from None
+        return {"success": True, "config": settings}
 
     @router.get("/api/config/generation")
     async def get_generation_config(token: str = Depends(verify_token)):
@@ -268,6 +312,9 @@ def create_settings_router(
         manager = getattr(getattr(app, "state", None), "token_manager", None)
         imports = getattr(manager, "_profile_import_jobs", None)
         payload["update_pending_imports"] = imports._pending() if imports else 0
+        extension_imports = getattr(manager, "_extension_import_jobs", None)
+        if extension_imports is not None:
+            payload["update_pending_imports"] += extension_imports.pending_count
         # Browser profile presentation is local on Windows desktop installs;
         # containers keep the existing noVNC relay. This public hint lets the
         # static profile page choose a transport before opening a WebSocket.
@@ -288,10 +335,12 @@ def create_settings_router(
     async def get_admin_config(token: str = Depends(verify_token)):
         """Get admin configuration"""
         admin_config = await get_database().get_admin_config()
+        protection = await account_error_policy().get_config()
         return {
             "admin_username": admin_config.username,
             "api_key": admin_config.api_key,
-            "error_ban_threshold": admin_config.error_ban_threshold,
+            # Legacy clients see the same threshold as the current policy.
+            "error_ban_threshold": protection["consecutive_failure_threshold"],
             "debug_enabled": get_config().debug_enabled,
         }
 
@@ -344,8 +393,13 @@ def create_settings_router(
     async def update_admin_config(
         request: UpdateAdminConfigRequest, token: str = Depends(verify_token)
     ):
-        """Update admin configuration (error_ban_threshold)"""
-        await get_database().update_admin_config(error_ban_threshold=request.error_ban_threshold)
+        """Map the old health-setting endpoint to the current protection policy."""
+        try:
+            await account_error_policy().save_config(
+                {"consecutive_failure_threshold": request.error_ban_threshold}
+            )
+        except PolicyValidationError as error:
+            raise HTTPException(400, str(error)) from None
         return {"success": True, "message": "配置更新成功"}
 
     @router.post("/api/admin/apikey")

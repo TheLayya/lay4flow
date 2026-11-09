@@ -14,8 +14,10 @@ from src.services.browser.profiles import (
     PROFILE_CACHE_PATHS,
     ProfileManager,
     ProfileNotReadyError,
+    _archive_stale_chromium_lock,
     _ProfileFileLock,
     _prune_closed_profile_cache,
+    _remember_chromium_owner,
 )
 
 
@@ -99,6 +101,158 @@ class FakeAccountProbe:
 
 
 class ProfileManagerTests(unittest.IsolatedAsyncioTestCase):
+    def singleton_links(self, directory, socket_path, *, host="owned-host", pid=876543):
+        targets = {
+            "SingletonLock": f"{host}-{pid}",
+            "SingletonCookie": "123456789",
+            "SingletonSocket": str(socket_path),
+        }
+        for name, target in targets.items():
+            (directory / name).symlink_to(target)
+        return {name: os.readlink(directory / name) for name in targets}
+
+    async def test_stale_owned_singleton_is_archived_under_profile_lock_before_reopen(self):
+        with TemporaryDirectory() as root:
+            backend = FakeBackend()
+            manager = ProfileManager(root, backend)
+            spec = await manager.spec("same@example.invalid")
+            retained = spec.profile_dir / "Default" / "Cookies"
+            retained.parent.mkdir()
+            retained.write_bytes(b"persisted-site-state")
+            targets = self.singleton_links(
+                spec.profile_dir, Path(root) / "dead-browser" / "SingletonSocket"
+            )
+            boot = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            with (
+                patch("src.services.browser.profiles.sys.platform", "linux"),
+                patch(
+                    "src.services.browser.profiles.socket.gethostname", return_value="owned-host"
+                ),
+                patch("src.services.browser.profiles._linux_boot_id", return_value=boot),
+                patch(
+                    "src.services.browser.profiles._linux_pid_namespace", return_value="pid:[123]"
+                ),
+            ):
+                _remember_chromium_owner(spec)
+                with patch("src.services.browser.profiles.os.kill", side_effect=ProcessLookupError):
+                    async with manager.session("same@example.invalid"):
+                        self.assertFalse((spec.profile_dir / "SingletonLock").is_symlink())
+            archived = list((spec.profile_dir / ".singleton-recovery").iterdir())
+            self.assertEqual(len(archived), 1)
+            self.assertEqual({name: os.readlink(archived[0] / name) for name in targets}, targets)
+            self.assertEqual(retained.read_bytes(), b"persisted-site-state")
+            self.assertEqual(len(backend.opened), 1)
+            self.assertEqual(len(backend.closed), 1)
+
+    async def test_uncertain_singleton_locks_are_never_archived(self):
+        cases = (
+            "live_pid",
+            "live_socket",
+            "foreign_host",
+            "foreign_namespace",
+            "different_boot",
+            "missing_provenance",
+            "changed_seed",
+            "changed_lock",
+            "regular_cookie",
+        )
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory() as root:
+                manager = ProfileManager(root, FakeBackend())
+                spec = await manager.spec("same@example.invalid")
+                socket_path = Path(root) / "dead-browser" / "SingletonSocket"
+                self.singleton_links(spec.profile_dir, socket_path)
+                boot = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+                with (
+                    patch("src.services.browser.profiles.sys.platform", "linux"),
+                    patch(
+                        "src.services.browser.profiles.socket.gethostname",
+                        return_value="owned-host",
+                    ),
+                    patch("src.services.browser.profiles._linux_boot_id", return_value=boot),
+                    patch(
+                        "src.services.browser.profiles._linux_pid_namespace",
+                        return_value="pid:[123]",
+                    ),
+                ):
+                    _remember_chromium_owner(spec)
+                    provenance_path = spec.profile_dir / ".chromium-owner.json"
+                    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+                    if case == "live_socket":
+                        socket_path.parent.mkdir()
+                        socket_path.write_bytes(b"present")
+                    elif case == "foreign_host":
+                        lock = spec.profile_dir / "SingletonLock"
+                        lock.unlink()
+                        lock.symlink_to("another-container-876543")
+                        provenance["singleton"]["SingletonLock"] = "another-container-876543"
+                    elif case == "foreign_namespace":
+                        provenance["pid_namespace"] = "pid:[456]"
+                    elif case == "different_boot":
+                        provenance["boot_id"] = "00000000-bbbb-cccc-dddd-eeeeeeeeeeee"
+                    elif case == "changed_seed":
+                        provenance["fingerprint_seed"] += 1
+                    elif case == "changed_lock":
+                        lock = spec.profile_dir / "SingletonLock"
+                        lock.unlink()
+                        lock.symlink_to("owned-host-111")
+                    elif case == "regular_cookie":
+                        cookie_path = spec.profile_dir / "SingletonCookie"
+                        cookie_path.unlink()
+                        cookie_path.write_bytes(b"unexpected")
+                    provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+                    if case == "missing_provenance":
+                        provenance_path.unlink()
+                    before = {
+                        name: os.readlink(spec.profile_dir / name)
+                        if (spec.profile_dir / name).is_symlink()
+                        else (spec.profile_dir / name).read_bytes()
+                        for name in ("SingletonLock", "SingletonCookie", "SingletonSocket")
+                    }
+                    with patch("src.services.browser.profiles.os.kill") as kill:
+                        if case != "live_pid":
+                            kill.side_effect = ProcessLookupError
+                        self.assertFalse(_archive_stale_chromium_lock(spec, manager.root_dir))
+                    self.assertFalse((spec.profile_dir / ".singleton-recovery").exists())
+                    self.assertEqual(
+                        before,
+                        {
+                            name: os.readlink(spec.profile_dir / name)
+                            if (spec.profile_dir / name).is_symlink()
+                            else (spec.profile_dir / name).read_bytes()
+                            for name in before
+                        },
+                    )
+
+    async def test_successful_owned_launch_records_exact_singleton_provenance(self):
+        with TemporaryDirectory() as root:
+            manager = ProfileManager(root, FakeBackend())
+            spec = await manager.spec("same@example.invalid")
+            targets = self.singleton_links(
+                spec.profile_dir, Path(root) / "browser" / "SingletonSocket"
+            )
+            with (
+                patch("src.services.browser.profiles.sys.platform", "linux"),
+                patch(
+                    "src.services.browser.profiles.socket.gethostname", return_value="owned-host"
+                ),
+                patch(
+                    "src.services.browser.profiles._linux_boot_id",
+                    return_value="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                ),
+                patch(
+                    "src.services.browser.profiles._linux_pid_namespace", return_value="pid:[123]"
+                ),
+            ):
+                async with manager.session("same@example.invalid"):
+                    provenance = json.loads(
+                        (spec.profile_dir / ".chromium-owner.json").read_text(encoding="utf-8")
+                    )
+            self.assertEqual(provenance["singleton"], targets)
+            self.assertEqual(provenance["pid_namespace"], "pid:[123]")
+            self.assertEqual(provenance["account_key"], spec.account_key)
+            self.assertEqual(provenance["fingerprint_seed"], spec.fingerprint_seed)
+
     async def test_close_prunes_only_regenerable_cache_and_reopens_original_profile(self):
         with TemporaryDirectory() as root:
             backend = FakeBackend()
@@ -564,6 +718,60 @@ class ProfileManagerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "settings changed"):
                 CloakBrowserBackend._check_launch_settings(profile, {**options, "locale": "en-US"})
 
+    async def test_new_profile_restore_opt_in_keeps_session_preference_and_fixed_exit(self):
+        with TemporaryDirectory() as root:
+            manager = ProfileManager(root, FakeBackend())
+            spec = await manager.spec("restore@example.invalid")
+            backend = CloakBrowserBackend()
+            proxy = "http://user:synthetic-password@proxy.invalid:8080"
+            before = backend._launch_options(spec.profile_dir, proxy)
+            self.assertNotIn("--restore-last-session", before["args"])
+            preference = spec.profile_dir / "Default" / "Preferences"
+            preference.parent.mkdir()
+            preference.write_text(json.dumps({"session": {"other": True}, "profile": {"keep": 1}}))
+            CloakBrowserBackend.prepare_session_restore(spec.profile_dir)
+            after = backend._launch_options(spec.profile_dir, proxy)
+            self.assertEqual(after["proxy"], before["proxy"])
+            self.assertEqual(
+                [arg for arg in after["args"] if arg != "--restore-last-session"], before["args"]
+            )
+            self.assertEqual(
+                json.loads(preference.read_text()),
+                {"session": {"other": True, "restore_on_startup": 1}, "profile": {"keep": 1}},
+            )
+            backend._check_launch_settings(spec.profile_dir, after)
+            CloakBrowserBackend.prepare_session_restore(spec.profile_dir)
+            backend._check_launch_settings(spec.profile_dir, after)
+            self.assertNotIn(
+                "session_restore", json.loads((spec.profile_dir / "metadata.json").read_text())
+            )
+            with self.assertRaisesRegex(ValueError, "settings changed"):
+                backend._check_launch_settings(
+                    spec.profile_dir,
+                    backend._launch_options(spec.profile_dir, "http://other.invalid:80"),
+                )
+            ProfileManager._reset_browser_state(spec.profile_dir)
+            self.assertTrue((spec.profile_dir / "session_restore.json").is_file())
+            backend._prepare_restore_preferences(spec.profile_dir)
+            self.assertEqual(json.loads(preference.read_text())["session"]["restore_on_startup"], 1)
+
+    async def test_restore_opt_in_never_changes_existing_profile_launch_settings(self):
+        with TemporaryDirectory() as root:
+            manager = ProfileManager(root, FakeBackend())
+            spec = await manager.spec("existing@example.invalid")
+            backend = CloakBrowserBackend()
+            options = backend._launch_options(spec.profile_dir, "http://proxy.invalid:80")
+            backend._check_launch_settings(spec.profile_dir, options)
+            digest = (spec.profile_dir / "launch_settings.sha256").read_bytes()
+            with self.assertRaisesRegex(ValueError, "explicit migration"):
+                backend.prepare_session_restore(spec.profile_dir)
+            self.assertFalse((spec.profile_dir / "session_restore.json").exists())
+            self.assertFalse((spec.profile_dir / "Default").exists())
+            self.assertEqual((spec.profile_dir / "launch_settings.sha256").read_bytes(), digest)
+            self.assertEqual(
+                backend._launch_options(spec.profile_dir, "http://proxy.invalid:80"), options
+            )
+
     async def test_status_is_persisted_without_credentials(self):
         with TemporaryDirectory() as root:
             backend = FakeBackend()
@@ -576,7 +784,9 @@ class ProfileManagerTests(unittest.IsolatedAsyncioTestCase):
             status = await manager.status("user@example.com")
             self.assertEqual(status.state, "stopped")
             self.assertIsNotNone(status.last_verified_at)
-            self.assertNotIn("value", (Path(status.profile_dir) / "metadata.json").read_text())
+            self.assertNotIn(
+                "value", (Path(status.profile_dir) / "metadata.json").read_text(encoding="utf-8")
+            )
 
     async def test_profile_key_hash_prevents_sanitized_name_collision(self):
         with TemporaryDirectory() as root:

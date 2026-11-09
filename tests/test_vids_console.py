@@ -47,6 +47,19 @@ class VidsConsoleTests(unittest.IsolatedAsyncioTestCase):
         with (
             TemporaryDirectory() as directory,
             patch.object(app.state.vids_dispatcher, "public_accounts", lookup),
+            # This route fixture supplies all account/protection data; it must
+            # not depend on a pre-existing application database in data/.
+            patch.object(app.state.vids_dispatcher, "account_switches", AsyncMock(return_value={})),
+            patch.object(
+                app.state.vids_dispatcher.account_policy,
+                "public_states",
+                AsyncMock(return_value={}),
+            ),
+            patch.object(
+                app.state.vids_dispatcher.account_policy,
+                "account_stats_many",
+                AsyncMock(return_value={}),
+            ),
             patch.object(
                 config,
                 "get_raw_config",
@@ -139,6 +152,17 @@ class VidsConsoleTests(unittest.IsolatedAsyncioTestCase):
         )
         dispatcher = VidsProviderDispatcher(db)
         dispatcher._accounts = {4: object(), 9: object()}
+        dispatcher.account_switches = AsyncMock(
+            return_value={
+                4: {
+                    "token_id": 4,
+                    "email": token.email,
+                    "enabled": token.is_active,
+                    "image_enabled": token.image_enabled,
+                    "video_enabled": token.video_enabled,
+                }
+            }
+        )
         with patch.object(
             dispatcher,
             "_account",
@@ -166,7 +190,8 @@ class VidsConsoleTests(unittest.IsolatedAsyncioTestCase):
                 },
             ],
         )
-        self.assertEqual([call.args[0] for call in db.get_token.await_args_list], [4, 9])
+        dispatcher.account_switches.assert_awaited_once_with(dispatcher._accounts)
+        db.get_token.assert_not_awaited()
         self.assertEqual(binding.call_count, 2)
         self.assertNotIn("private-", json.dumps(rows))
 

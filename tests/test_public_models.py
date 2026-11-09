@@ -33,6 +33,7 @@ class PublicModelTests(unittest.TestCase):
                 "veo_3_1_remix",
                 "veo_3_1_extend",
                 "omni_1.1_flash",
+                "omni_1.2_flash",
             },
         )
         self.assertIsNone(resolve_public_model("omni_edit_360p", {}, MODEL_CONFIG))

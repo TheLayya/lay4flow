@@ -522,14 +522,14 @@ async function diagnostic(path, body) {
 onMounted(loadPool)
 </script>
 <template>
-    <div class="proxy-pool-view">
+    <div class="proxy-pool-view management-view">
         <header class="page-heading">
             <div>
                 <h1>代理池</h1>
                 <p>账号绑定与生成提交出口统一管理；随机调度分散负载，连续失败冷却后自动重探。</p>
             </div>
         </header>
-        <section class="surface proxy-pool-surface">
+        <section class="surface proxy-pool-surface management-surface">
             <ProxyPoolPanel
                 :rows="pool"
                 :busy="busy"
@@ -1036,17 +1036,23 @@ onMounted(loadPool)
     </div>
 </template>
 <style scoped>
-.proxy-pool-surface {
-    padding: 24px;
+.proxy-pool-view .proxy-pool-surface {
+    padding: 12px;
+    border-radius: 6px;
 }
 .proxy-pool-view {
     min-width: 0;
 }
 .proxy-inline-editor {
     display: grid;
+    width: 100%;
+    max-width: calc(100cqw - 2px);
+    box-sizing: border-box;
+    position: sticky;
+    left: 0;
     grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
-    gap: 28px;
-    padding: 18px 24px;
+    gap: 20px;
+    padding: 12px 16px;
     background: var(--surface);
     border-top: 1px solid var(--line);
     min-width: 0;
@@ -1320,7 +1326,7 @@ onMounted(loadPool)
 }
 @media (max-width: 640px) {
     .proxy-pool-surface {
-        padding: 16px;
+        padding: 10px;
     }
 }
 .proxy-host-grid {
@@ -1373,7 +1379,7 @@ onMounted(loadPool)
         min-height: 0;
         flex: 1;
         display: flex;
-        padding: 16px;
+        padding: 12px;
     }
     .proxy-pool-surface > .proxy-pool-panel {
         width: 100%;

@@ -35,7 +35,8 @@ from .flow.remote_captcha import RemoteCaptchaError, check_remote_response
 from .flow.session import with_session_token
 from .flow.video_edit import (
     validate_optional_video_trim,
-    validate_video_trim,  # Re-export for existing service/API imports.
+    validate_video_trim as validate_video_trim,  # Historical service/API re-export.
+    validate_video_upload_range,
     video_edit_frame_range,
 )
 from .proxy_urls import normalize_proxy_url
@@ -125,6 +126,12 @@ class FlowClient:
         from .browser.flow_generation import FlowProfileGeneration
 
         return FlowProfileGeneration(self, self.token_manager, token)
+
+    async def admit_video_stages(self, stages):
+        modern = self._modern_generation()
+        if modern is None:
+            raise ValueError("Omni 1.2 multi-stage output requires a current verified Flow session")
+        await modern.admit_video_stages(stages)
 
     @asynccontextmanager
     async def generation_session(self, token):
@@ -1588,16 +1595,22 @@ class FlowClient:
         project_id: Optional[str] = None,
         trim_start_ms: int = 0,
         trim_end_ms: int = 10000,
+        max_duration_ms: int = 10000,
     ) -> str:
         """Upload a video asset through Flow's resumable upload endpoint."""
         modern = self._modern_generation()
         if modern is not None:
             media_id = await modern.upload_video(
-                project_id, video_bytes, mime_type, trim_start_ms, trim_end_ms
+                project_id,
+                video_bytes,
+                mime_type,
+                trim_start_ms,
+                trim_end_ms,
+                **({"max_duration_ms": max_duration_ms} if max_duration_ms != 10000 else {}),
             )
             await self._wait_for_uploaded_video(at, project_id, media_id)
             return media_id
-        validate_video_trim(trim_start_ms, trim_end_ms)
+        validate_video_upload_range(trim_start_ms, trim_end_ms, max_duration_ms=max_duration_ms)
         project = str(project_id or "").strip()
         if not project:
             raise ValueError("project_id is required for video upload")
@@ -1785,8 +1798,10 @@ class FlowClient:
         trim_start_ms: Optional[int],
         trim_end_ms: Optional[int],
         uploaded_video: bool,
+        max_duration_ms: int = 10000,
+        include_duration: bool = False,
     ) -> Dict[str, int]:
-        validate_optional_video_trim(trim_start_ms, trim_end_ms)
+        validate_optional_video_trim(trim_start_ms, trim_end_ms, max_duration_ms=max_duration_ms)
         result = await self.check_video_status(
             at, [{"mediaName": video_media_id, "projectId": project_id}]
         )
@@ -1798,7 +1813,31 @@ class FlowClient:
             ),
             {},
         )
-        return video_edit_frame_range(media, trim_start_ms, trim_end_ms, uploaded_video)
+        frame_range = video_edit_frame_range(
+            media, trim_start_ms, trim_end_ms, uploaded_video, max_duration_ms=max_duration_ms
+        )
+        if include_duration:
+            video = media.get("video") or {}
+            dimensions = video.get("dimensions") or {}
+            offset = video.get("videoOffset") or {}
+            if (
+                dimensions.get("length", dimensions.get("duration")) is None
+                and offset.get("endOffset") is None
+            ):
+                raise ValueError("Omni 1.2 editing requires processed source duration metadata")
+            is_upload = uploaded_video
+            if isinstance(video.get("userUploadedVideo"), dict) or isinstance(
+                video.get("uploadedVideo"), dict
+            ):
+                is_upload = True
+            elif isinstance(video.get("generatedVideo"), dict):
+                is_upload = False
+            fps = 30 if is_upload else 24
+            frames = frame_range.get("endFrameIndex", 0) - frame_range.get("startFrameIndex", 0)
+            if frames < 3 * fps:
+                raise ValueError("Omni 1.2 editing requires a segment of at least 3 seconds")
+            frame_range["duration"] = (frames + fps - 1) // fps
+        return frame_range
 
     async def generate_video_edit(
         self,
@@ -1815,13 +1854,36 @@ class FlowClient:
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
         uploaded_video: bool = False,
+        max_duration_ms: int = 10000,
     ) -> dict:
         """Edit a video; trim offsets refer to the supplied media asset."""
         modern = self._modern_generation()
+        omni12 = model_key.startswith("macaron_cookie_")
+        # A caller cannot expand legacy edit limits by supplying this option.
+        if max_duration_ms != 10000 and (not omni12 or max_duration_ms != 15000):
+            raise ValueError("Unsupported video edit duration limit")
+        if omni12:
+            max_duration_ms = 15000
+            if trim_start_ms is None and trim_end_ms is None:
+                # Match the public source-ID edit contract's conservative
+                # ten-second default, rather than silently widening an edit.
+                trim_start_ms, trim_end_ms = 0, 10000
         if modern is not None:
             frame_range = await self._get_video_edit_frame_range(
-                at, project_id, video_media_id, trim_start_ms, trim_end_ms, uploaded_video
+                at,
+                project_id,
+                video_media_id,
+                trim_start_ms,
+                trim_end_ms,
+                uploaded_video,
+                **(
+                    {"max_duration_ms": max_duration_ms, "include_duration": True} if omni12 else {}
+                ),
             )
+            extra = {}
+            if omni12:
+                extra["duration"] = frame_range.pop("duration")
+                extra["resolution"] = 4 if model_key.endswith("_360p") else 1
             return await modern.generate_video(
                 mode="edit",
                 project_id=project_id,
@@ -1832,9 +1894,16 @@ class FlowClient:
                 reference_images=reference_images,
                 trim_start_frame=frame_range.get("startFrameIndex"),
                 trim_end_frame=frame_range.get("endFrameIndex"),
+                **extra,
             )
         frame_range = await self._get_video_edit_frame_range(
-            at, project_id, video_media_id, trim_start_ms, trim_end_ms, uploaded_video
+            at,
+            project_id,
+            video_media_id,
+            trim_start_ms,
+            trim_end_ms,
+            uploaded_video,
+            **({"max_duration_ms": max_duration_ms} if omni12 else {}),
         )
         recaptcha_token, browser_id = await self._get_recaptcha_token(
             project_id, action="VIDEO_GENERATION", token_id=token_id
@@ -3579,6 +3648,7 @@ class FlowClient:
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
+        reference_images: Optional[List[Dict[str, str]]] = None,
     ) -> dict:
         """视频续写,基于已生成的视频延伸7秒
 
@@ -3595,6 +3665,10 @@ class FlowClient:
             同 generate_video_text (operations 列表)
         """
         modern = self._modern_generation()
+        if reference_images and (
+            not model_key.startswith("macaron_cookie_") or len(reference_images) > 3
+        ):
+            raise ValueError("Omni 1.2 Extend accepts at most 3 reference images")
         if modern is not None:
             return await modern.generate_video(
                 mode="extend",
@@ -3603,6 +3677,7 @@ class FlowClient:
                 model_name=model_key,
                 aspect_ratio=aspect_ratio,
                 video_media_id=video_media_id,
+                **({"reference_images": reference_images} if reference_images else {}),
             )
         url = self.api_base_url + endpoints.EXTEND_VIDEO
 
@@ -3683,6 +3758,9 @@ class FlowClient:
                 ],
                 "useV2ModelConfig": True,
             }
+
+            if reference_images:
+                json_data["requests"][0]["referenceImages"] = reference_images
 
             # Debug: 打印请求体用于调试
             import json as _json
@@ -3888,6 +3966,7 @@ class FlowClient:
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
+        duration: Optional[int] = None,
     ) -> dict:
         """Submit one video upscale request with policy retries and a safe trace."""
         modern = self._modern_generation()
@@ -3904,6 +3983,7 @@ class FlowClient:
                 aspect_ratio=aspect_ratio,
                 video_media_id=video_media_id,
                 resolution=resolution_map[normalized_resolution],
+                **({"duration": duration} if duration is not None else {}),
             )
         url = self.api_base_url + endpoints.UPSAMPLE_VIDEO
         max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)

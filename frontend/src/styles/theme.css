@@ -2260,3 +2260,224 @@ html.dark .nav-item.active {
         scroll-behavior: auto !important;
     }
 }
+
+/* Management pages share a compact table workspace. */
+@media (min-width: 1051px) {
+    .main-content:has(> .accounts-view) {
+        display: flex;
+        flex-direction: column;
+        overflow: auto;
+    }
+    .main-content > .accounts-view {
+        flex: 1 1 0;
+    }
+}
+.main-content:has(> .management-view) {
+    padding: 16px 20px 20px;
+}
+.management-view {
+    width: 100%;
+    min-width: 0;
+    font-size: 13px;
+    --el-component-size: 28px;
+    --el-component-size-small: 24px;
+    --el-font-size-base: 13px;
+    --el-border-radius-base: 5px;
+}
+.management-view > .page-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 12px;
+}
+.management-view > .page-heading h1 {
+    margin: 0;
+    font-size: 20px;
+    line-height: 30px;
+    letter-spacing: 0;
+}
+.management-view > .page-heading p {
+    margin: 3px 0 0;
+    font-size: 12px;
+}
+.management-view .page-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.management-view .el-button {
+    height: 28px;
+    min-height: 28px;
+    padding: 0 10px;
+    font-size: 12px;
+    border-radius: 5px;
+}
+.management-view .el-button + .el-button {
+    margin-left: 0;
+}
+.management-view .el-button.is-text {
+    padding-inline: 6px;
+}
+.management-view .management-surface {
+    min-width: 0;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: none;
+}
+.management-summary,
+.management-summary-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+}
+.management-summary {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 22px;
+}
+.management-summary > span {
+    white-space: nowrap;
+}
+.management-summary strong {
+    margin-left: 3px;
+    color: var(--ink);
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+.management-summary .summary-success,
+.management-summary .summary-success strong {
+    color: var(--success);
+}
+.management-summary .summary-danger,
+.management-summary .summary-danger strong {
+    color: var(--el-color-danger);
+}
+.management-view .section-heading.management-summary-row {
+    justify-content: space-between;
+    margin: 0;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+}
+.management-view .management-toolbar {
+    padding: 10px 12px;
+    gap: 8px;
+    margin: 0;
+}
+.management-view .page-actions .el-button {
+    width: auto;
+    flex: 0 0 auto;
+}
+.management-view .management-table {
+    width: 100%;
+    min-width: 0;
+    font-size: 13px;
+    --el-table-header-bg-color: var(--surface-soft);
+    --el-table-row-hover-bg-color: var(--pink-soft);
+}
+.management-view .management-table th.el-table__cell {
+    height: 36px;
+    padding: 5px 0;
+    background: var(--surface-soft);
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+}
+.management-view .management-table td.el-table__cell {
+    height: 44px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--line);
+    vertical-align: middle;
+}
+.management-view .management-table .cell {
+    padding-inline: 10px;
+    line-height: 20px;
+    word-break: normal;
+}
+.management-view .management-table .el-table__expanded-cell {
+    height: auto;
+    padding: 12px 16px;
+    background: var(--surface-soft);
+}
+.management-view .management-table .el-tag {
+    height: 22px;
+    padding-inline: 6px;
+    font-size: 12px;
+    border-radius: 4px;
+    line-height: 20px;
+}
+.management-view .management-table .el-switch {
+    height: 24px;
+}
+.management-view .management-table .el-button {
+    height: 24px;
+    min-height: 24px;
+}
+.management-view .management-table .el-table__cell.el-table-fixed-column--right {
+    box-shadow: -3px 0 8px rgb(40 51 72 / 4%);
+}
+.management-view .table-footer,
+.management-view .pool-pagination {
+    min-height: 46px;
+    margin: 0;
+    padding: 8px 12px;
+    border-top: 1px solid var(--line);
+    font-size: 12px;
+}
+.management-view .el-input__wrapper,
+.management-view .el-select__wrapper {
+    min-height: 28px;
+    font-size: 12px;
+}
+@media (max-width: 767px) {
+    .main-content:has(> .management-view) {
+        padding: 12px 10px 16px;
+    }
+    .management-view > .page-heading {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+    }
+    .management-view > .page-heading h1 {
+        font-size: 18px;
+    }
+    .management-view > .page-heading .page-actions {
+        display: flex;
+        flex-direction: row;
+        flex-wrap: wrap;
+        width: auto;
+        gap: 6px;
+    }
+    .management-view > .page-heading .page-actions .el-button {
+        width: auto;
+    }
+    .management-view .section-heading.management-summary-row {
+        padding: 8px 10px;
+    }
+    .management-view .management-toolbar {
+        padding: 8px 10px;
+    }
+    .management-summary {
+        gap: 3px 14px;
+    }
+    .management-view .table-footer,
+    .management-view .pool-pagination {
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+    .management-view .management-table .el-table__cell.el-table-fixed-column--right,
+    .management-view .management-table .el-table__cell.el-table-fixed-column--left {
+        position: static !important;
+        box-shadow: none;
+    }
+    .management-view .management-table .el-table-fixed-column--right::before,
+    .management-view .management-table .el-table-fixed-column--left::before {
+        display: none;
+    }
+}

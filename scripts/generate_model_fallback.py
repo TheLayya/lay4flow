@@ -16,6 +16,7 @@ DISPLAY_NAMES = {
     "gemini-3.1-flash-image-lite": "Nano Banana 2 Lite",
     "imagen-4.0-generate-preview": "Imagen 4.0",
     "veo_3_1": "Veo 3.1",
+    "omni_1.2_flash": "Omni 1.2 Flash",
     "omni_1.1_flash": "Omni 1.1 Flash",
 }
 OUTPUT = ROOT / "static/js/model_catalog.js"

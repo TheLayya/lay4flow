@@ -77,8 +77,8 @@ class GenerationHistoryRepository:
         async with self._database._connect(write=True) as db:
             cursor = await db.execute(
                 """
-                INSERT INTO request_logs (token_id, operation, request_body, response_body, status_code, duration, status_text, progress)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO request_logs (token_id, operation, request_body, response_body, status_code, duration, status_text, progress, attempt_count, retry_count, account_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     log.token_id,
@@ -89,6 +89,9 @@ class GenerationHistoryRepository:
                     log.duration,
                     log.status_text or "",
                     log.progress,
+                    log.attempt_count,
+                    log.retry_count,
+                    log.account_count,
                 ),
             )
             await db.commit()
@@ -108,6 +111,9 @@ class GenerationHistoryRepository:
             "duration",
             "status_text",
             "progress",
+            "attempt_count",
+            "retry_count",
+            "account_count",
         }
         update_fields = {key: value for key, value in kwargs.items() if key in allowed_fields}
         if not update_fields:
@@ -135,8 +141,29 @@ class GenerationHistoryRepository:
         async with self._database._connect() as db:
             db.row_factory = aiosqlite.Row
             payload_columns = "rl.request_body, rl.response_body," if include_payload else ""
+            # Attempt histories can make an otherwise small error response exceed
+            # the list budget. Extract its human-readable error in SQLite before
+            # bounding it, so truncation never turns that error into broken JSON.
+            error_paths = (
+                "$.error_summary",
+                "$.error_message",
+                "$.detail",
+                "$.message",
+                "$.error.message",
+                "$.error.detail",
+                "$.error.reason",
+                "$.error.code",
+                "$.error",
+            )
+            error_values = ", ".join(
+                "NULLIF(CASE WHEN json_type(rl.response_body, "
+                f"'{path}') = 'text' THEN json_extract(rl.response_body, '{path}') END, '')"
+                for path in error_paths
+            )
             response_excerpt_column = (
-                "substr(COALESCE(rl.response_body, ''), 1, 2048) as response_body_excerpt,"
+                "substr(COALESCE(CASE WHEN json_valid(rl.response_body) THEN "
+                f"COALESCE({error_values}, rl.response_body) ELSE rl.response_body END, ''), "
+                "1, 2048) as response_body_excerpt,"
             )
             has_status_text = await self._database._column_exists(db, "request_logs", "status_text")
             has_progress = await self._database._column_exists(db, "request_logs", "progress")
@@ -146,6 +173,7 @@ class GenerationHistoryRepository:
             updated_at_column = (
                 "rl.updated_at," if has_updated_at else "rl.created_at as updated_at,"
             )
+            attempt_columns = await self._attempt_columns(db)
 
             token_filter = "WHERE rl.token_id = ?" if token_id else ""
             params = (token_id, limit) if token_id else (limit,)
@@ -161,6 +189,7 @@ class GenerationHistoryRepository:
                     rl.duration,
                     {status_text_column}
                     {progress_column}
+                    {attempt_columns}
                     rl.created_at,
                     {updated_at_column}
                     t.email as token_email,
@@ -189,6 +218,7 @@ class GenerationHistoryRepository:
             updated_at_column = (
                 "rl.updated_at," if has_updated_at else "rl.created_at as updated_at,"
             )
+            attempt_columns = await self._attempt_columns(db)
             cursor = await db.execute(
                 f"""
                 SELECT
@@ -201,6 +231,7 @@ class GenerationHistoryRepository:
                     rl.duration,
                     {status_text_column}
                     {progress_column}
+                    {attempt_columns}
                     rl.created_at,
                     {updated_at_column}
                     t.email as token_email,
@@ -214,6 +245,14 @@ class GenerationHistoryRepository:
             )
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+    async def _attempt_columns(self, db):
+        """Read old databases without pretending their attempts were counted."""
+        columns = []
+        for name in ("attempt_count", "retry_count", "account_count"):
+            exists = await self._database._column_exists(db, "request_logs", name)
+            columns.append(f"rl.{name}," if exists else f"NULL as {name},")
+        return " ".join(columns)
 
     async def clear_all_logs(self):
         """Clear all request logs"""

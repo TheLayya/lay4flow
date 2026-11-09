@@ -13,7 +13,8 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from ...core.config import normalize_public_origin
-from ...services.browser.profile_transfer import ProfileTransferError, transfer_error_detail
+from ...services.browser.extension_import_jobs import ExtensionImportJobs, get_extension_import_jobs
+from ...services.browser.profile_transfer import ProfileTransferError
 
 NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 
@@ -72,6 +73,7 @@ def create_extension_login_router(
     *,
     sessions: ExtensionLoginSessions | None = None,
     import_login: Callable | None = None,
+    job_store: ExtensionImportJobs | None = None,
 ):
     router = APIRouter()
     sessions = sessions or ExtensionLoginSessions()
@@ -106,6 +108,49 @@ def create_extension_login_router(
         from ...services.browser.extension_login import ExtensionLogin
 
         return await ExtensionLogin(get_tokens()).import_login(value)
+
+    def jobs():
+        nonlocal job_store
+        if job_store is None:
+            manager = get_tokens()
+            if import_login is None:
+                job_store = get_extension_import_jobs(manager)
+            else:
+                job_store = ExtensionImportJobs(
+                    Path(manager.db.db_path).resolve().parent, run_import
+                )
+        return job_store
+
+    def job_response(operation, *args):
+        try:
+            return operation(*args)
+        except ProfileTransferError as error:
+            raise HTTPException(error.status, str(error), headers=NO_STORE) from None
+
+    @router.get("/api/plugin/import/jobs")
+    async def extension_job_list(response: Response, owner: str = Depends(verify_token)):
+        response.headers.update(NO_STORE)
+        return {"success": True, "jobs": job_response(jobs().list, owner)}
+
+    @router.get("/api/plugin/import/jobs/{job_id}")
+    async def extension_job_status(
+        job_id: str, response: Response, owner: str = Depends(verify_token)
+    ):
+        response.headers.update(NO_STORE)
+        return {"success": True, "job": job_response(jobs().get, owner, job_id)}
+
+    @router.post("/api/plugin/import/jobs/{job_id}/retry")
+    async def extension_job_retry(
+        job_id: str, request: Request, owner: str = Depends(verify_token)
+    ):
+        origin(request)
+        await payload(request, 16384)
+        job = job_response(jobs().retry, owner, job_id)
+        return Response(
+            json.dumps({"success": True, "job": job}),
+            media_type="application/json",
+            headers=NO_STORE,
+        )
 
     @router.get("/api/plugin/import/extension.zip")
     async def download_extension(request: Request, owner: str = Depends(verify_token)):
@@ -156,54 +201,67 @@ def create_extension_login_router(
         session_id, separator, nonce = authorization.removeprefix(prefix).partition(".")
         if not authorization.startswith(prefix) or not separator or not nonce or "." in nonce:
             raise HTTPException(403, "扩展登录凭据无效", headers=NO_STORE)
-        item = sessions.get(session_id, nonce, owner, management_origin)
         value = await payload(request)
         if value.get("session_id") != session_id or "nonce" in value:
             raise HTTPException(400, "扩展登录会话不匹配", headers=NO_STORE)
         binding = tuple(value.get(key) for key in ("tab_id", "cookie_store_id"))
         if any(not isinstance(part, str) or not part or len(part) > 128 for part in binding):
             raise HTTPException(400, "扩展登录窗口无效", headers=NO_STORE)
-        if item.get("binding", binding) != binding:
-            raise HTTPException(403, "扩展登录窗口已变化", headers=NO_STORE)
-        item["binding"] = binding
-        if item["lock"].locked():
-            raise HTTPException(409, "正在验证本次登录，请稍候", headers=NO_STORE)
-        async with item["lock"]:
-            if "result" in item:
-                result = {**item["result"], "idempotent": True}
-            else:
-                if item.get("attempted"):
-                    raise HTTPException(422, "本次登录验证未通过，请重新开始", headers=NO_STORE)
-                item["attempted"] = True
-                # Logging in near the five-minute deadline still gets a full
-                # bounded verification budget and idempotent response retries.
-                item["expires_at"] = max(item["expires_at"], int(time.time()) + 240)
-                try:
-                    # Ignore all caller-supplied routing and account settings.
-                    result = await run_import(
-                        {
-                            "google_cookies": value.get("google_cookies"),
-                            "browser_identity": value.get("browser_identity"),
-                        },
-                    )
-                except Exception as error:
-                    status, detail = transfer_error_detail(error)
-                    if isinstance(error, (ValueError, ProfileTransferError)) and status >= 500:
-                        status = 422
-                    detail = {
-                        **detail,
-                        "error_code": "profile_bootstrap_failed",
-                        "error_summary": detail["message"],
-                    }
-                    raise HTTPException(status, detail=detail, headers=NO_STORE) from None
-                item["result"] = {
-                    "success": True,
-                    "session_id": session_id,
-                    "email": result["email"],
-                    "token_id": result["token_id"],
-                    "action": result.get("action", "added"),
-                }
-                result = item["result"]
-        return Response(json.dumps(result), media_type="application/json", headers=NO_STORE)
+        # An accepted durable receipt outlives the process-local login handshake.
+        job = job_response(
+            jobs().restore_receipt, session_id, nonce, owner, management_origin, binding
+        )
+        idempotent = job is not None
+        if job is None:
+            item = sessions.get(session_id, nonce, owner, management_origin)
+            if item.get("binding", binding) != binding:
+                raise HTTPException(403, "扩展登录窗口已变化", headers=NO_STORE)
+            item["binding"] = binding
+            job = job_response(
+                jobs().submit,
+                owner,
+                session_id,
+                nonce,
+                management_origin,
+                binding,
+                {
+                    "google_cookies": value.get("google_cookies"),
+                    "browser_identity": value.get("browser_identity"),
+                },
+            )
+        if job["state"] == "completed":
+            result = {
+                "success": True,
+                "session_id": session_id,
+                "email": job["email"],
+                "token_id": job["token_id"],
+                "action": job["action"],
+                "job": job,
+                "job_id": job["id"],
+                "idempotent": idempotent,
+            }
+            status_code = 200
+        else:
+            # Accepted means durably stored, not identity-verified. The explicit
+            # job remains visible even when the extension is closed or restarted.
+            result = {
+                "success": True,
+                "accepted": True,
+                "action": "queued",
+                "session_id": session_id,
+                "email": "",
+                "token_id": None,
+                "job_id": job["id"],
+                "job": job,
+                "status_url": "/api/plugin/import/jobs/" + job["id"],
+                "idempotent": idempotent,
+            }
+            status_code = 202
+        return Response(
+            json.dumps(result),
+            status_code=status_code,
+            media_type="application/json",
+            headers=NO_STORE,
+        )
 
     return router

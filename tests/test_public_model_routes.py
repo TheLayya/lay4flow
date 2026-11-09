@@ -46,6 +46,7 @@ class PublicModelRouteTests(unittest.IsolatedAsyncioTestCase):
             ids,
             {
                 "omni_1.1_flash",
+                "omni_1.2_flash",
                 "veo_3_1",
                 "gemini-3.1-flash-image",
                 "gemini-3.1-flash-image-lite",

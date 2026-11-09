@@ -13,6 +13,7 @@ from .load_balancer import LoadBalancer
 from .model_gateway import ModelGateway
 from .proxy_manager import ProxyManager
 from .token_manager import TokenManager
+from .vids.account_policy import VidsAccountPolicy
 from .vids.dispatcher import VidsProviderDispatcher
 from .vids.gateway import GatewayError
 from .vids.runtime import VidsRuntime
@@ -66,6 +67,7 @@ def create_services(db: Database | None = None, profile_refresher=None) -> Servi
     handler = GenerationHandler(client, tokens, balancer, db, concurrency, proxy)
     gateway = ModelGateway()
     vids = VidsProviderDispatcher(db)
+    vids.account_policy = VidsAccountPolicy(db)
     runtime = VidsRuntime(vids, proxy)
 
     @asynccontextmanager
@@ -78,6 +80,19 @@ def create_services(db: Database | None = None, profile_refresher=None) -> Servi
                 raise ValueError(str(error)) from None
 
     tokens.account_proxy_maintenance = proxy_maintenance
+
+    @asynccontextmanager
+    async def login_maintenance(token, _proxy_url=None):
+        # Reauthentication must be possible when the old Vids session is
+        # unavailable. Reserve its work locks without probing that session.
+        async with balancer.proxy_maintenance(token.id):
+            try:
+                async with runtime.login_maintenance(token.id):
+                    yield
+            except GatewayError as error:
+                raise ValueError(str(error)) from None
+
+    tokens.account_login_maintenance = login_maintenance
     return Services(
         db,
         proxy,

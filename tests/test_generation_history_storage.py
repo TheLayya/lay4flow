@@ -1,6 +1,7 @@
 """Real SQLite checks for the Database task/log compatibility facade."""
 
 import asyncio
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -141,7 +142,84 @@ class GenerationHistoryStorageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row["progress"], 0)
             self.assertEqual(row["updated_at"], row["created_at"])
             self.assertEqual(row["token_email"], "account@example.invalid")
+            for name in ("attempt_count", "retry_count", "account_count"):
+                self.assertIsNone(row[name])
         self.assertEqual(listing["response_body_excerpt"], "")
+
+    async def test_attempt_counts_round_trip_without_loading_history_in_the_list(self):
+        log_id = await self.db.add_request_log(
+            self.log(attempt_count=1, retry_count=0, account_count=1)
+        )
+        body = json.dumps(
+            {"attempt_history": {"version": 1, "attempts": []}, "large": "x" * 100_000}
+        )
+        await self.db.update_request_log(
+            log_id,
+            response_body=body,
+            attempt_count=3,
+            retry_count=2,
+            account_count=2,
+            status_code=200,
+            status_text="completed",
+        )
+        listing = (await self.db.get_logs())[0]
+        self.assertEqual(
+            (listing["attempt_count"], listing["retry_count"], listing["account_count"]),
+            (3, 2, 2),
+        )
+        self.assertNotIn("response_body", listing)
+        self.assertNotIn("request_body", listing)
+        self.assertEqual(len(listing["response_body_excerpt"]), 2048)
+        detail = await self.db.get_log_detail(log_id)
+        self.assertEqual(detail["response_body"], body)
+        self.assertEqual(detail["retry_count"], 2)
+        await self.db.update_request_log(
+            log_id, attempt_count=None, retry_count=None, account_count=None
+        )
+        detail = await self.db.get_log_detail(log_id)
+        self.assertTrue(
+            all(detail[name] is None for name in ("attempt_count", "retry_count", "account_count"))
+        )
+
+    async def test_large_attempt_history_keeps_the_list_error_readable_and_payload_bounded(self):
+        for error in ("Synthetic quota failure", {"message": "Synthetic quota failure"}):
+            body = json.dumps(
+                {
+                    "error": error,
+                    "attempt_history": {
+                        "version": 1,
+                        "attempts": [{"error": "x" * 2000}] * 10,
+                    },
+                }
+            )
+            log_id = await self.db.add_request_log(self.log(response_body=body, status_code=503))
+            listing = next(row for row in await self.db.get_logs() if row["id"] == log_id)
+            self.assertEqual(listing["response_body_excerpt"], "Synthetic quota failure")
+            self.assertNotIn("response_body", listing)
+            self.assertEqual((await self.db.get_log_detail(log_id))["response_body"], body)
+
+    async def test_old_rows_migrate_without_inventing_attempt_counts_and_new_rows_can_record_them(
+        self,
+    ):
+        log_id = await self.db.add_request_log(self.log(status_code=500, status_text="failed"))
+        async with self.db._connect(write=True) as db:
+            for name in ("attempt_count", "retry_count", "account_count"):
+                await db.execute(f"ALTER TABLE request_logs DROP COLUMN {name}")
+            await db.commit()
+        await self.db.init_db()
+        await self.db.check_and_migrate_db()
+        legacy = await self.db.get_log_detail(log_id)
+        self.assertEqual(legacy["status_text"], "failed")
+        self.assertTrue(
+            all(legacy[name] is None for name in ("attempt_count", "retry_count", "account_count"))
+        )
+        fresh = await self.db.add_request_log(
+            self.log(attempt_count=1, retry_count=0, account_count=1)
+        )
+        stored = await self.db.get_log_detail(fresh)
+        self.assertEqual(
+            (stored["attempt_count"], stored["retry_count"], stored["account_count"]), (1, 0, 1)
+        )
 
     async def test_failed_statement_rolls_back_trigger_side_effects_and_releases_lock(self):
         async with self.db._connect(write=True) as connection:

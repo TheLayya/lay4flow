@@ -96,6 +96,9 @@ warm_idle_seconds = 300
 
 [vids]
 registry_path = "data/vids/bindings.json"
+# Total attempts for Vids read-only HTTP operations (1-5, including the first).
+# Paid generation, uploads and document saves are never automatically retried.
+read_max_attempts = 3
 # Explicit Vids accounts are restored from existing encrypted sessions only.
 # Each entry needs token_id, identity_hash, canonical editor_url, runtime_dir,
 # session_key_env (external Fernet key), and optional proxy override.

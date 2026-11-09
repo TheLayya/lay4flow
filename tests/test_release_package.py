@@ -73,8 +73,8 @@ class ReleasePackageTests(unittest.TestCase):
             self.assertIn(name, files)
         self.assertTrue(any(name.startswith("static/app/assets/") for name in files))
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        images = set(re.findall(r"!\[[^\]]*\]\((docs/screenshots/[^)]+)\)", readme))
-        images.update(re.findall(r'<img src="(docs/screenshots/[^\"]+)"', readme))
+        images = set(re.findall(r"!\[[^\]]*\]\((docs/(?:screenshots|images)/[^)]+)\)", readme))
+        images.update(re.findall(r'<img src="(docs/(?:screenshots|images)/[^\"]+)"', readme))
         self.assertTrue(images, "README must include product screenshots")
         self.assertTrue(images <= files, "Runtime README images must ship with the archive")
         for name in files:

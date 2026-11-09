@@ -38,7 +38,7 @@ class AccountImportExtensionBuilderTests(unittest.TestCase):
 
     def test_static_manifest_has_only_exact_management_origin(self):
         manifest = render_manifest("http://198.51.100.7:38000")
-        self.assertEqual(manifest["version"], "1.8.0")
+        self.assertEqual(manifest["version"], "1.8.4")
         self.assertEqual(manifest["name"], "lay4flow-remote OAuth Account Import")
         self.assertIn("lay4flow", manifest["description"])
         self.assertNotIn("optional_host_permissions", manifest)
@@ -96,6 +96,13 @@ class AccountImportExtensionBuilderTests(unittest.TestCase):
                 self.assertFalse(
                     {"<all_urls>", "*://*/*", "http://*/*", "https://*/*"}.intersection(hosts)
                 )
+
+    def test_source_extension_auto_connects_loopback_without_remote_site_permission(self):
+        extension = Path(__file__).resolve().parents[1] / "account_import_extension"
+        manifest = json.loads((extension / "manifest.json").read_text(encoding="utf-8"))
+        bridge = next(item for item in manifest["content_scripts"] if "content.js" in item["js"])
+        self.assertEqual(set(bridge["matches"]), {"http://127.0.0.1/*", "http://localhost/*"})
+        self.assertTrue(set(bridge["matches"]).issubset(manifest["host_permissions"]))
 
 
 if __name__ == "__main__":

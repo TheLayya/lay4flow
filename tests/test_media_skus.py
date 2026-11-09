@@ -17,11 +17,18 @@ class MediaSkuTests(unittest.TestCase):
     def test_video_catalog_groups_generation_modes_and_separates_edit_skus(self):
         self.assertIn("flow-veo-3-1-fast-8s-720p", MEDIA_SKUS)
         self.assertIn("flow-omni-1-1-flash-10s-4k", MEDIA_SKUS)
-        self.assertFalse(any("extend" in name for name in MEDIA_SKUS))
+        self.assertTrue(
+            all(
+                name.startswith("flow-omni-1-2-flash-extend-")
+                for name in MEDIA_SKUS
+                if "extend" in name
+            )
+        )
         self.assertEqual(
             {name for name in MEDIA_SKUS if "-edit-" in name},
             {
-                f"flow-omni-1-1-flash-edit-{resolution}"
+                f"flow-omni-{version}-flash-edit-{resolution}"
+                for version in ("1-1", "1-2")
                 for resolution in ("360p", "720p", "1080p", "4k")
             },
         )
@@ -30,7 +37,7 @@ class MediaSkuTests(unittest.TestCase):
     def test_standard_suffix_is_hidden_and_relaxed_names_remain_distinct(self):
         names = {model["id"] for model in list_sku_models()}
         self.assertEqual(names, set(MEDIA_SKUS))
-        self.assertEqual(len(names), 37)
+        self.assertEqual(len(names), 125)
         self.assertFalse(any(name.endswith("-standard") for name in names))
         relaxed = {
             name
@@ -131,7 +138,7 @@ class MediaSkuTests(unittest.TestCase):
         self.assertEqual(prepared["generationConfig"]["videoConfig"]["mode"], "image_to_video")
 
     def test_every_catalog_mode_resolves_to_existing_model(self):
-        self.assertEqual(len(MEDIA_SKUS), 37)
+        self.assertEqual(len(MEDIA_SKUS), 125)
         for sku, entry in MEDIA_SKUS.items():
             if entry["type"] == "image":
                 prepared = prepare_sku_request({"model": sku})
@@ -150,6 +157,7 @@ class MediaSkuTests(unittest.TestCase):
                         MODEL_CONFIG,
                         images=[b"x"] * count,
                         has_video=mode == "edit",
+                        video_media_id="synthetic-source" if mode == "extend" else None,
                     )
                     self.assertEqual(
                         resolved.options["resolution"], entry["locked_spec"]["resolution"]

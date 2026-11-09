@@ -10,11 +10,15 @@ const ACCOUNT_COOKIE_NAMES = new Set([
 const MANAGE_ORIGINS_KEY = "lay4flow_manage_origins";
 const LEGACY_MANAGE_ORIGINS_KEY = "flow2api_manage_origins";
 const STATIC_MANIFEST = false;
-const MANAGEMENT_PATHS = new Set(["/", "/manage", "/vids-accounts", "/vids/accounts"]);
+const MANAGEMENT_PATHS = new Set(["/", "/login", "/manage", "/test", "/vids", "/vids-accounts", "/vids/accounts", "/api-guide", "/vids-api-guide", "/vids/api-guide"]);
 
 // One active import: Chrome incognito windows share a cookie store.
 // Only routing metadata and a short-lived nonce enter session storage.
 const activeImports = new Map();
+// Account capture shares the current browser's Cookie store. Capture one at a
+// time, then release it as soon as the server durably acknowledges the login;
+// expensive Profile verification continues independently in the server queue.
+const MAX_CONCURRENT_IMPORTS = 1;
 const probeTimers = new Map();
 
 function storageKey(id) { return activeImports.get(id)?.metadataKey || IMPORT_KEY_PREFIX + id; }
@@ -107,9 +111,12 @@ async function restoreImports() {
     if (record.state === "closing" || record.state === "cleanup_failed" || record.expiresAt <= now() || record.state === "opening") {
       await finishImport(record, record.outcome || errorPayload("session_expired", "导入已过期或中断，已清理临时登录", record.sessionId));
     } else {
-      // A lost response is safe to retry: the server commits a session once.
-      record.state = "tab_open";
-      scheduleProbe(record);
+      if (record.state === "submitting") {
+        await finishImport(record, errorPayload("submission_interrupted", "提交结果未知，请在管理页查看后台任务；需要时手动重试", record.sessionId));
+      } else {
+        record.state = "tab_open";
+        scheduleProbe(record);
+      }
     }
   }
 }
@@ -170,6 +177,9 @@ function cookiePayload(cookies) {
 async function clearImportCookies(record) {
   // Existing fingerprint-profile login state belongs to the user.
   if (record.loginContext === "profile") return;
+  // Chrome shares one incognito store across windows. Never clear somebody
+  // else's private Google login if another private tab appeared meanwhile.
+  if ((await chrome.tabs.query({})).some(tab => tab.incognito && tab.id !== record.tabId)) return;
   // Inspect the live store, not the submission allowlist or an old cookie snapshot.
   // Normal-profile cookies and lay4flow's login cookie are never selected.
   const stores = await chrome.cookies.getAllCookieStores();
@@ -265,8 +275,8 @@ async function probe(record) {
     if (record.state === "submitting") {
       const remaining = 30000 - (now() - record.submitAt);
       if (remaining > 0) { scheduleProbe(record, remaining); return; }
-      // No result delivered (page reload/network): re-send only the same session.
-      record.state = "tab_open";
+      await finishImport(record, errorPayload("submission_timeout", "提交未收到回执，请在管理页查看后台任务；需要时手动重试", record.sessionId));
+      return;
     }
     if (record.payload) { await submit(record, record.payload); return; }
     const tab = await chrome.tabs.get(record.tabId);
@@ -312,9 +322,17 @@ function scheduleProbe(record, delay = PROBE_DELAY_MS) {
 async function finishSubmit(record, message) {
   const status = Number(message.status);
   if (message.ok && status >= 200 && status < 300 && message.result?.success === true) {
+    if (message.result.action === "queued") {
+      await finishImport(record, {
+        type: "import.result", session_id: record.sessionId, state: "succeeded",
+        action: "queued", email: "", queued: true
+      });
+      return;
+    }
     await finishImport(record, {
       type: "import.result", session_id: record.sessionId, state: "succeeded",
-      email: safeString(message.result.email), action: safeString(message.result.action)
+      email: safeString(message.result.email), action: safeString(message.result.action),
+      queued: message.result.action === "queued"
     });
   } else if (["profile_bootstrap_failed", "profile_unavailable"].includes(message.result?.error_code)) {
     const reasons = {
@@ -335,12 +353,7 @@ async function finishSubmit(record, message) {
       : reasons[message.result.reason] || "登录数据已读取，但服务器浏览器 Profile 初始化失败，请检查服务状态后再试。";
     await finishImport(record, errorPayload(message.result.error_code, summary, record.sessionId));
   } else if ([0, 409, 429].includes(status) || status >= 500) {
-    record.state = "tab_open";
-    record.retryAt = now() + 3000;
-    await saveMetadata(record);
-    clearTimeout(probeTimers.get(record.sessionId));
-    probeTimers.delete(record.sessionId);
-    scheduleProbe(record, 3000);
+    await finishImport(record, errorPayload("submission_failed", "提交失败，请在管理页查看后台任务及错误，需要时手动重试", record.sessionId));
   } else if (status === 422) {
     // Older servers send a string detail. Keep their Profile rejection visible
     // too, instead of losing a late response behind an earlier busy reply.
@@ -366,7 +379,10 @@ async function startImport(message, sender, sendResponse) {
       type: "import.accepted", session_id: sessionId, tab_id: String(existing.tabId), cookie_store_id: existing.cookieStoreId
     }); return;
   }
-  if (activeImports.size) { sendResponse(errorPayload("session_busy", "已有账号正在导入或清理", sessionId)); return; }
+  if (activeImports.size >= MAX_CONCURRENT_IMPORTS) {
+    sendResponse(errorPayload("session_busy", "批量导入队列已满，请稍后继续", sessionId));
+    return;
+  }
   const record = {
     sessionId, nonce, adminOrigin, completeUrl: message.complete_url, returnUrl: message.return_url,
     browserProfileSource: "cloak", loginContext: message.login_context === "profile" ? "profile" : "isolated",
@@ -382,6 +398,18 @@ async function startImport(message, sender, sendResponse) {
     try {
       await saveMetadata(record);
       if (chrome.alarms) await chrome.alarms.create(storageKey(sessionId), {when: record.expiresAt});
+      if (record.loginContext === "isolated" && chrome.extension?.isAllowedIncognitoAccess) {
+        const allowed = await new Promise(resolve => chrome.extension.isAllowedIncognitoAccess(resolve));
+        if (!allowed) {
+          await finishImport(record, errorPayload("incognito_permission_required", "请在扩展详情中开启“允许在无痕模式下运行”（Edge：允许在 InPrivate 中），再开始登录。", sessionId));
+          return errorPayload("incognito_permission_required", "请先允许扩展在无痕窗口运行", sessionId);
+        }
+      }
+      if (record.loginContext === "isolated" && (await chrome.tabs.query({})).some(tab => tab.incognito)) {
+        const failure = errorPayload("incognito_in_use", "请先关闭已有无痕窗口，再开始独立账号登录；现有无痕登录态未修改。", sessionId);
+        await finishImport(record, failure);
+        return failure;
+      }
       let tab;
       if (record.loginContext === "profile") {
         tab = await chrome.tabs.create({url: "about:blank", active: true, windowId: sender.tab.windowId});

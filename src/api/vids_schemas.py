@@ -90,6 +90,10 @@ RECEIPT = {
             },
         },
         "content_url": {"type": ["string", "null"]},
+        "media_expired": {
+            "type": "boolean",
+            "description": "Completed output was reclaimed; the receipt and paid outcome remain. Explicit download recovery never submits generation again.",
+        },
         "metadata": {"type": "object"},
         "outputs": {
             "type": "array",
@@ -102,7 +106,7 @@ RECEIPT = {
                 "properties": {
                     "index": {"type": "integer", "minimum": 0, "maximum": 3},
                     "metadata": {"type": "object"},
-                    "content_url": {"type": "string"},
+                    "content_url": {"type": ["string", "null"]},
                 },
             },
         },

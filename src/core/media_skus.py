@@ -68,7 +68,7 @@ def _add_video_sku(
     mode: str,
 ) -> None:
     """Expand one capability combination into one grouped SKU per dimensions."""
-    if mode == "extend":
+    if mode == "extend" and public_model != "omni_1.2_flash":
         return
     is_edit = mode == "edit"
     if not is_edit and not combination.get("durations"):
@@ -79,7 +79,9 @@ def _add_video_sku(
         for resolution in combination["resolutions"]:
             if is_edit:
                 name = f"{prefix}-edit-{resolution}"
-            elif public_model == "omni_1.1_flash":
+            elif mode == "extend":
+                name = f"{prefix}-extend-{duration}s-{resolution}"
+            elif public_model in {"omni_1.1_flash", "omni_1.2_flash"}:
                 name = f"{prefix}-{duration}s-{resolution}"
             else:
                 name = f"{prefix}-{quality}-{duration}s-{resolution}"
@@ -99,7 +101,7 @@ def _add_video_sku(
                     "allowed_modes": [],
                     "description": (
                         (
-                            f"{public_model} edit up to 10s {resolution}"
+                            f"{public_model} edit up to {15 if public_model == 'omni_1.2_flash' else 10}s {resolution}"
                             if is_edit
                             else f"{public_model} {quality or 'flash'} {duration}s {resolution}"
                         )
@@ -139,6 +141,7 @@ def _build_skus() -> dict[str, dict[str, Any]]:
     for public_model, prefix in (
         ("veo_3_1", "flow-veo-3-1"),
         ("omni_1.1_flash", "flow-omni-1-1-flash"),
+        ("omni_1.2_flash", "flow-omni-1-2-flash"),
     ):
         for combination in PUBLIC_MODELS[public_model]["capabilities"]["combinations"]:
             _add_video_sku(result, prefix, public_model, combination, combination["mode"])
@@ -197,6 +200,8 @@ def list_sku_models() -> list[dict[str, Any]]:
         if entry["allowed_modes"] == ["edit"]:
             defaults.pop("durationSeconds", None)
             defaults["mode"] = "edit"
+        elif entry["allowed_modes"] == ["extend"]:
+            defaults["mode"] = "extend"
         result.append(
             {
                 "id": sku,
@@ -329,6 +334,8 @@ def _video_overrides(body: dict[str, Any], entry: dict[str, Any]) -> dict[str, A
     )
     if is_edit and mode in {None, "auto"}:
         mode = "edit"
+    elif entry["allowed_modes"] == ["extend"] and mode in {None, "auto"}:
+        mode = "extend"
     if mode and mode != "auto" and mode not in entry["allowed_modes"]:
         raise ValueError(f"Unsupported mode for SKU: {mode}")
     for field, normalizer in (
@@ -345,7 +352,11 @@ def _video_overrides(body: dict[str, Any], entry: dict[str, Any]) -> dict[str, A
             raise ValueError(
                 "Editing SKUs do not accept durationSeconds; use trimStartMs/trimEndMs"
             )
-        if field == "quality" and entry["public_model"] == "omni_1.1_flash" and value == "flash":
+        if (
+            field == "quality"
+            and entry["public_model"] in {"omni_1.1_flash", "omni_1.2_flash"}
+            and value == "flash"
+        ):
             continue
         if value != expected:
             raise ValueError(f"{field} conflicts with the SKU")
@@ -375,11 +386,16 @@ def _video_overrides(body: dict[str, Any], entry: dict[str, Any]) -> dict[str, A
         start = _one(found, "trimStartMs", _int)
         end = _one(found, "trimEndMs", _int)
         if start is not None or end is not None:
+            mode_caps = PUBLIC_MODELS[entry["public_model"]]["capabilities"]["modes"]["edit"]
+            maximum = mode_caps.get("maxTrimMs", 10000)
+            minimum = mode_caps.get("minTrimMs", 1)
             if (
                 not 0 <= (start or 0) < (end if end is not None else 10000)
-                or (end if end is not None else 10000) - (start or 0) > 10000
+                or not minimum <= (end if end is not None else 10000) - (start or 0) <= maximum
             ):
-                raise ValueError("Trim must satisfy 0 <= start < end and end-start <= 10000 ms")
+                raise ValueError(
+                    f"Trim must satisfy 0 <= start < end and {minimum} <= end-start <= {maximum} ms"
+                )
             if start is not None:
                 result["trimStartMs"] = start
             if end is not None:
@@ -474,7 +490,7 @@ def prepare_sku_request(body: dict[str, Any]) -> dict[str, Any]:
     else:
         video_config = dict(entry["locked_spec"])
         video_config.update(overrides)
-        if entry["public_model"] == "omni_1.1_flash":
+        if entry["public_model"] in {"omni_1.1_flash", "omni_1.2_flash"}:
             video_config.pop("priority", None)
         result.setdefault("generationConfig", {})["videoConfig"] = video_config
     return result

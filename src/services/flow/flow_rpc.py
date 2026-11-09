@@ -131,7 +131,11 @@ class FlowRPCError(Exception):
         self.rpc_code = rpc_code if type(rpc_code) is int and 0 <= rpc_code <= 599 else None
         self.public_error = (
             public_error
-            if isinstance(public_error, str) and public_error in _PUBLIC_ERRORS.values()
+            if isinstance(public_error, str)
+            and (
+                public_error in _PUBLIC_ERRORS.values()
+                or re.fullmatch(r"PUBLIC_ERROR_[A-Z0-9_]{1,96}", public_error)
+            )
             else None
         )
         # Only a fully decoded error-only RPC response proves a rejected write.
@@ -147,6 +151,8 @@ class FlowRPCError(Exception):
         detail = f" (code={self.rpc_code})" if self.rpc_code is not None else ""
         if self.public_error:
             detail += f" {self.public_error}"
+        if self.rpc_code == 8:
+            detail += " RESOURCE_EXHAUSTED"
         super().__init__(f"Flow {network_step}: {reason}{detail}")
 
 
@@ -167,7 +173,12 @@ def _public_error(value: Any, *, depth: int = 0) -> str | None:
     if depth > 16:
         return None
     if isinstance(value, str):
-        return value if value in _PUBLIC_ERRORS.values() else None
+        return (
+            value
+            if value in _PUBLIC_ERRORS.values()
+            or re.fullmatch(r"PUBLIC_ERROR_[A-Z0-9_]{1,96}", value)
+            else None
+        )
     if isinstance(value, list):
         # google.protobuf.Any: only map its typed enum, never arbitrary integers.
         if (
@@ -220,14 +231,19 @@ def _check_response(response: Any, step: str) -> None:
     url = str(getattr(response, "url", "") or "")
     headers = response.headers
     target = urljoin(url or FLOW_URL, headers.get("location", ""))
-    if status in {401, 403} or urlsplit(url).hostname == "accounts.google.com":
+    if urlsplit(url).hostname == "accounts.google.com":
+        raise FlowRPCError("login_required", step, status)
+    if not _trusted_flow_url(url):
+        raise FlowRPCError("account_probe_error", step, status)
+    if status == 401:
         raise FlowRPCError("login_required", step, status)
     if 300 <= status < 400 and urlsplit(target).hostname == "accounts.google.com":
         raise FlowRPCError("login_required", step, status)
     if status != 200:
+        # A bare HTTP 403 may be an access/risk rejection, not a signed-out
+        # Google session. Only explicit authentication evidence can require
+        # another login; retain the status for bounded retry diagnostics.
         raise FlowRPCError("transient_error", step, status)
-    if not _trusted_flow_url(url):
-        raise FlowRPCError("account_probe_error", step, status)
 
 
 def _bootstrap(html: str) -> dict[str, Any]:

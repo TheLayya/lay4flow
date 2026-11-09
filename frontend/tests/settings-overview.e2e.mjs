@@ -59,8 +59,16 @@ const fixtures = {
         debug_enabled: false,
     },
     '/api/config/generation': { config: { image_timeout: 300, video_timeout: 1500, max_retries: 3 } },
+    '/api/account-error-policy': {
+        success: true,
+        config: {
+            rules: '', consecutive_failure_threshold: 3, failure_cooldown_seconds: 300,
+            max_account_attempts: 3, builtin_rules: 'PUBLIC_ERROR_USER_QUOTA_REACHED|LIMIT|24h',
+        },
+    },
+    '/api/admin/vids/config': { config: { keepalive_enabled: true, keepalive_interval_minutes: 10,
+        repair_cooldown_seconds: 300, consecutive_failure_threshold: 3, failure_cooldown_seconds: 300, rules: '' } },
     '/api/call-logic/config': { config: { call_mode: 'default' } },
-    '/api/token-refresh/config': { config: { protocol_refresh_enabled: true, refresh_interval_minutes: 120 } },
     '/api/proxy/config': {
         proxy_enabled: true,
         proxy_url: 'http://fixture.proxy.test:8000',
@@ -116,7 +124,7 @@ await context.route('**/*', (route) => {
     unexpectedReads.push(url.pathname + url.search)
     return json(route, { detail: `Unexpected API read ${url.pathname}` }, 404)
 })
-const ids = ['general', 'generation', 'captcha', 'cache', 'integration']
+const ids = ['general', 'generation', 'rules', 'captcha', 'cache', 'integration']
 const section = (id) => page.locator(`.settings-section[data-section="${id}"]`)
 const card = (id, heading) =>
     section(id)
@@ -157,32 +165,18 @@ async function assertActiveSection(id = 'general') {
         }
     }
 }
-async function assertAllSections() {
-    assert.equal(await page.locator('.settings-section:visible').count(), ids.length)
-    assert.equal(await page.locator('.settings-card:visible').count(), 10)
-    assert.equal(await page.getByRole('tab', { name: '全部设置', exact: true }).getAttribute('aria-selected'), 'true')
-}
-async function measureColumns(width, minimum) {
+async function measureCompactRows(width) {
     await page.setViewportSize({ width, height: 1080 })
-    const cards = await page
-        .locator('.settings-card:visible')
-        .evaluateAll((elements) =>
-            elements.map((element) => {
-                const r = element.getBoundingClientRect()
-                return {
-                    x: Math.round(r.x),
-                    y: Math.round(r.y),
-                    width: Math.round(r.width),
-                    height: Math.round(r.height),
-                }
-            }),
-        )
-    layout.push({ width, cards })
-    assert.equal(cards.length, 10)
-    assert.ok(
-        new Set(cards.map((item) => item.x)).size >= minimum,
-        `Settings must use at least ${minimum} columns at ${width}px: ${JSON.stringify(cards)}`,
+    const cards = await page.locator('.settings-card:visible').evaluateAll((elements) =>
+        elements.map((element) => {
+            const r = element.getBoundingClientRect()
+            return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
+        }),
     )
+    layout.push({ width, cards })
+    assert.equal(cards.length, 2)
+    assert.equal(new Set(cards.map((item) => item.x)).size, 1)
+    assert.ok(cards.every((item) => item.width >= width - 400), 'Settings use full-width rows')
     await noOverflow()
 }
 const search = page.locator('.settings-search input')
@@ -191,21 +185,23 @@ try {
     await page.locator('.settings-view h1').waitFor()
     await page.locator('.settings-skeleton').waitFor({ state: 'hidden' })
     await page.evaluate(() => document.fonts.ready)
-    await assertAllSections()
+    await assertActiveSection('general')
     assert.equal(await page.locator('.settings-alert').count(), 0)
     assert.equal(await section('captcha').locator('.settings-grid > .settings-card').count(), 1)
     assert.equal(await page.locator('[data-setting-card="score"]').count(), 0)
     assert.equal(await page.getByRole('button', { name: '打开分数测试', exact: true }).count(), 0)
     assert.equal(await page.getByText('给服务做一次小体检', { exact: true }).count(), 0)
     assert.equal(await page.getByRole('dialog', { name: '验证码服务体检' }).count(), 0)
+    assert.equal(await page.locator('[data-setting-card="health"]').count(), 0)
+    assert.equal(await page.getByText('账号健康策略', { exact: true }).count(), 0)
     record('Captcha settings retain their configuration and remove the score test card, action and dialog')
-    record('Settings opens all ten configuration cards without a separate summary strip')
+    record('Settings opens one compact category with direct fields instead of an all-card overview')
 
-    await measureColumns(1920, 4)
+    await measureCompactRows(1920)
     await screenshot('settings-1920-top')
-    await measureColumns(1440, 3)
+    await measureCompactRows(1440)
     await screenshot('settings-1440-top')
-    record('Wide screens use four columns and ordinary desktop screens use three columns')
+    record('Desktop categories use wide horizontal form rows and separators')
 
     assert.equal(await page.locator('.settings-summary').count(), 0)
     assert.equal(await page.locator('.settings-view > .page-heading p').count(), 0)
@@ -222,6 +218,14 @@ try {
     const generation = card('generation', '任务等待时间')
     const timeout = field(generation, '图片生成超时')
     await page.locator('.settings-nav button').filter({ hasText: '生成与调度' }).click()
+    const maintenance = card('generation', 'Profile 登录态维护')
+    await maintenance.getByText('新建 Profile 账号默认每 30 分钟维护一次；已有账号按各自保存的间隔执行。后台每分钟扫描到期账号。', { exact: true }).waitFor()
+    assert.equal(await maintenance.getByRole('switch').count(), 0)
+    assert.equal(await maintenance.getByRole('spinbutton').count(), 0)
+    assert.equal(await maintenance.getByRole('button', { name: '保存刷新设置', exact: true }).count(), 0)
+    assert.match(await maintenance.getByRole('link', { name: '管理账号维护设置', exact: true }).getAttribute('href'), /#\/accounts$/)
+    assert.equal(await page.getByText('Access Token 自动刷新始终开启', { exact: true }).count(), 0)
+    record('Profile maintenance exposes per-account controls without the unused global ST switch or interval')
     await timeout.fill('480')
     await timeout.blur()
     const newKey = field(section('general'), '新 API 密钥')
@@ -249,7 +253,7 @@ try {
     await assertActiveSection()
     assert.equal(await timeout.inputValue(), '480')
     assert.equal(await newKey.inputValue(), 'fixture-new-draft-key')
-    record('Live search finds specific fields and clearing it restores all sections with unsaved drafts intact')
+    record('Live search finds specific fields and clearing it restores the selected category without losing drafts')
 
     for (const [id, label] of [
         ['integration', '运行诊断'],
@@ -300,11 +304,12 @@ try {
     await section('integration').scrollIntoViewIfNeeded()
     await screenshot('settings-390-bottom')
     assert.equal(await timeout.inputValue(), '480')
-    record('Mobile keeps all five sections reachable with vertical scrolling and no horizontal overflow')
+    record('Mobile keeps all six categories reachable with horizontal tabs and no document overflow')
 
     assert.deepEqual(blockedMutations, [])
     assert.deepEqual(unexpectedReads, [])
     assert.deepEqual(errors, [])
+    assert.ok(!apiReads.some((path) => path.startsWith('/api/token-refresh')))
     record('All requests are mocked; no runtime configuration, credentials or upstream services are mutated')
     await writeFile(
         resolve(output, 'verification.json'),

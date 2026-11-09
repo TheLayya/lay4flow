@@ -26,6 +26,8 @@ curl https://your-host.example/compat/v1/chat/completions \
 
 显式参数与 SKU 收费规格冲突时在上游提交前返回 400。画面比例可单独选择，清晰度由 SKU 决定。参考图可通过 Chat `image_url` 或 Images multipart 上传；首尾帧需显式指定模式。
 
+Omni 1.2 固定规格使用 `flow-omni-1-2-flash-15s-720p` 等名称，续写另列 `flow-omni-1-2-flash-extend-8s-720p`，编辑为 `flow-omni-1-2-flash-edit-720p`。编辑规格通过裁剪起止时间选择 3–15 秒；续写秒数表示追加长度，源视频可直接上传 MP4，程序化集成也可引用已有 Flow 媒体。模型权限仍按所选账号与实时上游目录检查，SKU 不提供越过套餐限制的能力。旧 1.1 SKU 保留原映射。
+
 成功完成的 Chat / Images 返回固定 1000 结算单位，由网关为每个 SKU 设置价格或倍率。它是固定结算基数，与上游真实文本 token 数分开。失败响应不作为成功结算；连接中断或超时应先确认结果，避免重复消费。
 
 异步 Videos 的 `queued` 仅表示接受任务，创建和轮询不返回成功结算用量。网关需要具备匹配的异步任务适配，再按 `completed/failed` 结算。网关仅支持 Chat 时，使用 Chat 视频入口。幂等键可复用同请求；已执行的付费生成不会因下载失败重新提交。

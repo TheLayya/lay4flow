@@ -14,9 +14,9 @@ import {
     Connection,
     ArrowRight,
     Monitor,
-    MagicStick,
 } from '@element-plus/icons-vue'
 import { api, notifyError, parseDate } from '../lib/api'
+import { accountSnapshotEpoch, readAccountSnapshot, writeAccountSnapshot, clearAccountSnapshot } from '../lib/account-snapshot'
 import Mascot from '../components/Mascot.vue'
 import AccountProxyBinding from '../components/AccountProxyBinding.vue'
 
@@ -24,6 +24,8 @@ const accounts = ref([])
 const vids = ref([])
 const candidates = ref([])
 const loading = ref(true)
+const snapshotEpoch = accountSnapshotEpoch()
+let hasAccountSnapshot = false
 const loadError = ref('')
 const vidsError = ref('')
 const quotaRefreshing = ref(false)
@@ -31,15 +33,15 @@ const search = ref('')
 const route = useRoute()
 const platform = ref(route.query.platform === 'vids' ? 'vids' : 'all')
 const state = ref('all')
+const plan = ref('all')
 const selected = ref([])
 const accountsTable = ref(null)
 const page = ref(1)
-const pageSize = ref(10)
+const pageSize = ref(50)
 const busy = reactive(new Set())
 const detailId = ref(null)
 const detailOpen = ref(false)
 const editorOpen = ref(false)
-const editorTab = ref('identity')
 const editing = ref(null)
 const saving = ref(false)
 const formRef = ref()
@@ -74,11 +76,10 @@ const importStageLabel = (item) => {
     const stage = {
         queued: '等待处理',
         legacy_import: '验证旧版账号',
+        cookie_import: '验证 Cookie 登录态',
         open_profile: '打开浏览器',
         restore_state: '恢复登录态',
         flow_verification: '验证 Flow 会话',
-        cold_check_1: '验证持久化会话（1/2）',
-        cold_check_2: '验证持久化会话（2/2）',
         save_account: '保存账号',
         prepare_workspace: '准备工作空间',
         finalize: '完成导入',
@@ -161,9 +162,94 @@ async function retryImportJob(job) {
         importRetrying.delete(job.id)
     }
 }
+const extensionJobs = ref([])
+const extensionJobsError = ref('')
+const extensionJobsLoading = ref(false)
+const extensionJobRetrying = reactive(new Set())
+const extensionPendingReceipts = new Set()
+const activeExtensionJob = (job) => ['queued', 'running'].includes(job.state)
+const activeExtensionJobs = computed(() => extensionJobs.value.filter(activeExtensionJob))
+const extensionJobState = (job) =>
+    ({ queued: '等待验证', running: '正在验证', completed: '已保存账号', failed: '验证失败' })[job.state] || '状态未知'
+let extensionJobsTimer
+let extensionJobsPromise
+let extensionJobsVersion = 0
+function scheduleExtensionJobs() {
+    clearInterval(extensionJobsTimer)
+    extensionJobsTimer = undefined
+    if (!disposed && (activeExtensionJobs.value.length || extensionPendingReceipts.size)) {
+        extensionJobsTimer = setInterval(() => {
+            if (!document.hidden) refreshExtensionJobs()
+        }, 3000)
+    }
+}
+async function refreshExtensionJobs() {
+    if (disposed || extensionJobsPromise) return extensionJobsPromise
+    extensionJobsLoading.value = true
+    const version = extensionJobsVersion
+    extensionJobsPromise = (async () => {
+        try {
+            const result = ensure(await api.get('/api/plugin/import/jobs'))
+            if (disposed || version !== extensionJobsVersion) return
+            if (!Array.isArray(result.jobs)) throw new Error('服务器未返回有效的扩展任务记录')
+            const previous = new Map(extensionJobs.value.map((job) => [job.id, job]))
+            extensionJobs.value = result.jobs
+            extensionJobsError.value = ''
+            for (const job of extensionJobs.value) extensionPendingReceipts.delete(job.session_id)
+            const finished = extensionJobs.value.filter(
+                (job) => previous.has(job.id) && activeExtensionJob(previous.get(job.id)) && !activeExtensionJob(job),
+            )
+            if (finished.some((job) => job.state === 'completed')) load(true, true)
+            for (const job of finished) {
+                const identity = job.email || `任务 ${job.id.slice(0, 8)}`
+                if (job.state === 'completed') ElMessage.success(`后台验证完成，账号已保存：${identity}`)
+                else ElMessage.warning(`扩展登录验证失败：${identity}。资料已保留，可在队列中检查并重试。`)
+            }
+        } catch (error) {
+            if (!disposed) extensionJobsError.value = `扩展任务状态暂未更新：${error.message}。任务记录已保存，请稍后刷新。`
+        } finally {
+            extensionJobsLoading.value = false
+            extensionJobsPromise = undefined
+            scheduleExtensionJobs()
+        }
+    })()
+    return extensionJobsPromise
+}
+async function retryExtensionJob(job) {
+    if (extensionJobRetrying.has(job.id) || activeExtensionJob(job) || !job.can_retry) return
+    extensionJobRetrying.add(job.id)
+    try {
+        const result = ensure(await api.post(`/api/plugin/import/jobs/${encodeURIComponent(job.id)}/retry`, {}))
+        if (result.job?.id !== job.id || !['queued', 'running', 'completed', 'failed'].includes(result.job.state))
+            throw new Error('服务器未确认重试任务，原任务记录已保留')
+        extensionJobsVersion++
+        extensionJobs.value = [result.job, ...extensionJobs.value.filter((row) => row.id !== job.id)]
+        extensionJobsError.value = ''
+        scheduleExtensionJobs()
+        ElMessage.info('已使用保留的登录资料重新排队，无需重新登录。')
+    } catch (error) {
+        notifyError(error)
+    } finally {
+        extensionJobRetrying.delete(job.id)
+    }
+}
 const importProxy = ref(null)
 const proxyPool = ref([])
 const proxyPoolError = ref('')
+const snapshot = readAccountSnapshot()
+if (snapshot) {
+    accounts.value = snapshot.accounts
+    vids.value = snapshot.vids
+    candidates.value = snapshot.candidates
+    proxyPool.value = snapshot.proxies
+    hasAccountSnapshot = true
+    loading.value = false
+}
+watch([accounts, vids, candidates, proxyPool], () => {
+    if (!disposed && hasAccountSnapshot) writeAccountSnapshot({
+        accounts: accounts.value, vids: vids.value, candidates: candidates.value, proxies: proxyPool.value,
+    }, snapshotEpoch)
+})
 const availableProxies = computed(() => proxyPool.value.filter((row) => row.enabled && row.last_check_ok !== false))
 const proxyOptionLabel = (row) =>
     `#${row.id} ${row.proxy_url}${row.note ? ' · ' + row.note : ''} · ${row.bound_account_count || 0} 个账号 · ${row.last_check_ok === false ? '连接异常' : row.last_check_ok ? '连接正常' : '未检测'}`
@@ -193,7 +279,7 @@ function quickDraft(row) {
         image_enabled: row.image_enabled !== false,
         video_enabled: row.video_enabled !== false,
         auto_refresh_enabled: row.auto_refresh_enabled !== false,
-        refresh_interval_minutes: row.refresh_interval_minutes || 120,
+        refresh_interval_minutes: row.refresh_interval_minutes || (row.browser_profile_source === 'cloak' ? 30 : 120),
     }
     quickBaselines[row.id] = { ...draft }
     return (quickDrafts[row.id] = draft)
@@ -232,6 +318,7 @@ function toggleQuickAccount(row) {
     expandedAccountIds.value = expandedAccountIds.value.includes(row.id)
         ? expandedAccountIds.value.filter((id) => id !== row.id)
         : [...expandedAccountIds.value, row.id]
+    if (expandedAccountIds.value.includes(row.id)) accountsTable.value?.setScrollLeft?.(0)
 }
 function expandQuickAccount(row, expanded) {
     if (expanded.some((item) => item.id === row.id)) quickDraft(row)
@@ -306,12 +393,17 @@ async function saveQuickAccount(row, kind = 'proxy') {
             }
         }
         // Let an older poll finish before this write so it cannot restore the previous binding.
-        await loadingPromise
+        await accountReadPromise
         ensure(await api.put(`/api/tokens/${row.id}`, body))
         accountMutationVersion++
+        quotaVersion++
         const previousProxy = accounts.value.find((item) => item.id === row.id)?.proxy_pool_id
         const updates = { ...body, ...(selectedProxy ? { proxy_url: selectedProxy.proxy_url } : {}) }
         accounts.value = accounts.value.map((item) => (item.id === row.id ? { ...item, ...updates } : item))
+        vids.value = vids.value.map((item) => item.token_id === row.id ? {
+            ...item,
+            ...Object.fromEntries(['image_enabled', 'video_enabled'].filter((key) => key in body).map((key) => [key, body[key]])),
+        } : item)
         if (kind === 'proxy') {
             for (const proxy of proxyPool.value) {
                 if (proxy.id === previousProxy)
@@ -334,8 +426,6 @@ async function saveQuickAccount(row, kind = 'proxy') {
     }
 }
 const exporting = ref(false)
-const protocolRefresh = ref(false)
-const refreshSaving = ref(false)
 const onboarding = ref(false)
 const pendingVidsCount = computed(() => candidates.value.filter((row) => !row.bound).length)
 const loginOpen = ref(false)
@@ -417,17 +507,20 @@ const extensionReady = ref(false)
 const extensionVersion = ref('')
 const extensionDetecting = ref(false)
 const extensionDetectionStatus = ref('')
-const extensionMinimumVersion = '1.8.0'
+const extensionMinimumVersion = '1.8.2'
 let extensionDetectionTimer
 const extensionId = ref('')
 const extensionStarting = ref(false)
 const extensionSession = ref(null)
 const extensionStatus = ref('')
 const extensionError = ref(false)
-const extensionForm = reactive({ login_context: 'profile' })
+const extensionForm = reactive({ login_context: 'isolated' })
+const desktopLoginBrowserOpening = ref(false)
+let desktopLoginBrowserRequest = ''
+let desktopLoginBrowserTimer
 const extensionStorage = 'lay4flow.extensionLogin'
 const extensionProgress = {
-    opening: '正在打开指纹浏览器登录页…',
+    opening: '正在打开浏览器登录页…',
     tab_open: '请在打开的 Google Flow 页面完成登录。',
     waiting_flow: '请在当前浏览器中完成 Google Flow 登录。',
     waiting_credentials: '等待 Google 登录凭据…',
@@ -441,7 +534,7 @@ function extensionMessage(type, payload = {}) {
         {
             source: 'lay4flow-manage',
             type,
-            ...(extensionId.value ? { extension_id: extensionId.value } : {}),
+            ...(type !== 'import.hello' && extensionId.value ? { extension_id: extensionId.value } : {}),
             ...(type === 'import.hello' ? payload : { payload }),
         },
         location.origin,
@@ -450,6 +543,15 @@ function extensionMessage(type, payload = {}) {
 function clearExtensionSession() {
     extensionSession.value = null
     sessionStorage.removeItem(extensionStorage)
+}
+function acknowledgeExtensionQueue(sessionId) {
+    extensionPendingReceipts.add(sessionId)
+    clearExtensionSession()
+    extensionStatus.value = '登录资料已安全保存，后台验证中；可以继续添加下一个账号，结果在扩展登录队列显示。'
+    extensionError.value = false
+    ElMessage.info(extensionStatus.value)
+    refreshExtensionJobs()
+    scheduleExtensionJobs()
 }
 function compatibleExtensionVersion(value) {
     if (typeof value !== 'string' || !/^\d+(?:\.\d+){2,3}$/.test(value)) return false
@@ -477,7 +579,7 @@ function detectExtension() {
     extensionDetectionTimer = setTimeout(() => {
         extensionDetectionTimer = undefined
         extensionDetecting.value = false
-        extensionDetectionStatus.value = `未检测到扩展。请下载本窗口提供的新版扩展（${extensionMinimumVersion} 或更新），加载解压目录后刷新当前管理页；旧版 1.7.3 无法连接此页面。`
+        extensionDetectionStatus.value = `当前页面尚未连接登录扩展。已安装扩展时，请确认它有权访问 ${location.origin}（localhost、127.0.0.1 和不同端口分别授权），重新加载扩展后刷新本页。扩展版本只会在连接成功后校验；当前要求 ${extensionMinimumVersion} 或更新。`
     }, 1800)
     extensionMessage('import.hello', { session_id: extensionSession.value?.session_id || '' })
 }
@@ -485,6 +587,55 @@ function openExtensionLogin() {
     loginOpen.value = false
     extensionOpen.value = true
     detectExtension()
+}
+function finishDesktopLoginBrowser() {
+    clearTimeout(desktopLoginBrowserTimer)
+    desktopLoginBrowserTimer = undefined
+    desktopLoginBrowserRequest = ''
+    desktopLoginBrowserOpening.value = false
+}
+function receiveDesktopLoginBrowser(event) {
+    const message = event.data
+    if (
+        !['desktop.loginBrowser.status', 'desktop.loginBrowserStatus'].includes(message?.type) ||
+        !desktopLoginBrowserRequest ||
+        message.requestId !== desktopLoginBrowserRequest ||
+        !['opened', 'failed'].includes(message.state)
+    )
+        return
+    finishDesktopLoginBrowser()
+    extensionError.value = message.state === 'failed'
+    extensionStatus.value =
+        message.message ||
+        (extensionError.value
+            ? '未能打开本机浏览器，请复制管理地址到 Chrome 或 Edge。'
+            : '本机浏览器已打开。首次请安装扩展并允许无痕运行，再开始扩展登录。')
+}
+function openDesktopLoginBrowser() {
+    if (!desktopShell.value || desktopLoginBrowserOpening.value) return
+    const bridge = window.chrome?.webview
+    if (typeof bridge?.postMessage !== 'function') {
+        extensionError.value = true
+        extensionStatus.value = '当前桌面程序不支持直接打开浏览器，请复制管理地址到 Chrome 或 Edge，或更新桌面程序。'
+        return
+    }
+    desktopLoginBrowserOpening.value = true
+    desktopLoginBrowserRequest = globalThis.crypto?.randomUUID?.() || `login-browser-${Date.now()}`
+    extensionError.value = false
+    extensionStatus.value = '正在打开本机浏览器…'
+    desktopLoginBrowserTimer = setTimeout(() => {
+        finishDesktopLoginBrowser()
+        extensionError.value = true
+        extensionStatus.value = '未收到浏览器打开结果，请复制管理地址到 Chrome 或 Edge，或更新桌面程序。'
+    }, 15000)
+    try {
+        // The desktop process selects its own trusted local management URL.
+        bridge.postMessage({ type: 'desktop.openLoginBrowser', requestId: desktopLoginBrowserRequest })
+    } catch {
+        finishDesktopLoginBrowser()
+        extensionError.value = true
+        extensionStatus.value = '未能打开本机浏览器，请复制管理地址到 Chrome 或 Edge。'
+    }
 }
 async function startExtensionLogin() {
     if (desktopShell.value) {
@@ -531,8 +682,12 @@ async function startExtensionLogin() {
     }
 }
 function cancelExtensionLogin() {
-    if (extensionSession.value?.verifying) return
     if (!extensionSession.value) return
+    if (extensionSession.value.verifying) {
+        extensionOpen.value = false
+        ElMessage.info('账号正在后台验证，完成后会自动刷新账号列表。')
+        return
+    }
     extensionMessage('import.cancel.v2', { session_id: extensionSession.value.session_id })
     extensionStatus.value = '正在结束登录窗口…'
     extensionError.value = false
@@ -543,7 +698,7 @@ function receiveExtensionMessage(event) {
     const message = event.data || {}
     if (message.source !== 'lay4flow-import-extension' || !message.extension_id) return
     if (message.type === 'import.ready') {
-        if (extensionSession.value && extensionId.value && message.extension_id !== extensionId.value) return
+        if (extensionReady.value && extensionSession.value && extensionId.value && message.extension_id !== extensionId.value) return
         if (!compatibleExtensionVersion(message.version)) {
             if (extensionReady.value) return
             stopExtensionDetection()
@@ -553,6 +708,10 @@ function receiveExtensionMessage(event) {
                     : '未知版本'
             extensionDetectionStatus.value = `检测到旧扩展 ${version}，当前页面需要 ${extensionMinimumVersion} 或更新版本。请停用旧扩展，下载本窗口提供的新版扩展并加载，随后刷新管理页。`
             return
+        }
+        if (extensionSession.value && extensionId.value && message.extension_id !== extensionId.value) {
+            clearExtensionSession()
+            extensionStatus.value = '已连接重新加载的扩展，请重新开始登录；已提交后台的任务继续处理。'
         }
         stopExtensionDetection()
         extensionId.value = message.extension_id
@@ -565,6 +724,10 @@ function receiveExtensionMessage(event) {
     const current = extensionSession.value
     if (!current || message.session_id !== current.session_id) return
     if (message.type === 'import.result' && message.success) {
+        if (message.result?.action === 'queued' || message.action === 'queued') {
+            acknowledgeExtensionQueue(current.session_id)
+            return
+        }
         const email = message.result?.email || message.email || 'Google 账号'
         clearExtensionSession()
         extensionStatus.value = `账号已验证并保存：${email}`
@@ -587,18 +750,29 @@ function receiveExtensionMessage(event) {
         extensionStatus.value = '上次扩展登录已结束，可查看账号列表或重新开始。'
         load(true, true)
     } else if (['import.accepted', 'import.status', 'import.progress'].includes(message.type)) {
+        if (message.state === 'queued') {
+            acknowledgeExtensionQueue(current.session_id)
+            return
+        }
         if (['submitting', 'verifying', 'closing'].includes(message.state)) {
             extensionSession.value.verifying = true
             sessionStorage.setItem(extensionStorage, JSON.stringify(extensionSession.value))
         }
-        extensionStatus.value = extensionProgress[message.state] || '请在指纹浏览器完成 Google Flow 登录。'
+        extensionStatus.value =
+            message.state === 'submitting'
+                ? '登录态已读取，服务器正在后台验证；可以关闭此窗口，完成后账号会自动出现在列表。'
+                : extensionProgress[message.state] || '请在浏览器中完成 Google Flow 登录。'
     }
 }
 let pollTimer
 let loadingPromise
+let accountReadPromise
+let auxiliaryPromise
+let auxiliaryQuotaVersion
+let auxiliaryAccountVersion
 let quotaPromise
 let quotaVersion = 0
-let nextQuotaRefreshAt = 0
+let nextQuotaRefreshAt = Date.now() + 15 * 60 * 1000
 let disposed = false
 const form = reactive({})
 const defaults = () => ({
@@ -663,6 +837,7 @@ const filtered = computed(() =>
         return (
             (!q || `${row.email} ${row.name || ''} ${row.remark || ''} ${row.id}`.toLowerCase().includes(q)) &&
             (platform.value === 'all' || (platform.value === 'vids' ? !!row.vids : !row.vidsOnly)) &&
+            (plan.value === 'all' || accountPlan(row) === plan.value) &&
             (state.value === 'all' ||
                 (state.value === 'active'
                     ? row.is_active
@@ -671,7 +846,7 @@ const filtered = computed(() =>
                       : row.at_expired ||
                         ['failed', 'login_required', 'config_error', 'retrying'].includes(row.refresh_status) ||
                         row.refresh_error ||
-                        (row.vids?.enabled && (!row.vids.ready || quotaInfo(row).error || quotaInfo(row).stale))))
+                        (row.vids?.enabled && (vidsAttention(row.vids) || quotaInfo(row).error || quotaInfo(row).stale))))
         )
     }),
 )
@@ -690,7 +865,6 @@ const metrics = computed(() => [
         label: 'Flow 总余额',
         value: accounts.value.reduce((sum, row) => sum + Number(row.credits || 0), 0).toLocaleString(),
         note: '可用于图片与视频创作',
-        icon: MagicStick,
         color: 'blue',
     },
     {
@@ -763,6 +937,9 @@ function quotaInfo(row) {
     }
 }
 const sessionLabel = (row) =>
+    (row.generation_protection
+        ? { cooldown: '生成冷却中', abnormal: '生成异常', disabled: '规则停用' }[row.generation_protection.status]
+        : '') ||
     ({
         refreshing: '正在刷新',
         login_required: '需要重新登录',
@@ -777,13 +954,29 @@ const sessionLabel = (row) =>
           : row.at_expiring_within_1h
             ? '即将刷新'
             : '会话正常')
-const tier = (value) =>
-    ({ PAYGATE_TIER_NOT_PAID: 'Free', PAYGATE_TIER_ONE: 'Pro', PAYGATE_TIER_TWO: 'Ultra' })[value] || value || 'Free'
+function tierKey(value) {
+    const raw = typeof value === 'string' ? value.trim() : ''
+    const known = {
+        PAYGATE_TIER_NOT_PAID: 'free',
+        PAYGATE_TIER_ZERO: 'plus',
+        PAYGATE_TIER_ONE: 'pro',
+        PAYGATE_TIER_TWO: 'ultra',
+        PAYGATE_TIER_UNSUBSCRIBED_WITH_CREDITS: 'unsubscribed',
+    }
+    return Object.hasOwn(known, raw) ? known[raw] : !raw || raw === 'PAYGATE_TIER_UNSPECIFIED' ? 'unknown' : 'other'
+}
+const accountPlan = (row) => row.vidsOnly ? 'none' : tierKey(row.user_paygate_tier)
+const tier = (value) => ({ free: 'Free', plus: 'Plus', pro: 'Pro', ultra: 'Ultra', unsubscribed: '未订阅（有积分）', unknown: '未知', other: '其他等级' })[tierKey(value)]
+const tierType = (value) => ({ plus: 'success', pro: 'success', ultra: 'warning', free: 'info', unsubscribed: 'info', unknown: 'info', other: 'info' })[tierKey(value)]
+const tierTitle = (row) => row.vidsOnly ? '此记录未接入 Flow，无 Flow 套餐信息' :
+    `最近同步的 Flow 套餐：${tier(row.user_paygate_tier)}；上游等级：${row.user_paygate_tier || '未返回'}。可通过维护登录态重新同步。`
 const vidsState = (row) =>
     !row
         ? '未接入'
         : row.enabled === false
           ? '已暂停'
+          : row.protection
+            ? vidsProtectionLabel(row.protection)
           : row.identity_verified === false
             ? '身份待核对'
             : {
@@ -792,6 +985,24 @@ const vidsState = (row) =>
                   identity_mismatch: '身份待核对',
                   unavailable: '待重新连接',
               }[row.session_state] || (row.ready ? '会话就绪' : '待重新连接')
+const vidsProtectionLabel = (value) =>
+    ({ cooldown: '生成冷却中', abnormal: '生成异常', disabled: '规则停用' })[value?.status] || '生成保护中'
+const vidsMaintenanceLabel = (value) =>
+    ({ ready: '维护正常', probing: '正在校验', recovering: '正在修复', retry_wait: '等待重试', unavailable: '暂不可用', disabled: '维护已关闭', paused: '已暂停', busy: '等待空闲' })[value?.status] || '等待维护'
+const vidsSessionTitle = (row) => {
+    if (!row) return 'Vids 未接入'
+    return [
+        row.identity_verified ? '身份已验证' : '身份待验证',
+        row.runtime_error ? quotaError(row.runtime_error) : '',
+        row.maintenance ? vidsMaintenanceLabel(row.maintenance) : '',
+        row.maintenance?.last_probe_at ? '上次维护 ' + date(row.maintenance.last_probe_at) : '',
+        row.maintenance?.next_probe_at ? '下次维护 ' + date(row.maintenance.next_probe_at) : '',
+        row.maintenance?.last_error || '',
+        row.protection ? vidsProtectionTitle(row.protection) : '',
+    ].filter(Boolean).join(' · ')
+}
+const vidsProtectionTitle = (value) =>
+    `${value?.reason || vidsProtectionLabel(value)}${value?.until ? ' · 恢复于 ' + date(value.until) : ''}`
 const profileLabel = (value) =>
     ({
         ready: '已就绪',
@@ -811,8 +1022,8 @@ const flowAttention = (row) =>
         ['failed', 'login_required', 'config_error', 'retrying'].includes(row.refresh_status)
     )
 const vidsAttention = (row) =>
-    !!(row?.enabled !== false && (!row?.ready || row?.identity_verified === false || row?.runtime_error))
-watch([search, platform, state, pageSize], () => {
+    !!(row?.protection || row?.enabled !== false && (!row?.ready || row?.identity_verified === false || row?.runtime_error || row?.maintenance?.last_error))
+watch([search, platform, state, plan, pageSize], () => {
     page.value = 1
 })
 watch(
@@ -835,45 +1046,57 @@ function ensure(result) {
     }
     return result
 }
+function loadAuxiliary(version, accountVersion) {
+    if (auxiliaryPromise && auxiliaryQuotaVersion === version && auxiliaryAccountVersion === accountVersion) return
+    auxiliaryQuotaVersion = version
+    auxiliaryAccountVersion = accountVersion
+    const pending = Promise.allSettled([
+        api.get('/api/admin/vids/accounts/detail').then((result) => {
+            if (disposed || version !== quotaVersion) return
+            vids.value = result.accounts || []
+            vidsError.value = ''
+        }).catch((error) => {
+            if (!disposed && version === quotaVersion) vidsError.value = error.message
+        }),
+        api.get('/api/admin/vids/onboard/candidates').then((result) => {
+            if (!disposed && accountVersion === accountMutationVersion) candidates.value = result.accounts || []
+        }),
+        api.get('/api/proxy/pool').then((result) => {
+            if (disposed || accountVersion !== accountMutationVersion) return
+            proxyPool.value = result.entries || []
+            proxyPoolError.value = ''
+        }).catch((error) => {
+            if (!disposed && accountVersion === accountMutationVersion) proxyPoolError.value = error.message
+        }),
+    ]).finally(() => {
+        if (auxiliaryPromise === pending) auxiliaryPromise = null
+    })
+    auxiliaryPromise = pending
+}
 async function load(silent = false, fresh = false) {
+    if (disposed) return
     if (fresh) quotaVersion++
     if (loadingPromise) {
-        const pending = loadingPromise
-        await pending
+        await loadingPromise
         return fresh ? load(silent) : undefined
     }
-    if (!silent) loading.value = true
-    const version = quotaVersion
+    if (!silent && !hasAccountSnapshot) loading.value = true
     const accountVersion = accountMutationVersion
-    loadingPromise = (async () => {
-        const result = await Promise.allSettled([
-            api.get('/api/tokens'),
-            api.get('/api/admin/vids/accounts/detail'),
-            api.get('/api/admin/vids/onboard/candidates'),
-            api.get('/api/token-refresh/config'),
-            api.get('/api/proxy/pool'),
-        ])
-        if (result[0].status === 'fulfilled' && accountVersion === accountMutationVersion) {
-            accounts.value = result[0].value
-            loadError.value = ''
-        } else if (result[0].status === 'rejected') loadError.value = result[0].reason.message
-        if (result[1].status === 'fulfilled') {
-            if (version === quotaVersion) {
-                vids.value = result[1].value.accounts || []
-                vidsError.value = ''
-            }
-        } else if (version === quotaVersion) vidsError.value = result[1].reason.message
-        if (result[2].status === 'fulfilled') candidates.value = result[2].value.accounts || []
-        if (result[3].status === 'fulfilled') protocolRefresh.value = result[3].value.config.protocol_refresh_enabled
-        if (result[4].status === 'fulfilled' && accountVersion === accountMutationVersion) {
-            proxyPool.value = result[4].value.entries || []
-            proxyPoolError.value = ''
-        } else if (result[4].status === 'rejected') proxyPoolError.value = result[4].reason.message
-    })().finally(() => {
-        loading.value = false
+    accountReadPromise = api.get('/api/tokens').then((result) => {
+        if (disposed || accountVersion !== accountMutationVersion) return
+        accounts.value = result
+        hasAccountSnapshot = true
+        loadError.value = ''
+    }).catch((error) => {
+        if (error.status === 401) clearAccountSnapshot()
+        if (!disposed && accountVersion === accountMutationVersion) loadError.value = error.message
+    }).finally(() => {
+        if (!disposed) loading.value = false
         loadingPromise = null
-        refreshVidsQuota()
     })
+    loadingPromise = accountReadPromise
+    // Optional reads update independently and never hold refreshes or mutations.
+    loadAuxiliary(quotaVersion, accountVersion)
     return loadingPromise
 }
 
@@ -891,13 +1114,13 @@ async function refreshVidsQuota() {
     quotaPromise = api
         .get('/api/admin/vids/accounts/detail?refresh=true')
         .then((result) => {
-            if (version !== quotaVersion) return
+            if (disposed || version !== quotaVersion) return
             vids.value = result.accounts || []
             vidsError.value = ''
             quotaVersion++
         })
         .catch((error) => {
-            if (version === quotaVersion) vidsError.value = error.message
+            if (!disposed && version === quotaVersion) vidsError.value = error.message
         })
         .finally(() => {
             nextQuotaRefreshAt = Date.now() + 15 * 60 * 1000
@@ -908,8 +1131,14 @@ async function refreshVidsQuota() {
 }
 function refreshVisible() {
     if (!document.hidden && loginSession.value) pollLoginStatus()
-    if (!document.hidden) refreshImportJobs()
-    if (!document.hidden && !editorOpen.value && quickSavingId.value === null) return load(true)
+    if (!document.hidden) {
+        refreshImportJobs()
+        refreshExtensionJobs()
+    }
+    if (!document.hidden && !editorOpen.value && quickSavingId.value === null) {
+        refreshVidsQuota()
+        return load(true)
+    }
 }
 function openEditor(row) {
     if (!row) return
@@ -918,9 +1147,9 @@ function openEditor(row) {
         ...row,
         project_id: row.current_project_id || '',
         project_name: row.current_project_name || '',
+        proxy_url: row.proxy_url || '',
         login_password: '',
     })
-    editorTab.value = 'identity'
     editorOpen.value = true
 }
 function openDetail(row) {
@@ -953,12 +1182,15 @@ function accountSettingLocked(row) {
     )
 }
 async function toggleAccountSetting(row, field, value) {
-    if (accountSettingLocked(row) || !['is_active', 'image_enabled', 'video_enabled'].includes(field)) return
+    if (
+        accountSettingLocked(row) ||
+        !['is_active', 'image_enabled', 'video_enabled', 'auto_refresh_enabled'].includes(field)
+    ) return
     const key = `${row.id}:settings`
     busy.add(key)
     try {
         // Finish older reads first; subsequent polls are invalidated after the write.
-        await loadingPromise
+        await accountReadPromise
         const current = accounts.value.find((item) => item.id === row.id)
         if (!current || (current[field] !== false) === value) return
         if (field === 'is_active') ensure(await api.post(`/api/tokens/${row.id}/${value ? 'enable' : 'disable'}`, {}))
@@ -966,17 +1198,41 @@ async function toggleAccountSetting(row, field, value) {
         accountMutationVersion++
         quotaVersion++
         accounts.value = accounts.value.map((item) => (item.id === row.id ? { ...item, [field]: value } : item))
-        vids.value = vids.value.map((item) =>
-            item.token_id === row.id ? { ...item, [field === 'is_active' ? 'enabled' : field]: value } : item,
-        )
+        if (field !== 'auto_refresh_enabled')
+            vids.value = vids.value.map((item) =>
+                item.token_id === row.id ? { ...item, [field === 'is_active' ? 'enabled' : field]: value } : item,
+            )
         if (quickDrafts[row.id] && field !== 'is_active') {
             quickDrafts[row.id][field] = value
             quickBaselines[row.id][field] = value
         }
         ElMessage.success(
-            `${field === 'is_active' ? '账号' : field === 'image_enabled' ? '图片生成' : '视频生成'}已${value ? '开启' : '暂停'}`,
+            `${field === 'is_active' ? '账号' : field === 'auto_refresh_enabled' ? '自动刷新' : field === 'image_enabled' ? '图片生成' : '视频生成'}已${value ? '开启' : '暂停'}`,
         )
     } catch (error) {
+        notifyError(error)
+    } finally {
+        busy.delete(key)
+    }
+}
+async function saveInlineRemark(row) {
+    if (accountSettingLocked(row)) return
+    const draft = quickDraft(row)
+    const remark = draft.remark
+    if (typeof remark !== 'string' || remark.length > 500) return
+    const key = `${row.id}:settings`
+    busy.add(key)
+    try {
+        await accountReadPromise
+        const current = accounts.value.find((item) => item.id === row.id)
+        if (!current || remark === (current.remark || '')) return
+        ensure(await api.put(`/api/tokens/${row.id}`, { remark }))
+        accountMutationVersion++
+        accounts.value = accounts.value.map((item) => (item.id === row.id ? { ...item, remark } : item))
+        quickBaselines[row.id].remark = remark
+        quickErrors[row.id] = ''
+    } catch (error) {
+        quickErrors[row.id] = error.message || '备注保存失败'
         notifyError(error)
     } finally {
         busy.delete(key)
@@ -1053,6 +1309,34 @@ async function action(row, type) {
         await load(true, true)
     } catch (error) {
         if (error !== 'cancel' && error !== 'close') notifyError(error)
+    } finally {
+        busy.delete(key)
+    }
+}
+async function clearGenerationProtection(row) {
+    const key = `${row.id}:clear-generation-protection`
+    if (busy.has(key)) return
+    busy.add(key)
+    try {
+        ensure(await api.post('/api/account-error-policy/clear', { token_id: row.id }))
+        ElMessage.success(row.is_active ? '生成保护已解除' : '生成保护已解除；账号仍保持停用，可手动启用')
+        await load(true, true)
+    } catch (error) {
+        notifyError(error)
+    } finally {
+        busy.delete(key)
+    }
+}
+async function clearVidsProtection(row) {
+    const key = `${row.id}:clear-vids-protection`
+    if (busy.has(key)) return
+    busy.add(key)
+    try {
+        ensure(await api.post(`/api/admin/vids/accounts/${row.id}/protection/clear`, {}))
+        ElMessage.success(row.is_active ? 'Vids 生成保护已解除' : 'Vids 生成保护已解除；账号仍保持手动停用')
+        await load(true, true)
+    } catch (error) {
+        notifyError(error)
     } finally {
         busy.delete(key)
     }
@@ -1173,11 +1457,15 @@ async function importAccounts() {
                 ? input.accounts
                 : Array.isArray(input)
                   ? input
-                  : input?.format === 'lay4flow-cloak-session'
+                  : input?.format === 'lay4flow-cloak-session' || (input?.cookies && typeof input.cookies === 'object')
                     ? [input]
                     : null
-        if (!Array.isArray(entries) || !entries.length || entries.some((entry) => !entry || typeof entry !== 'object'))
-            throw new Error('请选择有效的 Profile JSON，或旧版账号 JSON 数组')
+        if (
+            !Array.isArray(entries) ||
+            !entries.length ||
+            entries.some((entry) => !entry || typeof entry !== 'object' || Array.isArray(entry))
+        )
+            throw new Error('请粘贴有效的 Cookie JSON、Profile JSON 或账号数组')
         if (!importRequest || importRequest.text !== source || importRequest.proxy !== selectedProxy) {
             importRequest = {
                 text: source,
@@ -1238,18 +1526,6 @@ async function copyFlowCookieCombo(row) {
         } else notifyError(error)
     } finally {
         busy.delete(key)
-    }
-}
-async function toggleRefresh(value) {
-    refreshSaving.value = true
-    try {
-        ensure(await api.post('/api/token-refresh/enabled', { enabled: value }))
-        ElMessage.success('自动刷新设置已保存')
-    } catch (error) {
-        protocolRefresh.value = !value
-        notifyError(error)
-    } finally {
-        refreshSaving.value = false
     }
 }
 async function onboardAll() {
@@ -1639,8 +1915,10 @@ onMounted(() => {
     detectNativePresentation()
     load()
     refreshImportJobs()
+    refreshExtensionJobs()
     document.addEventListener('visibilitychange', refreshVisible)
     window.addEventListener?.('message', receiveExtensionMessage)
+    window.chrome?.webview?.addEventListener('message', receiveDesktopLoginBrowser)
     try {
         const stored = JSON.parse(sessionStorage.getItem(extensionStorage) || 'null')
         if (stored?.session_id && Number(stored.expires_at) > Date.now() / 1000) {
@@ -1688,22 +1966,24 @@ onMounted(() => {
 })
 onUnmounted(() => {
     stopExtensionDetection()
+    finishDesktopLoginBrowser()
     disposed = true
     quotaVersion++
     clearInterval(pollTimer)
     clearInterval(importJobTimer)
+    clearInterval(extensionJobsTimer)
     clearInterval(loginStatusTimer)
     document.removeEventListener('visibilitychange', refreshVisible)
     window.removeEventListener?.('message', receiveExtensionMessage)
+    window.chrome?.webview?.removeEventListener('message', receiveDesktopLoginBrowser)
 })
 </script>
 
 <template>
-    <div class="accounts-view">
+    <div class="accounts-view management-view">
         <header class="page-heading">
             <div>
-                <h1>账号小队</h1>
-                <p>照顾好每一份灵感，从账号、会话到创作额度。</p>
+                <h1>账号管理</h1>
             </div>
             <div class="page-actions">
                 <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
@@ -1781,25 +2061,46 @@ onUnmounted(() => {
                 </div>
             </details>
         </section>
-        <div class="crew-metrics">
-            <article v-for="metric in metrics" :key="metric.label" class="crew-metric" :class="metric.color">
-                <div class="metric-top">
-                    <span>{{ metric.label }}</span>
-                    <el-icon><component :is="metric.icon" /></el-icon>
+        <section
+            v-if="extensionJobs.length || extensionJobsError"
+            class="surface profile-import-jobs extension-import-jobs"
+            aria-label="扩展登录队列"
+        >
+            <div class="profile-import-heading">
+                <div>
+                    <strong>扩展登录队列</strong>
+                    <span>
+                        {{ activeExtensionJobs.length ? `${activeExtensionJobs.length} 个任务处理中，可继续添加账号` : '已保存、失败记录均保留，刷新页面后仍可查看' }}
+                    </span>
                 </div>
-                <div v-if="metric.quotas" class="metric-quotas">
-                    <div v-for="quota in metric.quotas" :key="quota.kind">
-                        <span>{{ quota.kind === 'image' ? '图片' : '视频' }}</span>
-                        <strong>
-                            {{ quota.value }}
-                            <small v-if="quota.partial || quota.stale">{{ quota.partial ? '部分' : '历史' }}</small>
-                        </strong>
+                <el-button size="small" :loading="extensionJobsLoading" @click="refreshExtensionJobs">刷新验证进度</el-button>
+            </div>
+            <p v-if="extensionJobsError" class="profile-import-jobs-error" role="status">{{ extensionJobsError }}</p>
+            <p class="field-note profile-import-retention">入队后仍需完成身份和 Profile 验证；验证失败的登录资料会保留，可直接重试。</p>
+            <ul class="extension-job-list">
+                <li v-for="job in extensionJobs" :key="job.id" :data-job-id="job.id" :class="{ failed: job.state === 'failed' }">
+                    <div class="extension-job-summary">
+                        <strong>{{ job.email || `登录任务 ${job.id.slice(0, 8)}` }}</strong>
+                        <el-tag :type="job.state === 'completed' ? 'success' : job.state === 'failed' ? 'danger' : 'info'" size="small">
+                            {{ extensionJobState(job) }}
+                        </el-tag>
+                        <small>{{ Math.floor(job.elapsed_seconds || 0) }} 秒 · 第 {{ job.attempts || 0 }} 次验证</small>
                     </div>
-                </div>
-                <strong v-else>{{ metric.value }}</strong>
-                <p>{{ metric.note }}</p>
-            </article>
-        </div>
+                    <span class="extension-job-message">{{ job.message }}</span>
+                    <span v-if="job.error?.network_step" class="field-note">{{ loginNetworkStepLabel(job.error.network_step) }}</span>
+                    <el-button
+                        v-if="job.can_retry"
+                        size="small"
+                        type="primary"
+                        :loading="extensionJobRetrying.has(job.id)"
+                        :aria-label="`重试扩展登录任务 ${job.id}`"
+                        @click="retryExtensionJob(job)"
+                    >
+                        重试验证
+                    </el-button>
+                </li>
+            </ul>
+        </section>
         <el-alert v-if="loadError" :title="loadError" type="error" show-icon :closable="false" class="account-alert">
             <template #default><el-button size="small" @click="load()">重新读取</el-button></template>
         </el-alert>
@@ -1811,23 +2112,23 @@ onUnmounted(() => {
             show-icon
             class="account-alert"
         />
-        <section class="surface account-surface">
-            <div class="section-heading">
-                <div>
-                    <h2>
-                        成员档案
-                        <span class="count-label">{{ rows.length }}</span>
-                    </h2>
-                    <p>Flow 积分读取本地记录 · Vids 额度每 15 分钟按需更新</p>
-                </div>
-                <div class="refresh-toggle">
-                    <span>自动刷新 ST</span>
-                    <el-tooltip content="使用已保存的 Profile 或 Google Cookies 刷新会话；AT 自动刷新始终开启">
-                        <el-switch v-model="protocolRefresh" :loading="refreshSaving" @change="toggleRefresh" />
-                    </el-tooltip>
+        <section class="surface account-surface management-surface">
+            <div class="section-heading management-summary-row">
+                <div class="management-summary" aria-label="账号统计">
+                    <span v-for="metric in metrics" :key="metric.label">
+                        {{ metric.label }}
+                        <template v-if="metric.quotas">
+                            <template v-for="quota in metric.quotas" :key="quota.kind">
+                                {{ quota.kind === 'image' ? '图片' : '视频' }}
+                                <strong>{{ quota.value }}</strong>
+                                <small v-if="quota.partial || quota.stale">{{ quota.partial ? '部分' : '历史' }}</small>
+                            </template>
+                        </template>
+                        <strong v-else>{{ metric.value }}</strong>
+                    </span>
                 </div>
             </div>
-            <div class="account-toolbar">
+            <div class="account-toolbar management-toolbar">
                 <div class="filters">
                     <el-input
                         v-model="search"
@@ -1846,6 +2147,17 @@ onUnmounted(() => {
                         <el-option label="已启用" value="active" />
                         <el-option label="已暂停" value="inactive" />
                         <el-option label="需要关注" value="attention" />
+                    </el-select>
+                    <el-select v-model="plan" aria-label="筛选套餐">
+                        <el-option label="全部套餐" value="all" />
+                        <el-option label="Free" value="free" />
+                        <el-option label="Plus" value="plus" />
+                        <el-option label="Pro" value="pro" />
+                        <el-option label="Ultra" value="ultra" />
+                        <el-option label="未订阅（有积分）" value="unsubscribed" />
+                        <el-option label="未知" value="unknown" />
+                        <el-option label="其他等级" value="other" />
+                        <el-option label="未接入 Flow" value="none" />
                     </el-select>
                 </div>
                 <div class="table-tools">
@@ -1940,16 +2252,18 @@ onUnmounted(() => {
                 </el-button>
             </div>
             <div v-if="loading && !rows.length" class="table-skeleton"><el-skeleton :rows="6" animated /></div>
+            <div v-else class="account-table-wrap">
             <el-table
                 ref="accountsTable"
-                v-else
                 :data="paginated"
                 row-key="id"
                 :expand-row-keys="expandedAccountIds"
                 @expand-change="expandQuickAccount"
                 @selection-change="updateAccountSelection"
                 @sort-change="Object.assign(tableSort, $event)"
-                class="accounts-table"
+                class="accounts-table management-table"
+                height="100%"
+                :scrollbar-tabindex="0"
             >
                 <el-table-column type="selection" width="46" reserve-selection />
                 <el-table-column type="expand" width="34">
@@ -1974,119 +2288,32 @@ onUnmounted(() => {
                         <p v-else class="account-quick-unavailable">此成员仅接入 Vids，暂无 Flow 账号配置。</p>
                     </template>
                 </el-table-column>
-                <el-table-column label="账号成员" min-width="230">
+                <el-table-column label="ID" prop="id" width="64" sortable="custom" />
+                <el-table-column label="账号" min-width="220">
                     <template #default="{ row }">
-                        <button class="account-identity" @click="openDetail(row)">
-                            <span class="account-avatar" :class="'avatar-' + (row.id % 4)">
-                                {{ (row.name || row.email || '?').slice(0, 1).toUpperCase() }}
-                            </span>
+                        <button class="account-identity" :title="row.email || '账号 #' + row.id" @click="openDetail(row)">
                             <span class="identity-text">
                                 <strong>{{ row.email || '账号 #' + row.id }}</strong>
-                                <small>
-                                    {{ row.name || '成员 #' + row.id }}
-                                    <span v-if="row.remark">· {{ row.remark }}</span>
-                                </small>
-                                <span class="platform-tags">
-                                    <el-tag v-if="!row.vidsOnly" size="small" type="info" effect="plain">Flow</el-tag>
-                                    <el-tag
-                                        v-if="row.vids"
-                                        size="small"
-                                        :type="row.vids.identity_verified ? 'success' : 'warning'"
-                                        effect="plain"
-                                    >
-                                        Vids
-                                    </el-tag>
-                                </span>
+                                <small>{{ row.name || '成员 #' + row.id }}</small>
                             </span>
                         </button>
-                        <button
-                            v-if="!row.vidsOnly"
-                            class="account-proxy-trigger"
-                            :aria-expanded="expandedAccountIds.includes(row.id)"
-                            :title="
-                                accountProxy(row)?.proxy_url || row.proxy_url || '展开后选择代理、复制连接或编辑配置'
-                            "
-                            @click="toggleQuickAccount(row)"
-                        >
-                            <el-icon><Connection /></el-icon>
-                            <span>{{ accountProxySummary(row) }}</span>
-                            <el-icon class="quick-chevron" :class="{ expanded: expandedAccountIds.includes(row.id) }">
-                                <ArrowRight />
-                            </el-icon>
-                        </button>
                     </template>
                 </el-table-column>
-                <el-table-column label="创作额度" min-width="240" sortable="custom" prop="credits">
+                <el-table-column label="平台" width="86">
                     <template #default="{ row }">
-                        <div v-if="!row.vidsOnly" class="flow-quota-line">
-                            <span>Flow 积分</span>
-                            <strong class="balance-text">{{ quotaValue(row.credits) }}</strong>
-                            <el-button
-                                text
-                                circle
-                                size="small"
-                                :icon="Refresh"
-                                :loading="busy.has(row.id + ':refresh-credits')"
-                                :aria-label="`刷新 ${row.email || row.id} 的 Flow 积分`"
-                                @click="action(row, 'refresh-credits')"
-                            />
-                        </div>
-                        <div
-                            v-if="row.vids"
-                            class="vids-quota-cell"
-                            :class="{ 'quota-attention': quotaInfo(row).error || quotaInfo(row).stale }"
-                        >
-                            <div class="vids-quota-heading">
-                                <span>Vids 剩余 / 总量</span>
-                                <el-button
-                                    text
-                                    circle
-                                    size="small"
-                                    :icon="Refresh"
-                                    :loading="busy.has(row.id + ':quota')"
-                                    :aria-label="`刷新 ${row.email || row.id} 的 Vids 额度`"
-                                    @click="action(row, 'quota')"
-                                />
-                            </div>
-                            <div class="vids-quota-values">
-                                <div v-for="kind in ['image', 'video']" :key="kind" class="vids-quota-kind">
-                                    <span>
-                                        <el-icon>
-                                            <Picture v-if="kind === 'image'" />
-                                            <VideoCamera v-else />
-                                        </el-icon>
-                                        {{ kind === 'image' ? '图片' : '视频' }}
-                                    </span>
-                                    <strong
-                                        :class="{
-                                            'quota-empty': quotaNumber(row.vids.last_quota?.[kind]?.available) === 0,
-                                        }"
-                                    >
-                                        {{ quotaValue(row.vids.last_quota?.[kind]?.available) }}
-                                        <small>/ {{ quotaValue(row.vids.last_quota?.[kind]?.total) }}</small>
-                                    </strong>
-                                </div>
-                            </div>
-                            <div class="quota-update" aria-live="polite">
-                                <span>{{ quotaInfo(row).label }}</span>
-                                <time
-                                    v-if="quotaInfo(row).updated"
-                                    :title="date(quotaInfo(row).updated)"
-                                    :datetime="quotaInfo(row).updated"
-                                >
-                                    {{
-                                        parseDate(quotaInfo(row).updated).toLocaleTimeString('zh-CN', { hour12: false })
-                                    }}
-                                </time>
-                            </div>
-                            <p v-if="quotaInfo(row).error" class="quota-inline-error" :title="quotaInfo(row).error">
-                                {{ quotaInfo(row).error }}
-                            </p>
-                        </div>
-                        <small v-else class="cell-note">{{ tier(row.user_paygate_tier) }} · Vids 未接入</small>
+                        <span class="account-platforms">
+                            <span v-if="!row.vidsOnly">Flow</span>
+                            <span v-if="row.vids" :class="{ 'account-warning': !row.vids.identity_verified }">Vids</span>
+                        </span>
                     </template>
                 </el-table-column>
-                <el-table-column label="状态" width="90">
+                <el-table-column label="套餐" width="130">
+                    <template #default="{ row }">
+                        <span v-if="row.vidsOnly" class="muted" :title="tierTitle(row)">—</span>
+                        <el-tag v-else class="account-plan-tag" :type="tierType(row.user_paygate_tier)" effect="light" size="small" :title="tierTitle(row)">{{ tier(row.user_paygate_tier) }}</el-tag>
+                    </template>
+                </el-table-column>
+                <el-table-column label="状态" width="88">
                     <template #default="{ row }">
                         <el-switch
                             class="account-status-switch"
@@ -2094,15 +2321,69 @@ onUnmounted(() => {
                             :disabled="accountSettingLocked(row)"
                             :loading="accountSettingBusy(row)"
                             :aria-label="`${row.email || row.id} 账号状态`"
-                            inline-prompt
-                            active-text="已启用"
+                            inline-prompt active-text="已启用"
                             :inactive-text="row.ban_reason === 'refresh_failed' ? '待恢复' : '已暂停'"
                             :width="66"
                             @change="toggleAccountSetting(row, 'is_active', $event)"
                         />
                     </template>
                 </el-table-column>
-                <el-table-column label="创作能力" width="120">
+                <el-table-column label="Flow 积分" width="114" sortable="custom" prop="credits" align="right">
+                    <template #default="{ row }">
+                        <div v-if="!row.vidsOnly" class="account-number-cell">
+                            <strong class="balance-text">{{ quotaValue(row.credits) }}</strong>
+                            <el-button
+                                text circle size="small" :icon="Refresh"
+                                :loading="busy.has(row.id + ':refresh-credits')"
+                                :aria-label="`刷新 ${row.email || row.id} 的 Flow 积分`"
+                                @click="action(row, 'refresh-credits')"
+                            />
+                        </div>
+                        <span v-else class="muted">—</span>
+                    </template>
+                </el-table-column>
+                <el-table-column
+                    v-for="kind in ['image', 'video']"
+                    :key="kind"
+                    :label="`Vids ${kind === 'image' ? '图片' : '视频'}`"
+                    width="122"
+                    align="right"
+                >
+                    <template #default="{ row }">
+                        <div v-if="row.vids" class="account-number-cell" :class="{ 'account-warning': quotaInfo(row).error || quotaInfo(row).stale }">
+                            <span :title="`${quotaInfo(row).label}${quotaInfo(row).updated ? ' · ' + date(quotaInfo(row).updated) : ''}${quotaInfo(row).error ? ' · ' + quotaInfo(row).error : ''}`">
+                                <strong :class="{ 'quota-empty': quotaNumber(row.vids.last_quota?.[kind]?.available) === 0 }">{{ quotaValue(row.vids.last_quota?.[kind]?.available) }}</strong>
+                                <small>/ {{ quotaValue(row.vids.last_quota?.[kind]?.total) }}</small>
+                                <sup v-if="quotaInfo(row).error || quotaInfo(row).stale">*</sup>
+                            </span>
+                            <el-button
+                                v-if="kind === 'video'"
+                                text circle size="small" :icon="Refresh"
+                                :loading="busy.has(row.id + ':quota')"
+                                :aria-label="`刷新 ${row.email || row.id} 的 Vids 额度`"
+                                @click="action(row, 'quota')"
+                            />
+                        </div>
+                        <span v-else class="muted">未接入</span>
+                    </template>
+                </el-table-column>
+                <el-table-column label="自动刷新" width="110">
+                    <template #default="{ row }">
+                        <div v-if="!row.vidsOnly" class="account-inline-refresh">
+                            <el-switch
+                                :model-value="row.auto_refresh_enabled !== false"
+                                size="small"
+                                :disabled="accountSettingLocked(row)"
+                                :loading="accountSettingBusy(row)"
+                                :aria-label="`${row.email || row.id} 自动刷新`"
+                                @change="toggleAccountSetting(row, 'auto_refresh_enabled', $event)"
+                            />
+                            <span>{{ row.refresh_interval_minutes || (row.browser_profile_source === 'cloak' ? 30 : 120) }} 分</span>
+                        </div>
+                        <span v-else class="muted">—</span>
+                    </template>
+                </el-table-column>
+                <el-table-column label="创作能力" width="144">
                     <template #default="{ row }">
                         <div class="capability-icons">
                             <el-tooltip
@@ -2135,48 +2416,78 @@ onUnmounted(() => {
                         </div>
                     </template>
                 </el-table-column>
-                <el-table-column label="会话健康" min-width="195">
+                <el-table-column label="会话状态" min-width="220">
                     <template #default="{ row }">
                         <div class="account-list-health">
-                            <span
-                                v-if="!row.vidsOnly"
-                                class="session-status"
-                                :class="{ attention: flowAttention(row) }"
-                            >
-                                <i class="status-dot" />
-                                <b>Flow</b>
-                                {{ sessionLabel(row) }}
+                            <span v-if="!row.vidsOnly" class="session-status" :class="{ attention: flowAttention(row) }" :title="row.refresh_error || row.browser_profile_error || sessionLabel(row)">
+                                <i class="status-dot" /><b>Flow</b>{{ sessionLabel(row) }}
                             </span>
-                            <span
-                                class="session-status"
-                                :class="{ attention: row.vids && vidsAttention(row.vids), unlinked: !row.vids }"
-                            >
-                                <i class="status-dot" />
-                                <b>Vids</b>
-                                {{ vidsState(row.vids) }}
+                            <span class="session-status" :class="{ attention: row.vids && vidsAttention(row.vids), unlinked: !row.vids }" :title="vidsSessionTitle(row.vids)">
+                                <i class="status-dot" /><b>Vids</b>{{ vidsState(row.vids) }}
                             </span>
-                            <small
-                                v-if="row.vids"
-                                class="health-identity"
-                                :class="{ attention: row.vids.identity_verified === false }"
-                            >
-                                {{ row.vids.identity_verified ? '身份已验证' : '身份待验证' }}
-                            </small>
-                            <small
-                                v-if="row.refresh_error || row.browser_profile_error || row.vids?.runtime_error"
-                                class="health-inline-error"
-                            >
-                                {{
-                                    row.refresh_error || row.browser_profile_error || quotaError(row.vids.runtime_error)
-                                }}
-                            </small>
+                            <span v-if="row.generation_protection" class="health-inline-error" :title="row.generation_protection.reason + (row.generation_protection.until ? ' · 恢复于 ' + date(row.generation_protection.until) : '')">
+                                生成保护
+                                <el-button text size="small" @click="clearGenerationProtection(row)">解除保护</el-button>
+                            </span>
+                            <span v-if="row.vids?.protection" class="health-inline-error" :title="vidsProtectionTitle(row.vids.protection)">
+                                Vids {{ row.vids.protection.reason || vidsProtectionLabel(row.vids.protection) }}
+                                <el-button text size="small" :loading="busy.has(row.id + ':clear-vids-protection')" @click="clearVidsProtection(row)">解除 Vids 保护</el-button>
+                            </span>
                         </div>
                     </template>
                 </el-table-column>
-                <el-table-column label="操作" width="160" fixed="right">
+                <el-table-column label="备注" min-width="156">
                     <template #default="{ row }">
-                        <el-button v-if="!row.vidsOnly" text type="primary" @click="toggleQuickAccount(row)">
-                            {{ expandedAccountIds.includes(row.id) ? '收起' : '展开编辑' }}
+                        <div v-if="!row.vidsOnly" class="account-inline-remark">
+                            <el-input
+                                v-model="quickDraft(row).remark"
+                                size="small"
+                                maxlength="500"
+                                placeholder="填写备注"
+                                :title="quickDraft(row).remark"
+                                :aria-label="`${row.email || row.id} 备注`"
+                                :disabled="accountSettingLocked(row)"
+                                @keyup.enter="$event.target.blur()"
+                                @blur="saveInlineRemark(row)"
+                            />
+                        </div>
+                        <span v-else class="muted">{{ row.remark || '—' }}</span>
+                    </template>
+                </el-table-column>
+                <el-table-column label="代理绑定" min-width="190">
+                    <template #default="{ row }">
+                        <button
+                            v-if="!row.vidsOnly"
+                            class="account-proxy-trigger"
+                            :aria-expanded="expandedAccountIds.includes(row.id)"
+                            :title="accountProxySummary(row) + ' · 展开代理和账号配置'"
+                            @click="toggleQuickAccount(row)"
+                        >
+                            <el-icon><Connection /></el-icon>
+                            <span>{{ accountProxySummary(row) }}</span>
+                            <el-icon class="quick-chevron" :class="{ expanded: expandedAccountIds.includes(row.id) }">
+                                <ArrowRight />
+                            </el-icon>
+                        </button>
+                        <span v-else class="muted">—</span>
+                    </template>
+                </el-table-column>
+                <el-table-column label="最近使用" width="142">
+                    <template #default="{ row }">
+                        <time v-if="row.last_used_at" class="account-last-used" :datetime="row.last_used_at" :title="date(row.last_used_at)">{{ date(row.last_used_at) }}</time>
+                        <span v-else class="muted">暂无</span>
+                    </template>
+                </el-table-column>
+                <el-table-column label="操作" width="148" fixed="right">
+                    <template #default="{ row }">
+                        <el-button
+                            v-if="!row.vidsOnly"
+                            text
+                            type="primary"
+                            :aria-label="'编辑 ' + row.email"
+                            @click="openEditor(row)"
+                        >
+                            编辑
                         </el-button>
                         <template v-else>
                             <el-button text type="primary" @click="openDetail(row)">详情</el-button>
@@ -2207,7 +2518,7 @@ onUnmounted(() => {
                                             command="refresh-at"
                                             :disabled="busy.has(row.id + ':refresh-at')"
                                         >
-                                            刷新 ST / AT
+                                            {{ row.browser_profile_source === 'cloak' ? '维护登录态' : '刷新 ST / AT' }}
                                         </el-dropdown-item>
                                         <el-dropdown-item command="refresh-credits">刷新余额</el-dropdown-item>
                                         <el-dropdown-item command="delete" divided>删除账号</el-dropdown-item>
@@ -2220,7 +2531,7 @@ onUnmounted(() => {
                 <template #empty>
                     <el-empty
                         :description="
-                            search || platform !== 'all' || state !== 'all'
+                            search || platform !== 'all' || state !== 'all' || plan !== 'all'
                                 ? '没有匹配的成员，试试其他筛选条件'
                                 : '小队还没有成员，添加第一个创作账号吧'
                         "
@@ -2232,217 +2543,9 @@ onUnmounted(() => {
                     </el-empty>
                 </template>
             </el-table>
-            <div v-if="!loading || rows.length" class="mobile-accounts">
-                <article v-for="row in paginated" :key="row.id" class="mobile-account">
-                    <header class="mobile-account-header">
-                        <el-checkbox
-                            :model-value="selected.some((item) => item.id === row.id)"
-                            :aria-label="`选择 ${row.email || row.id}`"
-                            @change="(checked) => selectMobile(row, checked)"
-                        />
-                        <button class="account-identity" @click="openDetail(row)">
-                            <span class="identity-text">
-                                <strong>{{ row.email || '账号 #' + row.id }}</strong>
-                                <small>{{ row.remark || row.name || '成员 #' + row.id }}</small>
-                            </span>
-                        </button>
-                        <el-switch
-                            class="account-status-switch"
-                            :model-value="row.is_active"
-                            :disabled="accountSettingLocked(row)"
-                            :loading="accountSettingBusy(row)"
-                            :aria-label="`${row.email || row.id} 账号状态`"
-                            inline-prompt
-                            active-text="已启用"
-                            :inactive-text="row.ban_reason === 'refresh_failed' ? '待恢复' : '已暂停'"
-                            :width="66"
-                            @change="toggleAccountSetting(row, 'is_active', $event)"
-                        />
-                        <el-button
-                            v-if="row.vidsOnly"
-                            text
-                            type="danger"
-                            :loading="busy.has(row.id + ':delete')"
-                            @click="action(row, 'delete')"
-                        >
-                            删除
-                        </el-button>
-                    </header>
-                    <div class="capability-icons mobile-capability-controls">
-                        <span>创作能力</span>
-                        <button
-                            v-for="kind in ['image', 'video']"
-                            :key="kind"
-                            type="button"
-                            class="capability-toggle"
-                            :class="{ muted: row[kind + '_enabled'] === false }"
-                            :aria-label="`${row.email || row.id} ${kind === 'image' ? '图片' : '视频'}生成`"
-                            :aria-pressed="row[kind + '_enabled'] !== false"
-                            :disabled="accountSettingLocked(row)"
-                            @click="toggleAccountSetting(row, kind + '_enabled', row[kind + '_enabled'] === false)"
-                        >
-                            <el-icon>
-                                <Picture v-if="kind === 'image'" />
-                                <VideoCamera v-else />
-                            </el-icon>
-                            {{ kind === 'image' ? '图片' : '视频' }} ·
-                            {{ row[kind + '_enabled'] !== false ? '开启' : '暂停' }}
-                        </button>
-                    </div>
-                    <button
-                        v-if="!row.vidsOnly"
-                        class="account-proxy-trigger"
-                        :aria-expanded="expandedAccountIds.includes(row.id)"
-                        @click="toggleQuickAccount(row)"
-                    >
-                        <el-icon><Connection /></el-icon>
-                        <span>{{ accountProxySummary(row) }}</span>
-                        <el-icon class="quick-chevron" :class="{ expanded: expandedAccountIds.includes(row.id) }">
-                            <ArrowRight />
-                        </el-icon>
-                    </button>
-                    <AccountProxyBinding
-                        v-if="!row.vidsOnly && expandedAccountIds.includes(row.id)"
-                        :account="row"
-                        :draft="quickDraft(row)"
-                        :proxies="proxyPool"
-                        :saving="quickSavingId === row.id"
-                        :saving-kind="quickSavingKind"
-                        :locked="
-                            quickSavingId !== null || accountSettingBusy(row) || (saving && editing?.id === row.id)
-                        "
-                        :error="quickErrors[row.id]"
-                        :saved="quickSaved[row.id]"
-                        :pool-error="proxyPoolError"
-                        @save="saveQuickAccount(row, $event)"
-                        @copy="copy"
-                        @reload="reloadQuickProxies"
-                    />
-                    <div class="mobile-account-quotas">
-                        <div v-if="!row.vidsOnly">
-                            <span>Flow 积分</span>
-                            <strong>{{ quotaValue(row.credits) }}</strong>
-                            <small>{{ tier(row.user_paygate_tier) }}</small>
-                        </div>
-                        <template v-if="row.vids">
-                            <div v-for="kind in ['image', 'video']" :key="kind">
-                                <span>Vids {{ kind === 'image' ? '图片' : '视频' }}</span>
-                                <strong
-                                    :class="{
-                                        'quota-empty': quotaNumber(row.vids.last_quota?.[kind]?.available) === 0,
-                                    }"
-                                >
-                                    {{ quotaValue(row.vids.last_quota?.[kind]?.available) }}
-                                </strong>
-                                <small>/ {{ quotaValue(row.vids.last_quota?.[kind]?.total) }} 总量</small>
-                            </div>
-                        </template>
-                        <div v-else class="mobile-vids-empty">
-                            <span>Vids</span>
-                            <small>尚未接入</small>
-                        </div>
-                    </div>
-                    <div class="mobile-account-health">
-                        <span v-if="!row.vidsOnly" class="session-status" :class="{ attention: flowAttention(row) }">
-                            <i class="status-dot" />
-                            <b>Flow</b>
-                            {{ sessionLabel(row) }}
-                        </span>
-                        <span
-                            class="session-status"
-                            :class="{ attention: row.vids && vidsAttention(row.vids), unlinked: !row.vids }"
-                        >
-                            <i class="status-dot" />
-                            <b>Vids</b>
-                            {{ vidsState(row.vids) }}
-                        </span>
-                        <small v-if="row.vids" class="health-identity">
-                            {{ row.vids.identity_verified ? '身份已验证' : '身份待验证' }}
-                        </small>
-                        <p
-                            v-if="row.refresh_error || row.browser_profile_error || row.vids?.runtime_error"
-                            class="health-inline-error"
-                        >
-                            {{ row.refresh_error || row.browser_profile_error || quotaError(row.vids.runtime_error) }}
-                        </p>
-                    </div>
-                    <div
-                        v-if="row.vids"
-                        class="quota-update"
-                        :class="{ 'quota-attention': quotaInfo(row).error || quotaInfo(row).stale }"
-                        aria-live="polite"
-                    >
-                        <span>{{ quotaInfo(row).label }}</span>
-                        <time
-                            v-if="quotaInfo(row).updated"
-                            :title="date(quotaInfo(row).updated)"
-                            :datetime="quotaInfo(row).updated"
-                        >
-                            {{ parseDate(quotaInfo(row).updated).toLocaleTimeString('zh-CN', { hour12: false }) }}
-                        </time>
-                    </div>
-                    <p v-if="row.vids && quotaInfo(row).error" class="quota-inline-error">{{ quotaInfo(row).error }}</p>
-                    <footer class="mobile-account-actions">
-                        <el-button
-                            v-if="row.browser_profile_source === 'cloak'"
-                            text
-                            size="small"
-                            :icon="Monitor"
-                            :loading="busy.has(row.id + ':browser')"
-                            @click="openBrowser(row)"
-                        >
-                            浏览器
-                        </el-button>
-                        <el-button
-                            v-if="!row.vidsOnly"
-                            text
-                            size="small"
-                            :icon="Refresh"
-                            :loading="busy.has(row.id + ':refresh-credits')"
-                            @click="action(row, 'refresh-credits')"
-                        >
-                            刷新积分
-                        </el-button>
-                        <el-button
-                            v-if="row.vids"
-                            text
-                            size="small"
-                            :icon="Refresh"
-                            :loading="busy.has(row.id + ':quota')"
-                            @click="action(row, 'quota')"
-                        >
-                            刷新 Vids
-                        </el-button>
-                        <el-button
-                            v-if="!row.vidsOnly"
-                            text
-                            type="primary"
-                            size="small"
-                            @click="toggleQuickAccount(row)"
-                        >
-                            {{ expandedAccountIds.includes(row.id) ? '收起' : '展开编辑' }}
-                        </el-button>
-                        <el-button v-else text type="primary" size="small" :icon="ArrowRight" @click="openDetail(row)">
-                            详情
-                        </el-button>
-                    </footer>
-                </article>
-                <el-empty
-                    v-if="!paginated.length"
-                    :description="
-                        search || platform !== 'all' || state !== 'all'
-                            ? '没有匹配的成员，试试其他筛选条件'
-                            : '小队还没有成员，添加第一个创作账号吧'
-                    "
-                >
-                    <template #image><Mascot portrait compact mood="sleepy" class="empty-mascot" /></template>
-                    <el-button v-if="!accounts.length" type="primary" :icon="Plus" @click="openCloakLogin">
-                        添加账号
-                    </el-button>
-                </el-empty>
             </div>
             <footer class="table-footer">
-                <span>显示 {{ filtered.length }} 位成员 · 每 30 秒读取本地状态 · Vids 额度每 15 分钟按需更新</span>
+                <span>显示 {{ filtered.length }} 位成员 · 每 30 秒读取本地状态 · Vids 额度使用最近记录，可手动刷新</span>
                 <el-pagination
                     v-model:current-page="page"
                     v-model:page-size="pageSize"
@@ -2467,7 +2570,7 @@ onUnmounted(() => {
                     </span>
                     <div>
                         <h2>{{ detail.name || detail.email }}</h2>
-                        <p>成员 #{{ detail.id }} · {{ tier(detail.user_paygate_tier) }}</p>
+                        <p>成员 #{{ detail.id }} · {{ detail.vidsOnly ? '未接入 Flow' : tier(detail.user_paygate_tier) }}</p>
                     </div>
                     <el-tag :type="detail.is_active ? 'success' : 'info'">
                         {{ detail.is_active ? '已启用' : '已暂停' }}
@@ -2555,12 +2658,12 @@ onUnmounted(() => {
                             </template>
                         </p>
                         <dl class="session-facts">
-                            <div>
+                            <div v-if="detail.browser_profile_source !== 'cloak'">
                                 <dt>AT 到期</dt>
                                 <dd>{{ date(detail.at_expires) }}</dd>
                             </div>
                             <div>
-                                <dt>下次刷新</dt>
+                                <dt>{{ detail.browser_profile_source === 'cloak' ? '下次会话维护' : '下次刷新' }}</dt>
                                 <dd>{{ date(detail.next_refresh_at) }}</dd>
                             </div>
                             <div>
@@ -2634,6 +2737,17 @@ onUnmounted(() => {
                                 show-icon
                                 class="account-alert"
                             />
+                            <el-alert
+                                v-if="detail.vids.protection"
+                                :title="vidsProtectionLabel(detail.vids.protection)"
+                                :description="vidsProtectionTitle(detail.vids.protection)"
+                                type="warning" :closable="false" show-icon class="account-alert"
+                            />
+                            <el-alert
+                                v-if="detail.vids.maintenance?.last_error"
+                                :title="'维护诊断：' + detail.vids.maintenance.last_error"
+                                type="warning" :closable="false" show-icon class="account-alert"
+                            />
                             <dl class="session-facts">
                                 <div>
                                     <dt>Vids 身份</dt>
@@ -2649,6 +2763,33 @@ onUnmounted(() => {
                                     <dt>自动同步</dt>
                                     <dd>{{ quotaInfo(detail).label }}</dd>
                                 </div>
+                                <div>
+                                    <dt>后台维护</dt>
+                                    <dd>{{ vidsMaintenanceLabel(detail.vids.maintenance) }}</dd>
+                                </div>
+                                <div>
+                                    <dt>上次维护</dt>
+                                    <dd>{{ date(detail.vids.maintenance?.last_probe_at) }}</dd>
+                                </div>
+                                <div>
+                                    <dt>上次维护成功</dt>
+                                    <dd>{{ date(detail.vids.maintenance?.last_success_at) }}</dd>
+                                </div>
+                                <div>
+                                    <dt>下次维护</dt>
+                                    <dd>{{ date(detail.vids.maintenance?.next_probe_at) }}</dd>
+                                </div>
+                                <div>
+                                    <dt>Vids 连续失败</dt>
+                                    <dd>{{ detail.vids.stats?.consecutive_error_count || 0 }} 次</dd>
+                                </div>
+                            </dl>
+                            <dl v-if="detail.vids.stats" class="session-facts" aria-label="Vids 生成统计">
+                                <div><dt>Vids 累计图片</dt><dd>{{ detail.vids.stats.image_count || 0 }}</dd></div>
+                                <div><dt>Vids 累计视频</dt><dd>{{ detail.vids.stats.video_count || 0 }}</dd></div>
+                                <div><dt>Vids 累计语音</dt><dd>{{ detail.vids.stats.speech_count || 0 }}</dd></div>
+                                <div><dt>Vids 累计失败</dt><dd>{{ detail.vids.stats.error_count || 0 }}</dd></div>
+                                <div><dt>Vids 最近使用</dt><dd>{{ date(detail.vids.stats.last_used_at) }}</dd></div>
                             </dl>
                             <div class="detail-actions">
                                 <el-button
@@ -2665,6 +2806,11 @@ onUnmounted(() => {
                                 >
                                     重新连接
                                 </el-button>
+                                <el-button
+                                    v-if="detail.vids.protection || detail.vids.stats?.consecutive_error_count"
+                                    :loading="busy.has(detail.id + ':clear-vids-protection')"
+                                    @click="clearVidsProtection(detail)"
+                                >解除 Vids 保护</el-button>
                             </div>
                         </template>
                         <template v-else>
@@ -2733,153 +2879,38 @@ onUnmounted(() => {
 
         <el-drawer
             v-model="editorOpen"
-            :size="'min(700px, 100vw)'"
-            title="编辑成员配置"
+            :size="'min(860px, 100vw)'"
+            title="编辑账号"
+            class="account-editor"
             :close-on-click-modal="!saving"
             @closed="clearFormValidation"
         >
-            <p class="editor-intro">配置会话、创作能力和刷新节奏，让每位成员发挥所长。</p>
+            <p class="editor-account">{{ editing?.email || '账号 #' + editing?.id }}</p>
             <el-form ref="formRef" :model="form" :rules="rules" label-position="top" class="account-form">
-                <el-tabs v-model="editorTab">
-                    <el-tab-pane label="账号与会话" name="identity">
-                        <el-form-item label="Session Token" prop="st">
-                            <el-input
-                                v-model="form.st"
-                                autocomplete="off"
-                                placeholder="输入 Google Flow 的 Session Token"
-                            />
-                            <span class="field-note">更新登录凭据会重新校验账号身份</span>
-                        </el-form-item>
-                        <div class="form-grid">
-                            <el-form-item label="登录协议">
-                                <el-select v-model="form.protocol_mode">
-                                    <el-option label="Session Token" value="session" />
-                                    <el-option label="Google Cookie 协议" value="protocol" />
-                                </el-select>
-                            </el-form-item>
-                            <el-form-item label="浏览器会话来源">
-                                <el-select v-model="form.browser_profile_source">
-                                    <el-option label="导入 Cookies" value="cookies" />
-                                    <el-option
-                                        label="持久化 Cloak Profile"
-                                        value="cloak"
-                                        :disabled="editing?.browser_profile_source !== 'cloak'"
-                                    />
-                                </el-select>
-                                <span class="field-note">通过 Cloak 登录或导入 Profile JSON 初始化</span>
-                            </el-form-item>
-                        </div>
-                        <el-form-item label="Google Cookies">
-                            <el-input
-                                v-model="form.google_cookies"
-                                type="textarea"
-                                :rows="3"
-                                autocomplete="off"
-                                placeholder="Google Cookies 导出文本"
-                            />
-                            <div class="cookie-field-actions">
-                                <span class="field-note">用于协议登录和会话自动刷新</span>
-                                <el-button
-                                    size="small"
-                                    :loading="busy.has(editing?.id + ':copy-cookie-combo')"
-                                    title="读取账号已保存的 Cookie，以 :: 拼接；编辑中的未保存内容不参与复制"
-                                    @click="copyFlowCookieCombo(editing)"
-                                >
-                                    复制加号格式
-                                </el-button>
-                            </div>
-                        </el-form-item>
-                        <div class="form-grid">
-                            <el-form-item label="登录账号">
-                                <el-input
-                                    v-model="form.login_account"
-                                    placeholder="Google 账号邮箱"
-                                    autocomplete="off"
-                                />
-                            </el-form-item>
-                            <el-form-item label="登录密码">
-                                <el-input
-                                    v-model="form.login_password"
-                                    autocomplete="new-password"
-                                    placeholder="留空保留原密码"
-                                />
-                            </el-form-item>
-                        </div>
-                        <el-form-item label="成员备注">
-                            <el-input
-                                v-model="form.remark"
-                                type="textarea"
-                                :rows="3"
-                                maxlength="500"
-                                show-word-limit
-                                placeholder="给这个成员写一句备注吧"
-                            />
-                        </el-form-item>
-                    </el-tab-pane>
-                    <el-tab-pane label="创作能力" name="capacity">
-                        <div class="capability-setting">
+                <section class="editor-section" aria-label="常用设置">
+                    <div class="form-grid">
+                        <div class="editor-refresh-setting">
                             <div>
-                                <el-icon><Picture /></el-icon>
-                                <strong>图片创作</strong>
-                                <p>允许此账号参与图片任务</p>
+                                <strong>自动维护会话</strong>
+                                <span>按本账号间隔维护 Google 登录态</span>
                             </div>
-                            <el-switch v-model="form.image_enabled" />
+                            <el-switch v-model="form.auto_refresh_enabled" aria-label="自动维护会话" />
                         </div>
-                        <el-form-item label="图片并发上限">
+                        <el-form-item label="会话维护间隔（分钟）" prop="refresh_interval_minutes">
                             <el-input-number
-                                v-model="form.image_concurrency"
-                                :min="-1"
-                                :max="100"
+                                v-model="form.refresh_interval_minutes"
+                                :min="1"
+                                :max="1440"
+                                :disabled="!form.auto_refresh_enabled"
                                 controls-position="right"
                             />
-                            <span class="field-note">-1 表示不限制，0 表示暂停分配</span>
                         </el-form-item>
-                        <div class="capability-setting">
-                            <div>
-                                <el-icon><VideoCamera /></el-icon>
-                                <strong>视频创作</strong>
-                                <p>允许此账号参与视频任务</p>
-                            </div>
-                            <el-switch v-model="form.video_enabled" />
-                        </div>
-                        <el-form-item label="视频并发上限">
-                            <el-input-number
-                                v-model="form.video_concurrency"
-                                :min="-1"
-                                :max="100"
-                                controls-position="right"
-                            />
-                            <span class="field-note">-1 表示不限制，0 表示暂停分配</span>
-                        </el-form-item>
-                        <div class="form-grid">
-                            <el-form-item label="Flow 项目 ID">
-                                <el-input v-model="form.project_id" placeholder="留空自动获取" />
-                            </el-form-item>
-                            <el-form-item label="项目名称">
-                                <el-input v-model="form.project_name" placeholder="选填" />
-                            </el-form-item>
-                        </div>
-                    </el-tab-pane>
-                    <el-tab-pane label="网络与刷新" name="network">
-                        <el-form-item label="生成提交出口">
-                            <el-select v-model="form.submission_proxy_mode" aria-label="生成提交出口">
-                                <el-option label="账号固定代理" value="fixed" />
-                                <el-option
-                                    label="代理池随机（每次生成取健康出口）"
-                                    value="pool_random"
-                                    :disabled="editing?.browser_profile_source === 'cloak'"
-                                />
-                            </el-select>
-                            <span class="field-note">
-                                Cloak 账号的生成、登录和刷新共用 Profile 固定出口；其他账号可选择代理池出口。
-                            </span>
-                        </el-form-item>
+                    </div>
+                    <div class="form-grid">
                         <el-form-item label="账号代理">
                             <template v-if="editing?.browser_profile_source === 'cloak'">
                                 <el-input :model-value="currentProxyLabel" readonly />
-                                <span class="field-note">
-                                    Cloak 登录和会话刷新使用这个固定出口，保持 Profile 环境一致。
-                                </span>
+                                <span class="field-note">登录、刷新和生成沿用此固定出口。</span>
                             </template>
                             <el-select v-else v-model="form.proxy_pool_id" placeholder="请选择固定出口" filterable>
                                 <el-option
@@ -2890,30 +2921,140 @@ onUnmounted(() => {
                                 />
                             </el-select>
                             <router-link to="/proxies">管理代理池</router-link>
-                            <span class="field-note">媒体下载在池内独立分配，验证码出口由远程服务管理。</span>
                         </el-form-item>
-                        <div class="capability-setting">
-                            <div>
-                                <strong>自动刷新会话</strong>
-                                <p>按照成员自己的节奏更新 Google 登录态</p>
+                        <el-form-item label="生成提交出口">
+                            <el-select v-model="form.submission_proxy_mode" aria-label="生成提交出口">
+                                <el-option label="账号固定代理" value="fixed" />
+                                <el-option
+                                    label="代理池随机（每次生成取健康出口）"
+                                    value="pool_random"
+                                    :disabled="editing?.browser_profile_source === 'cloak'"
+                                />
+                            </el-select>
+                            <span class="field-note">Cloak 账号保持固定代理；媒体下载独立分配。</span>
+                        </el-form-item>
+                    </div>
+                    <div class="form-grid editor-capabilities">
+                        <div class="editor-capability">
+                            <div class="editor-capability-heading">
+                                <strong>
+                                    <el-icon><Picture /></el-icon>
+                                    图片创作
+                                </strong>
+                                <el-switch v-model="form.image_enabled" aria-label="图片创作" />
                             </div>
-                            <el-switch v-model="form.auto_refresh_enabled" />
+                            <el-form-item label="图片并发上限">
+                                <el-input-number
+                                    v-model="form.image_concurrency"
+                                    :min="-1"
+                                    :max="100"
+                                    controls-position="right"
+                                />
+                            </el-form-item>
                         </div>
-                        <el-form-item label="刷新间隔（分钟）" prop="refresh_interval_minutes">
-                            <el-input-number
-                                v-model="form.refresh_interval_minutes"
-                                :min="1"
-                                :max="1440"
-                                :disabled="!form.auto_refresh_enabled"
-                                controls-position="right"
+                        <div class="editor-capability">
+                            <div class="editor-capability-heading">
+                                <strong>
+                                    <el-icon><VideoCamera /></el-icon>
+                                    视频创作
+                                </strong>
+                                <el-switch v-model="form.video_enabled" aria-label="视频创作" />
+                            </div>
+                            <el-form-item label="视频并发上限">
+                                <el-input-number
+                                    v-model="form.video_concurrency"
+                                    :min="-1"
+                                    :max="100"
+                                    controls-position="right"
+                                />
+                            </el-form-item>
+                        </div>
+                    </div>
+                    <p class="field-note editor-concurrency-note">并发上限：-1 表示不限制，0 表示暂停分配。</p>
+                    <el-form-item label="账号备注">
+                        <el-input
+                            v-model="form.remark"
+                            type="textarea"
+                            :rows="2"
+                            maxlength="500"
+                            show-word-limit
+                            placeholder="填写账号备注"
+                        />
+                    </el-form-item>
+                </section>
+                <section class="editor-section" aria-label="登录凭据与项目">
+                    <h3>登录凭据与项目</h3>
+                    <el-form-item label="Session Token" prop="st">
+                        <el-input
+                            v-model="form.st"
+                            autocomplete="off"
+                            placeholder="输入 Google Flow 的 Session Token"
+                        />
+                        <span class="field-note">更新登录凭据会重新校验账号身份。</span>
+                    </el-form-item>
+                    <div class="form-grid">
+                        <el-form-item label="登录协议">
+                            <el-select v-model="form.protocol_mode">
+                                <el-option label="Session Token" value="session" />
+                                <el-option label="Google Cookie 协议" value="protocol" />
+                            </el-select>
+                        </el-form-item>
+                        <el-form-item label="浏览器会话来源">
+                            <el-select v-model="form.browser_profile_source">
+                                <el-option label="导入 Cookies" value="cookies" />
+                                <el-option
+                                    label="持久化 Cloak Profile"
+                                    value="cloak"
+                                    :disabled="editing?.browser_profile_source !== 'cloak'"
+                                />
+                            </el-select>
+                        </el-form-item>
+                    </div>
+                    <el-form-item label="Google Cookies">
+                        <el-input
+                            v-model="form.google_cookies"
+                            type="textarea"
+                            :rows="3"
+                            autocomplete="off"
+                            placeholder="Google Cookies 导出文本"
+                        />
+                        <div class="cookie-field-actions">
+                            <span class="field-note">{{ editing?.browser_profile_source === 'cloak' ? 'Profile 的会话校验与登录态维护使用这些 Cookie。' : '用于协议登录和会话自动刷新。' }}</span>
+                            <el-button
+                                size="small"
+                                :loading="busy.has(editing?.id + ':copy-cookie-combo')"
+                                title="读取账号已保存的 Cookie，以 :: 拼接；编辑中的未保存内容不参与复制"
+                                @click="copyFlowCookieCombo(editing)"
+                            >
+                                复制加号格式
+                            </el-button>
+                        </div>
+                    </el-form-item>
+                    <div class="form-grid">
+                        <el-form-item label="登录账号">
+                            <el-input v-model="form.login_account" placeholder="Google 账号邮箱" autocomplete="off" />
+                        </el-form-item>
+                        <el-form-item label="登录密码">
+                            <el-input
+                                v-model="form.login_password"
+                                autocomplete="new-password"
+                                placeholder="留空保留原密码"
                             />
                         </el-form-item>
-                    </el-tab-pane>
-                </el-tabs>
+                    </div>
+                    <div class="form-grid">
+                        <el-form-item label="Flow 项目 ID">
+                            <el-input v-model="form.project_id" placeholder="留空自动获取" />
+                        </el-form-item>
+                        <el-form-item label="项目名称">
+                            <el-input v-model="form.project_name" placeholder="选填" />
+                        </el-form-item>
+                    </div>
+                </section>
             </el-form>
             <template #footer>
                 <el-button :disabled="saving" @click="editorOpen = false">取消</el-button>
-                <el-button type="primary" :loading="saving" @click="saveAccount">保存成员配置</el-button>
+                <el-button type="primary" :loading="saving" @click="saveAccount">保存账号配置</el-button>
             </template>
         </el-drawer>
 
@@ -2931,7 +3072,7 @@ onUnmounted(() => {
                 }}
             </p>
             <el-button v-if="!loginSession" text :icon="Connection" @click="openExtensionLogin">
-                使用指纹浏览器扩展登录
+                使用 Chrome / Edge 扩展登录
             </el-button>
             <p v-if="!presentationReady" class="field-note" role="status">正在连接账号浏览器服务…</p>
             <el-form label-position="top" @submit.prevent="startLogin">
@@ -3008,12 +3149,12 @@ onUnmounted(() => {
 
         <el-dialog
             v-model="extensionOpen"
-            title="扩展登录 · 指纹浏览器"
+            title="扩展登录 · 本机浏览器"
             width="min(600px, calc(100vw - 32px))"
             :close-on-click-modal="false"
         >
             <template v-if="desktopShell">
-                <p class="dialog-note">扩展需要在指纹浏览器中运行。软件和下面的本机管理页共用同一个后台与账号资料。</p>
+                <p class="dialog-note">使用本机 Chrome 或 Edge 即可，无需指纹浏览器。管理页与软件共用同一后台；扩展默认打开临时无痕窗口完成 Google 登录。</p>
                 <el-form label-position="top">
                     <el-form-item label="本机管理地址">
                         <el-input :model-value="desktopManagementUrl" readonly aria-label="本机管理地址" />
@@ -3021,22 +3162,31 @@ onUnmounted(() => {
                     </el-form-item>
                 </el-form>
                 <ol class="extension-steps">
-                    <li>复制上方地址，在你自己的指纹浏览器中打开，并登录管理员账号。</li>
-                    <li>在该页面进入「扩展登录」，下载并安装当前地址专用扩展，完成 Google Flow 登录。</li>
+                    <li>点击「在本机浏览器中打开」，并在浏览器管理页登录管理员账号。</li>
+                    <li>进入「扩展登录」，下载并加载当前地址专用扩展，在扩展详情中开启「允许在无痕模式下运行」（Edge 为「允许在 InPrivate 中」）。</li>
+                    <li>刷新浏览器管理页，点击「开始扩展登录」，在临时无痕窗口完成 Google Flow 登录。</li>
                     <li>登录成功后回到软件，点击「刷新账号」，即可看到新添加的账号。</li>
                 </ol>
-                <p class="field-note">Google 登录使用指纹浏览器已配置的网络与代理。操作期间保持软件后台运行。</p>
+                <p class="field-note">Google 登录沿用本机浏览器的网络设置；服务端继续按账号固定代理验证和保存。操作期间保持软件后台运行。</p>
+                <el-alert
+                    v-if="extensionStatus"
+                    :title="extensionStatus"
+                    :type="extensionError ? 'warning' : 'info'"
+                    :closable="false"
+                    show-icon
+                    role="status"
+                />
             </template>
             <template v-else>
                 <p class="dialog-note">
-                    登录使用指纹浏览器中已配置的网络与代理。在该浏览器打开本管理页，安装扩展后完成 Google Flow 登录。
+                    使用普通 Chrome 或 Edge 即可。安装扩展并允许无痕运行后，默认在临时无痕窗口完成 Google Flow 登录；登录沿用当前浏览器的网络设置。
                 </p>
                 <ol class="extension-steps">
                     <li>
                         <a href="/api/plugin/import/extension.zip" download>下载当前管理页专用扩展</a>
                         ，解压后在浏览器扩展管理页开启开发者模式，加载已解压目录。
                     </li>
-                    <li>在指纹浏览器中刷新本管理页，再点击「检测扩展」。</li>
+                    <li>在扩展详情中开启「允许在无痕模式下运行」（Edge 为「允许在 InPrivate 中」），刷新本管理页，再点击「检测扩展」。</li>
                     <li>点击「开始扩展登录」，在打开的 Flow 页面完成登录。</li>
                 </ol>
                 <div class="extension-detection">
@@ -3062,11 +3212,11 @@ onUnmounted(() => {
                 <el-form v-if="!extensionSession" label-position="top" @submit.prevent="startExtensionLogin">
                     <el-form-item label="登录环境">
                         <el-radio-group v-model="extensionForm.login_context" :disabled="extensionStarting">
-                            <el-radio-button value="profile">当前指纹环境</el-radio-button>
                             <el-radio-button value="isolated">临时无痕窗口</el-radio-button>
+                            <el-radio-button value="profile">当前浏览器登录态</el-radio-button>
                         </el-radio-group>
                         <span class="field-note">
-                            当前指纹环境沿用本浏览器的登录态；无痕窗口需要先允许扩展在无痕模式下运行。
+                            默认用临时无痕窗口，便于逐个添加账号；也可选择复用当前浏览器的已有登录态。
                         </span>
                     </el-form-item>
                 </el-form>
@@ -3080,12 +3230,18 @@ onUnmounted(() => {
             </template>
             <template #footer>
                 <el-button @click="extensionOpen = false">关闭</el-button>
-                <el-button v-if="desktopShell" type="primary" :loading="loading" @click="load(true, true)">
-                    刷新账号
-                </el-button>
+                <template v-if="desktopShell">
+                    <el-button :loading="loading" @click="load(true, true)">刷新账号</el-button>
+                    <el-button type="primary" :loading="desktopLoginBrowserOpening" @click="openDesktopLoginBrowser">
+                        在本机浏览器中打开
+                    </el-button>
+                </template>
                 <template v-else>
-                    <el-button v-if="extensionSession" :disabled="extensionSession.verifying" @click="cancelExtensionLogin">
-                        {{ extensionSession.verifying ? '正在验证并保存' : '取消本次登录' }}
+                    <el-button
+                        v-if="extensionSession"
+                        @click="cancelExtensionLogin"
+                    >
+                        {{ extensionSession.verifying ? '关闭窗口，后台继续验证' : '取消本次登录' }}
                     </el-button>
                     <el-button
                         v-else
@@ -3102,13 +3258,15 @@ onUnmounted(() => {
 
         <el-dialog
             v-model="importOpen"
-            title="导入账号 Profile"
+            title="导入账号 JSON"
+            class="account-import-dialog"
+            top="6vh"
             width="min(620px, calc(100vw - 32px))"
             :before-close="closeImport"
         >
             <p class="dialog-note">
-                在后台重建并验证账号，提交后可关闭此窗口、切换页面，刷新后也能查看进度。兼容 Profile JSON
-                和旧版账号数组。
+                支持包含 cookies、email 的 Cookie JSON、Profile JSON 和旧版账号数组，可一次导入多个账号。
+                在后台验证账号，提交后可关闭窗口或切换页面，刷新后也能查看进度。
             </p>
             <el-upload
                 drag
@@ -3128,10 +3286,12 @@ onUnmounted(() => {
                 v-model="importText"
                 type="textarea"
                 :rows="7"
-                placeholder="粘贴导出的 Profile JSON"
+                placeholder="粘贴 Cookie JSON、Profile JSON 或账号数组"
                 class="import-text"
                 :disabled="importing"
             />
+            <p class="field-note">Cookie 导入会在目标固定代理上核对真实账号、Flow 会话和额度，通过后保存。</p>
+            <p class="field-note">已有账号会更新原 Profile 的登录态，沿用原固定代理、指纹和账号设置。</p>
             <el-form label-position="top">
                 <el-form-item label="目标服务器账号代理">
                     <el-select
@@ -3148,9 +3308,11 @@ onUnmounted(() => {
                             :label="proxyOptionLabel(row)"
                         />
                     </el-select>
-                    <span v-if="importing" class="field-note">管理代理池</span>
-                    <router-link v-else to="/proxies">管理代理池</router-link>
-                    <span class="field-note">Profile 文件含登录凭据，请妥善保管；代理密码不随 Profile 导出。</span>
+                    <div class="import-proxy-note">
+                        <span v-if="importing">管理代理池</span>
+                        <router-link v-else to="/proxies">管理代理池</router-link>
+                        <span class="field-note">JSON 含登录凭据，请妥善保管；导入后账号使用此固定代理。</span>
+                    </div>
                 </el-form-item>
             </el-form>
             <p v-if="sameImportSubmitted" class="dialog-note" role="status">
@@ -3172,60 +3334,6 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.crew-metrics {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 16px;
-    margin-bottom: 28px;
-}
-.crew-metric {
-    position: relative;
-    background: var(--surface);
-    border-radius: 19px;
-    padding: 20px 22px;
-    overflow: hidden;
-}
-.metric-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-size: 13px;
-    color: var(--muted);
-    font-weight: 600;
-}
-.metric-top .el-icon {
-    width: 34px;
-    height: 34px;
-    font-size: 18px;
-    border-radius: 11px;
-    background: var(--pink-soft);
-    color: var(--accent);
-}
-.crew-metric strong {
-    display: block;
-    font-size: 31px;
-    letter-spacing: -1px;
-    margin-top: 7px;
-    font-variant-numeric: tabular-nums;
-    color: var(--ink);
-}
-.crew-metric p {
-    font-size: 13px;
-    color: var(--muted);
-    margin: 7px 0 0;
-}
-.green .metric-top .el-icon {
-    background: var(--green-soft);
-    color: var(--success);
-}
-.blue .metric-top .el-icon {
-    background: var(--blue-soft);
-    color: var(--blue);
-}
-.violet .metric-top .el-icon {
-    background: var(--peach-soft);
-    color: var(--peach);
-}
 .account-surface {
     overflow: hidden;
     padding: 0;
@@ -3267,13 +3375,6 @@ onUnmounted(() => {
     color: var(--accent);
     padding: 3px 8px;
     border-radius: 6px;
-}
-.refresh-toggle {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 13px;
-    color: var(--muted);
 }
 .account-toolbar {
     display: flex;
@@ -3362,26 +3463,6 @@ onUnmounted(() => {
     display: flex;
     gap: 4px;
     margin-top: 8px;
-}
-.metric-quotas {
-    display: flex;
-    gap: 25px;
-    margin-top: 12px;
-}
-.metric-quotas > div > span {
-    font-size: 12px;
-    color: var(--muted);
-}
-.metric-quotas strong {
-    margin-top: 3px;
-    font-size: 28px;
-    line-height: 1.15;
-}
-.metric-quotas small {
-    font-size: 11px;
-    margin-left: 5px;
-    color: var(--peach);
-    font-weight: 500;
 }
 .flow-quota-line,
 .vids-quota-heading,
@@ -3474,9 +3555,48 @@ onUnmounted(() => {
 }
 .capability-icons {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 5px;
     color: var(--accent);
+}
+.account-inline-remark {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 270px;
+    margin-top: 5px;
+    color: var(--muted);
+    font-size: 11px;
+}
+.account-inline-remark > span {
+    flex: 0 0 auto;
+}
+.account-inline-remark .el-input {
+    min-width: 0;
+}
+.account-inline-refresh {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    color: var(--muted);
+    font-size: 11px;
+    margin-top: 3px;
+}
+.mobile-inline-settings {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 16px;
+    margin-bottom: 8px;
+}
+.mobile-inline-settings .account-inline-remark {
+    flex: 1 1 150px;
+    max-width: none;
+}
+.mobile-inline-settings .account-inline-refresh {
+    flex: 0 0 auto;
 }
 .capability-toggle {
     display: inline-flex;
@@ -3840,6 +3960,77 @@ onUnmounted(() => {
 .account-form .el-select {
     width: 100%;
 }
+.editor-account {
+    margin: 0 0 20px;
+    font-size: 15px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+.editor-section + .editor-section {
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px solid var(--el-border-color-light);
+}
+.editor-section h3 {
+    margin: 0 0 18px;
+    font-size: 14px;
+}
+.account-form .el-form-item {
+    margin-bottom: 16px;
+}
+.account-form .form-grid {
+    gap: 16px;
+}
+.account-form .el-input-number {
+    width: 100%;
+}
+.editor-refresh-setting,
+.editor-capability-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+.editor-refresh-setting {
+    min-height: 66px;
+    margin-bottom: 16px;
+}
+.editor-refresh-setting strong,
+.editor-capability-heading strong {
+    font-size: 14px;
+}
+.editor-refresh-setting span {
+    display: block;
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 12px;
+}
+.editor-capability {
+    min-width: 0;
+    padding: 12px 14px 0;
+    border: 1px solid var(--el-border-color-light);
+    border-radius: 10px;
+}
+.editor-capability-heading {
+    margin-bottom: 10px;
+}
+.editor-capability-heading strong {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+.editor-concurrency-note {
+    margin: 8px 0 16px;
+}
+@media (max-width: 560px) {
+    .account-form .form-grid {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 0;
+    }
+    .account-form .editor-capabilities {
+        gap: 12px;
+    }
+}
 .field-note {
     display: block;
     font-size: 13px;
@@ -3909,10 +4100,64 @@ onUnmounted(() => {
 .import-text {
     margin-top: 18px;
 }
+:global(.account-import-dialog) {
+    max-height: 88vh;
+    overflow-y: auto;
+}
+.import-proxy-note {
+    width: 100%;
+    margin-top: 7px;
+    line-height: 1.7;
+}
+.import-proxy-note .field-note {
+    margin-top: 0;
+}
 .profile-import-jobs {
     padding: 18px 22px;
     margin-bottom: 22px;
     font-size: 13px;
+}
+.extension-job-list {
+    list-style: none;
+    margin: 12px 0 0;
+    padding: 0;
+    display: grid;
+    gap: 10px;
+}
+.extension-job-list > li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 5px 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--el-border-color-light);
+}
+.extension-job-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+.extension-job-summary strong,
+.extension-job-message {
+    overflow-wrap: anywhere;
+}
+.extension-job-summary small,
+.extension-job-message {
+    color: var(--muted);
+}
+.extension-job-message,
+.extension-job-list .field-note {
+    grid-column: 1;
+    margin: 0;
+}
+.extension-job-list .el-button {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    align-self: center;
+}
+.extension-job-list > .failed .extension-job-message {
+    color: var(--el-color-danger);
 }
 .profile-import-heading,
 .profile-import-job summary {
@@ -4048,12 +4293,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 1100px) {
-    .crew-metrics {
-        gap: 12px;
-    }
-    .crew-metric {
-        padding: 18px;
-    }
     .filters {
         flex: 1;
         flex-wrap: wrap;
@@ -4075,100 +4314,6 @@ onUnmounted(() => {
     }
 }
 @media (max-width: 700px) {
-    .accounts-table {
-        display: none;
-    }
-    .mobile-accounts {
-        display: grid;
-        gap: 0;
-    }
-    .mobile-account {
-        padding: 16px;
-        background: var(--surface);
-    }
-    .mobile-account-header {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-    .mobile-account-header .account-identity {
-        min-width: 0;
-    }
-    .mobile-account-header .identity-text {
-        width: 100%;
-    }
-    .mobile-account-header .identity-text strong,
-    .mobile-account-header .identity-text small {
-        max-width: 100%;
-    }
-    .mobile-account-header > .el-tag {
-        flex-shrink: 0;
-    }
-    .mobile-capability-controls .capability-toggle {
-        min-height: 44px;
-        padding: 5px 8px;
-    }
-    .mobile-account > .account-proxy-trigger {
-        min-height: 44px;
-        font-size: 13px;
-        margin-top: 4px;
-    }
-    .mobile-account-quotas {
-        display: flex;
-        justify-content: space-between;
-        gap: 16px;
-        padding: 18px 0 10px;
-        font-variant-numeric: tabular-nums;
-    }
-    .mobile-account-quotas span,
-    .mobile-account-quotas small {
-        display: block;
-        font-size: 11px;
-        color: var(--muted);
-    }
-    .mobile-account-quotas strong {
-        display: block;
-        font-size: 24px;
-        font-weight: 700;
-        line-height: 1.7;
-    }
-    .mobile-account-quotas .quota-empty {
-        color: var(--el-color-danger);
-    }
-    .mobile-vids-empty {
-        flex: 1;
-        text-align: right;
-    }
-    .mobile-account-actions {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding-top: 10px;
-        margin-top: 10px;
-    }
-    .mobile-account-actions .el-button + .el-button {
-        margin-left: 0;
-    }
-    .mobile-account-actions .el-button:last-child {
-        margin-left: auto;
-    }
-    .quota-update.quota-attention {
-        color: var(--el-color-warning);
-    }
-    .crew-metrics {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 10px;
-    }
-    .crew-metric strong {
-        font-size: 26px;
-    }
-    .crew-metric {
-        padding: 16px;
-    }
-    .metric-top .el-icon {
-        width: 29px;
-        height: 29px;
-    }
     .account-toolbar {
         padding: 10px 16px 18px;
     }
@@ -4188,10 +4333,6 @@ onUnmounted(() => {
     }
     .section-heading {
         padding: 20px 16px;
-    }
-    .refresh-toggle {
-        font-size: 13px;
-        gap: 6px;
     }
     .table-footer {
         padding: 15px;
@@ -4229,9 +4370,6 @@ onUnmounted(() => {
 .cell-note {
     font-size: 13px;
 }
-.metric-top {
-    font-size: 13px;
-}
 .balance-text {
     font-size: 15px;
 }
@@ -4265,10 +4403,6 @@ html.dark .avatar-2 {
 html.dark .avatar-3 {
     background: var(--green-soft);
     color: var(--success);
-}
-html.dark .violet .metric-top .el-icon {
-    background: var(--peach-soft);
-    color: var(--peach);
 }
 html.dark .capability-icons {
     color: var(--accent);
@@ -4312,106 +4446,196 @@ html.dark .quota-error {
         flex-wrap: wrap;
     }
 }
+.accounts-view.management-view {
+    min-width: 0;
+}
+.accounts-view.management-view .management-summary-row {
+    padding: 7px 12px;
+}
+.management-summary small {
+    margin-left: 3px;
+    color: var(--el-color-warning);
+}
+.accounts-view.management-view .account-toolbar {
+    padding: 9px 12px;
+    gap: 8px;
+}
+.account-toolbar .filters {
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.account-toolbar .table-tools {
+    gap: 6px;
+}
+.account-search {
+    width: 220px;
+}
+.account-table-wrap {
+    min-width: 0;
+    width: 100%;
+    height: min(620px, 70dvh);
+}
+.accounts-table :deep(td.el-table__cell) {
+    padding: 5px 0;
+}
+.accounts-table :deep(th.el-table__cell) {
+    padding: 5px 0;
+    height: 36px;
+}
+.accounts-table .identity-text {
+    width: 100%;
+}
+.accounts-table .identity-text strong {
+    max-width: 100%;
+    font-size: 13px;
+    line-height: 18px;
+    font-weight: 500;
+}
+.accounts-table .identity-text small {
+    margin-top: 0;
+    font-size: 12px;
+    line-height: 16px;
+}
+.account-platforms,
+.account-number-cell {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+.account-number-cell {
+    justify-content: flex-end;
+    font-variant-numeric: tabular-nums;
+}
+.account-number-cell strong {
+    font-size: 13px;
+    font-weight: 500;
+}
+.account-number-cell small {
+    color: var(--muted);
+    font-size: 12px;
+}
+.account-number-cell .el-button {
+    flex-shrink: 0;
+    width: 22px;
+    padding: 0;
+}
+.account-warning {
+    color: var(--el-color-warning);
+}
+.quota-empty {
+    color: var(--el-color-danger);
+}
+.accounts-table .account-inline-remark,
+.accounts-table .account-inline-refresh,
+.accounts-table .account-proxy-trigger {
+    margin: 0;
+}
+.accounts-table .account-inline-refresh {
+    flex-wrap: nowrap;
+    white-space: nowrap;
+    gap: 5px;
+    font-size: 12px;
+}
+.accounts-table .account-proxy-trigger {
+    width: 100%;
+    padding: 0;
+    min-height: 28px;
+}
+.accounts-table .account-proxy-trigger > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.accounts-table .capability-icons {
+    flex-wrap: nowrap;
+    gap: 4px;
+}
+.accounts-table .capability-toggle {
+    min-height: 26px;
+    padding: 2px 5px;
+    border-radius: 4px;
+}
+.accounts-table .account-list-health {
+    gap: 0;
+    padding: 0;
+    font-size: 12px;
+    line-height: 17px;
+}
+.accounts-table .session-status {
+    line-height: 17px;
+    gap: 4px;
+    white-space: nowrap;
+}
+.accounts-table .health-inline-error {
+    margin: 0;
+}
+.account-last-used {
+    display: block;
+    max-width: 110px;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    line-height: 17px;
+}
+.accounts-table :deep(.el-table__expanded-cell) {
+    padding: 0;
+}
+.accounts-table :deep(.account-quick-panel) {
+    width: min(1100px, calc(100vw - 310px));
+    max-width: 100%;
+}
+.accounts-view.management-view .table-footer {
+    padding: 8px 12px;
+}
+.selection-bar {
+    padding: 7px 12px;
+}
+@media (max-width: 1100px) {
+    .accounts-table :deep(.account-quick-panel) {
+        width: calc(100vw - 125px);
+    }
+}
+@media (max-width: 767px) {
+    .accounts-view.management-view > .page-heading {
+        flex-direction: row;
+        align-items: center;
+    }
+    .account-toolbar .filters {
+        width: 100%;
+    }
+    .account-toolbar .account-search {
+        width: 100%;
+    }
+    .account-toolbar .filters .el-select {
+        width: calc(50% - 4px);
+    }
+    .accounts-table :deep(.account-quick-panel) {
+        width: calc(100vw - 42px);
+    }
+}
 @media (min-width: 1051px) {
-    .accounts-view {
+    .accounts-view.management-view {
         display: flex;
         flex-direction: column;
         height: 100%;
         min-height: 0;
     }
-    .accounts-view > .page-heading {
-        margin-bottom: 12px;
+    .accounts-view.management-view > :not(.account-surface) {
         flex-shrink: 0;
     }
-    .accounts-view > .page-heading p,
-    .crew-metric > p,
-    .crew-metric .metric-top .el-icon,
-    .account-surface > .section-heading {
-        display: none;
-    }
-    .crew-metrics {
-        flex-shrink: 0;
-        margin-bottom: 12px;
-        gap: 12px;
-    }
-    .crew-metric {
-        padding: 10px 14px;
-        border-radius: 12px;
-    }
-    .crew-metric strong {
-        margin-top: 3px;
-        font-size: 24px;
-        line-height: 1.3;
-    }
-    .crew-metric.violet {
-        padding-block: 8px;
-    }
-    .crew-metric .vids-quota-total {
-        margin-top: 2px;
-    }
-    .crew-metric .metric-quotas {
+    .accounts-view.management-view .account-surface {
         display: flex;
-        gap: 16px;
-        margin-top: 3px;
-    }
-    .crew-metric .metric-quotas > div {
-        display: flex;
-        align-items: baseline;
-        gap: 5px;
-    }
-    .crew-metric .metric-quotas strong {
-        font-size: 24px;
-        margin: 0;
-    }
-    .account-surface {
-        display: flex;
+        flex: 1 1 0;
         flex-direction: column;
-        flex: 1;
-        min-height: 0;
+        min-height: 180px;
     }
-    .account-toolbar {
+    .account-surface > :not(.account-table-wrap) {
         flex-shrink: 0;
-        padding: 10px 16px;
-        gap: 12px;
     }
-    .account-search {
-        width: 210px;
-    }
-    .filters {
-        gap: 8px;
-        flex-wrap: nowrap;
-    }
-    .filters > .el-select {
-        width: 110px;
-    }
-    .table-tools .el-button {
-        padding-inline: 10px;
-    }
-    .account-surface > .accounts-table {
-        flex: 1;
-        min-height: 0;
-    }
-    .accounts-table :deep(.el-table__inner-wrapper) {
-        height: 100%;
-    }
-    .accounts-table :deep(.el-table__body-wrapper) {
-        flex: 1;
-        min-height: 0;
-    }
-    .table-footer {
-        flex-shrink: 0;
-        padding: 9px 16px;
-        gap: 10px;
-    }
-    .table-footer > span {
-        font-size: 11px;
-    }
-    .profile-import-jobs {
-        max-height: 135px;
-        overflow: auto;
-        flex-shrink: 0;
-        margin-bottom: 12px;
-        scrollbar-width: thin;
+    .account-table-wrap {
+        flex: 1 1 0;
+        min-height: 80px;
+        height: auto;
     }
 }
 </style>

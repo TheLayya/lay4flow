@@ -195,7 +195,9 @@ try {
     await page.getByPlaceholder('输入登录密码').press('Enter')
     await page.locator('.dashboard-page h1').waitFor()
     assert.equal(loginPosts - loginPostsBeforeEnter, 1, 'Enter must submit login exactly once')
-    assert.ok((await context.cookies()).some((cookie) => cookie.name === 'lay4flow_remote_admin_session' && cookie.httpOnly))
+    assert.ok(
+        (await context.cookies()).some((cookie) => cookie.name === 'lay4flow_remote_admin_session' && cookie.httpOnly),
+    )
     assert.equal(await page.evaluate(() => localStorage.getItem('token')), null)
     record('Synthetic cookie login succeeds without storing admin bearer token')
 
@@ -235,18 +237,18 @@ try {
     assert.equal(await page.getByRole('button', { name: '导出全部账号', exact: true }).isEnabled(), false)
     assert.equal(await page.getByRole('button', { name: '更多账号操作', exact: true }).count(), 0)
     await page.getByRole('button', { name: '导入 JSON', exact: true }).click()
-    const importDialog = page.getByRole('dialog').filter({ hasText: '导入账号 Profile' })
+    const importDialog = page.getByRole('dialog').filter({ hasText: '导入账号 JSON' })
     await importDialog.waitFor()
     assert.equal(await importDialog.getByRole('button', { name: '后台导入', exact: true }).isEnabled(), false)
     await importDialog.getByRole('button', { name: '关闭', exact: true }).click()
     record('Account toolbar exposes Profile import/export and empty imports stay disabled')
     await go('settings')
-    for (const label of ['基础与访问', '生成与调度', '验证码服务', '媒体缓存', '运行诊断']) {
+    for (const label of ['基础与访问', '生成与调度', '自定义规则', '远程有头打码', '媒体缓存', '运行诊断']) {
         await page.locator('.settings-nav button').filter({ hasText: label }).click()
-        await waitText(page.locator('.settings-section-title'), label)
+        assert.equal(await page.getByRole('tab', { name: label, exact: true }).getAttribute('aria-selected'), 'true')
         assert.equal(await page.locator('.settings-alert').count(), 0)
     }
-    record('All five Settings groups read real synthetic API configuration')
+    record('All six Settings tabs read synthetic API configuration')
     await go('logs')
     await waitText(page.locator('.el-empty'), '第一份作品')
     await page.getByPlaceholder('搜索账号、请求 ID 或错误内容').fill('no-match')
@@ -491,50 +493,49 @@ try {
     await page.setViewportSize({ width: 1440, height: 1000 })
     await go('accounts')
     await waitText(page.locator('.accounts-table'), 'koharu@example.test')
-    const quotaCell = page.locator('.accounts-table .vids-quota-cell').first()
-    await waitText(quotaCell, '19')
-    assert.match(await quotaCell.innerText(), /427\s*\/\s*430/)
-    await waitText(quotaCell, '已自动同步')
+    const quotaRow = page.locator('.accounts-table .el-table__row').first()
+    await waitText(quotaRow, '19')
+    assert.match(await quotaRow.innerText(), /427\s*\/\s*430/)
+    await quotaRow.locator('.account-number-cell > span[title^="已自动同步"]').first().waitFor()
     assert.ok(autoQuotaReads > 0, 'Opening the account page must automatically request refreshed quotas')
     assert.equal(
         await page.locator('.el-drawer:visible').count(),
         0,
         'Quota numbers must be visible without opening details',
     )
-    assert.ok(await quotaCell.locator('time').isVisible(), 'Quota freshness must be visible alongside the numbers')
-    await quotaCell.getByRole('button', { name: '刷新 koharu@example.test 的 Vids 额度', exact: true }).click()
-    await page.waitForFunction(() => !document.querySelector('.vids-quota-cell .is-loading'))
+    assert.match(await quotaRow.locator('.account-number-cell > span[title]').first().getAttribute('title'), /2026/, 'Quota freshness remains available alongside its numbers')
+    await quotaRow.getByRole('button', { name: '刷新 koharu@example.test 的 Vids 额度', exact: true }).click()
+    await page.waitForFunction(() => !document.querySelector('.accounts-table .account-number-cell .is-loading'))
     assert.equal(quotaPosts, 1)
     await screenshot('accounts', 1440, 1000, '-fixture')
     await screenshot('accounts', 390, 844, '-fixture')
-    const mobileQuota = page.locator('.mobile-account').first()
+    const mobileQuota = page.locator('.accounts-table .el-table__row').first()
     assert.ok(await mobileQuota.isVisible())
     assert.match(
         await mobileQuota.innerText(),
-        /Flow 积分[\s\S]*1,200[\s\S]*Vids 图片[\s\S]*19[\s\S]*20[\s\S]*Vids 视频[\s\S]*427[\s\S]*430/,
+        /1,200[\s\S]*19[\s\S]*20[\s\S]*427[\s\S]*430/,
     )
-    await mobileQuota.getByRole('button', { name: '刷新 Vids', exact: true }).click()
-    await page.waitForFunction(() => !document.querySelector('.mobile-account .is-loading'))
+    await mobileQuota.getByRole('button', { name: '刷新 koharu@example.test 的 Vids 额度', exact: true }).click()
+    await page.waitForFunction(() => !document.querySelector('.accounts-table .account-number-cell .is-loading'))
     assert.equal(quotaPosts, 2)
     await page.setViewportSize({ width: 1440, height: 1000 })
     failQuota = true
     await page.locator('.page-actions').getByRole('button', { name: '刷新', exact: true }).click()
-    await waitText(quotaCell, '更新失败 · 保留上次额度')
-    assert.match(await quotaCell.innerText(), /19[\s\S]*427/)
-    await waitText(quotaCell, 'Synthetic quota refresh interruption')
+    await quotaRow.locator('.account-number-cell > span[title^="更新失败 · 保留上次额度"]').first().waitFor()
+    assert.match(await quotaRow.innerText(), /19[\s\S]*427/)
+    assert.match(await quotaRow.locator('.account-number-cell > span[title]').first().getAttribute('title'), /Synthetic quota refresh interruption/)
     failQuota = false
     await page.locator('.page-actions').getByRole('button', { name: '刷新', exact: true }).click()
-    await waitText(quotaCell, '已自动同步')
+    await quotaRow.locator('.account-number-cell > span[title^="已自动同步"]').first().waitFor()
     record('Vids quotas auto-refresh, remain directly visible on desktop/mobile and retain values on refresh failure')
-    await page.getByRole('button', { name: '操作 koharu@example.test', exact: true }).click()
-    await page.getByRole('menuitem', { name: '编辑配置', exact: true }).click()
+    await page.getByRole('button', { name: '编辑 koharu@example.test', exact: true }).first().click()
     await page.getByPlaceholder('输入 Google Flow 的 Session Token').fill('fixture-updated-session')
-    await page.locator('.el-drawer:visible').getByRole('button', { name: '保存成员配置', exact: true }).click()
+    await page.locator('.el-drawer:visible').getByRole('button', { name: '保存账号配置', exact: true }).click()
     await page.locator('.el-drawer:visible').waitFor({ state: 'hidden' })
     assert.equal(accountEdits, 1)
     assert.equal(accounts[0].st, 'fixture-updated-session')
-    await page.getByRole('button', { name: '操作 koharu@example.test', exact: true }).click()
-    await page.getByRole('menuitem', { name: '暂停账号', exact: true }).click()
+    await page.getByRole('switch', { name: 'koharu@example.test 账号状态', exact: true }).locator('..').click()
+    await page.waitForFunction(() => document.querySelector('.accounts-table [aria-label="koharu@example.test 账号状态"]')?.getAttribute('aria-checked') === 'false')
     assert.equal(accounts[0].is_active, false)
     failTokens = true
     await page.locator('.page-actions').getByRole('button', { name: '刷新', exact: true }).click()

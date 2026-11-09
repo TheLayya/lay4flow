@@ -2,4 +2,6 @@ lay4flow-remote
 
 This software includes code originally authored by TheSmallHanCat.
 Copyright (c) 2025 TheSmallHanCat.
+Portions adapted from Vids2API (commit 5ae0ef5a0b7bc845ca91d3e5ccd6332789983293),
+Copyright (c) 2026 TheSmallHanCat. https://github.com/TheSmallHanCat/vids2api
 The original MIT copyright and permission notice are retained in LICENSE.

@@ -7,11 +7,16 @@ import hashlib
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
-from .client import VidsProtocolError, VidsTransportError
+from ...core.logger import debug_logger
+from .client import VidsProtocolError, VidsTransportError, video_feature
 from .gateway import GatewayError, VidsGateway
+
+QUOTA_FRESHNESS_SECONDS = 15 * 60
 
 
 class VidsDispatchError(GatewayError):
@@ -23,6 +28,16 @@ class VidsAccount:
     token_id: int
     gateway: VidsGateway
     identity_hash: str
+
+
+@dataclass(frozen=True)
+class QuotaObservation:
+    account: VidsAccount
+    client: object
+    feature: int
+    quota: dict
+    observed_at: float
+    queried_at: str
 
 
 class VidsProviderDispatcher:
@@ -42,6 +57,37 @@ class VidsProviderDispatcher:
         self._pool_selection_lock = asyncio.Lock()
         self._pool_last_selected: dict[str, int] = {}
         self._pool_pending: set[int] = set()
+        # Routing observations belong to this binding, never to Flow credits.
+        self._quota_observations: dict[tuple[int, str], QuotaObservation] = {}
+        self._quota_reads: dict[tuple[int, str], object] = {}
+        self.account_policy = None
+
+    async def _observe_receipt(self, token_id, gateway, identifier, *, body=None, started_at=None):
+        if self.account_policy is None or not gateway._path(identifier).is_file():
+            return
+        summary = None
+        if isinstance(body, dict):
+            summary = {
+                name: body[name]
+                for name in (
+                    "kind",
+                    "mode",
+                    "seconds",
+                    "size",
+                    "aspect_ratio",
+                    "style",
+                    "n",
+                    "voice",
+                )
+                if name in body and type(body[name]) in (str, int, bool)
+            }
+        try:
+            await self.account_policy.observe(
+                token_id, gateway.get(identifier), request_summary=summary, started_at=started_at
+            )
+        except Exception as error:
+            # Accepted media/receipts remain available even if diagnostics storage fails.
+            debug_logger.log_warning(f"[VIDS_RECEIPT_LOG] {type(error).__name__}")
 
     @staticmethod
     def _root(gateway):
@@ -84,6 +130,97 @@ class VidsProviderDispatcher:
         self._claims.clear()
         self._document_refs.clear()
         self._pool_last_selected.clear()
+        self._quota_observations.clear()
+        self._quota_reads.clear()
+
+    @staticmethod
+    def _quota_feature(client, kind):
+        return (
+            video_feature(getattr(client, "flags", {}))
+            if kind == "video"
+            else {"image": 205, "speech": 254, "music": 242}.get(kind)
+        )
+
+    def _quota_context_matches(self, token_id, kind, account, client, feature):
+        return (
+            self._accounts.get(token_id) is account
+            and account.gateway.client is client
+            and getattr(account.gateway, "_ready", True)
+            and getattr(client, "initialization_valid", True) is not False
+            and (
+                not getattr(account.gateway, "identity", None)
+                or getattr(client, "flags", {}).get("docs-hue") == account.gateway.identity
+            )
+            and self._quota_feature(client, kind) == feature
+        )
+
+    async def read_quota(self, token_id, kind):
+        """Share existing free quota reads with admission without adding polling."""
+        account = self._account(token_id, network=True)
+        key = (token_id, kind)
+        client = account.gateway.client
+        feature = self._quota_feature(client, kind)
+        read = object()
+        self._quota_reads[key] = read
+        try:
+            quota = await account.gateway.quota(kind)
+            if (
+                not isinstance(quota, dict)
+                or type(quota.get("available")) is not int
+                or quota["available"] < 0
+            ):
+                raise GatewayError(502, "schema_changed", "Upstream quota structure changed")
+        except BaseException:
+            # A failed/cancelled refresh must not extend a previous zero balance.
+            observation = self._quota_observations.get(key)
+            if (
+                self._quota_reads.get(key) is read
+                and observation is not None
+                and observation.account is account
+                and observation.client is client
+            ):
+                self._quota_observations.pop(key, None)
+            raise
+        if self._quota_reads.get(key) is read and self._quota_context_matches(
+            token_id, kind, account, client, feature
+        ):
+            self._quota_observations[key] = QuotaObservation(
+                account,
+                client,
+                feature,
+                dict(quota),
+                time.monotonic(),
+                datetime.now(timezone.utc).isoformat(),
+            )
+        return quota
+
+    def quota_snapshot(self, token_id, kind):
+        observation = self._quota_observations.get((token_id, kind))
+        if observation is None or not self._quota_context_matches(
+            token_id, kind, observation.account, observation.client, observation.feature
+        ):
+            return None
+        age = time.monotonic() - observation.observed_at
+        return {
+            **observation.quota,
+            "queried_at": observation.queried_at,
+            "error": None,
+            "stale": not 0 <= age < QUOTA_FRESHNESS_SECONDS,
+        }
+
+    def quota_exhausted(self, token_id, kind):
+        observation = self.quota_snapshot(token_id, kind)
+        return (
+            observation is not None and not observation["stale"] and observation["available"] == 0
+        )
+
+    def forget_quota(self, token_id):
+        for key in list(self._quota_observations):
+            if key[0] == token_id:
+                self._quota_observations.pop(key, None)
+        for key in list(self._quota_reads):
+            if key[0] == token_id:
+                self._quota_reads.pop(key, None)
 
     def _verify_identity(self, account, root, *, check_session=True):
         gateway = account.gateway
@@ -133,7 +270,9 @@ class VidsProviderDispatcher:
         # Durable receipts are pure replays. Gateway normalization still verifies
         # exact parameters, while expired credentials cannot trigger another POST.
         if account.gateway._path(generation_id).exists():
-            return await account.gateway.generate(body, idempotency_key)
+            result = await account.gateway.generate(body, idempotency_key)
+            await self._observe_receipt(token_id, account.gateway, generation_id)
+            return result
 
         if kind == "image" and "image_base64" in body:
             insertion_id = (
@@ -148,9 +287,24 @@ class VidsProviderDispatcher:
             self._account(token_id, network=True)
 
         async def admission():
-            await self._admission(token_id, kind)
+            await self._admission(token_id, kind, check_quota=True)
 
-        return await account.gateway.generate(body, idempotency_key, admission=admission)
+        started_at = time.time()
+        if self.account_policy is not None:
+            tracking = getattr(account.gateway, "_vids_outcome_tracking", None)
+            if tracking is None:
+                tracking = account.gateway._vids_outcome_tracking = set()
+            tracking.add(generation_id)
+        try:
+            return await account.gateway.generate(body, idempotency_key, admission=admission)
+        finally:
+            # Cancellation also leaves an unknown durable receipt; record its
+            # evidence without treating uncertain acceptance as an account fault.
+            await self._observe_receipt(
+                token_id, account.gateway, generation_id, body=body, started_at=started_at
+            )
+            if self.account_policy is not None:
+                account.gateway._vids_outcome_tracking.discard(generation_id)
 
     def _receipt_owners(self, identifier):
         if not isinstance(identifier, str) or not re.fullmatch(r"vids_[a-f0-9]{64}", identifier):
@@ -197,7 +351,7 @@ class VidsProviderDispatcher:
                 repaired = True
                 account = self._account(token_id, network=True)
             try:
-                quota = await account.gateway.quota(kind)
+                quota = await self.read_quota(token_id, kind)
             except VidsProtocolError as error:
                 if error.status in {401, 403}:
                     account.gateway.client.initialization_valid = False
@@ -208,7 +362,7 @@ class VidsProviderDispatcher:
                 await self._repair_generation_session(token_id)
                 account = self._account(token_id, network=True)
                 try:
-                    quota = await account.gateway.quota(kind)
+                    quota = await self.read_quota(token_id, kind)
                 except Exception as error:
                     if isinstance(error, VidsProtocolError) and error.status in {401, 403}:
                         account.gateway.client.initialization_valid = False
@@ -235,7 +389,7 @@ class VidsProviderDispatcher:
                 503, "session_unavailable", "Vids session repair failed"
             ) from None
 
-    async def _admission(self, token_id, kind, *, check_session=True):
+    async def _admission(self, token_id, kind, *, check_session=True, check_quota=False):
         self._account(token_id, network=check_session)
         try:
             token = await self.db.get_token(token_id)
@@ -253,6 +407,12 @@ class VidsProviderDispatcher:
             raise VidsDispatchError(
                 503, "account_disabled", "The selected Vids account is unavailable"
             )
+        if check_quota and self.account_policy is not None:
+            reason = await self.account_policy.availability(token_id)
+            if reason is not None:
+                raise VidsDispatchError(429, "vids_account_protected", reason)
+        if check_quota and self.quota_exhausted(token_id, kind):
+            raise VidsDispatchError(429, "quota_exhausted", "Vids generation quota is exhausted")
 
     def document_reference(self, token_id, identifier, *, scenes=False):
         account = self._account(token_id)
@@ -307,9 +467,43 @@ class VidsProviderDispatcher:
 
     async def public_accounts(self):
         """Read local bindings and DB switches without touching upstream sessions."""
+        switches = await self.account_switches(self._accounts)
+        return self._public_accounts(switches)
+
+    async def account_switches(self, token_ids):
+        """Fetch only safe console fields for the requested accounts in one connection."""
+        identifiers = sorted({value for value in token_ids if type(value) is int and value > 0})
+        if not identifiers:
+            return {}
+        result = {}
+        async with self.db._connect() as db:
+            for offset in range(0, len(identifiers), 900):
+                chunk = identifiers[offset : offset + 900]
+                rows = await (
+                    await db.execute(
+                        "SELECT id,email,is_active,image_enabled,video_enabled FROM tokens WHERE id IN ("
+                        + ",".join("?" for _ in chunk)
+                        + ")",
+                        chunk,
+                    )
+                ).fetchall()
+                result.update(
+                    {
+                        row[0]: {
+                            "token_id": row[0],
+                            "email": row[1] or "",
+                            "enabled": bool(row[2]),
+                            "image_enabled": bool(row[3]),
+                            "video_enabled": bool(row[4]),
+                        }
+                        for row in rows
+                    }
+                )
+        return result
+
+    def _public_accounts(self, switches):
         result = []
         for token_id in sorted(self._accounts):
-            token = await self.db.get_token(token_id)
             try:
                 self._account(token_id, network=True)
                 ready = True
@@ -318,10 +512,11 @@ class VidsProviderDispatcher:
             result.append(
                 {
                     "token_id": token_id,
-                    "email": getattr(token, "email", ""),
-                    "enabled": bool(token and token.is_active),
-                    "image_enabled": bool(token and getattr(token, "image_enabled", False)),
-                    "video_enabled": bool(token and getattr(token, "video_enabled", False)),
+                    "email": "",
+                    "enabled": False,
+                    "image_enabled": False,
+                    "video_enabled": False,
+                    **switches.get(token_id, {}),
                     "ready": ready,
                 }
             )
@@ -349,7 +544,17 @@ class VidsProviderDispatcher:
         return path, mime
 
     async def retry_download(self, token_id, generation_id):
-        return await self._account(token_id, network=True).gateway.retry_download(generation_id)
+        gateway = self._account(token_id, network=True).gateway
+        try:
+            return await gateway.retry_download(generation_id)
+        finally:
+            await self._observe_receipt(token_id, gateway, generation_id)
+
+    async def reconcile_outcomes(self, token_id):
+        if self.account_policy is None:
+            return
+        account = self._account(token_id)
+        await self.account_policy.reconcile(token_id, account.gateway.root)
 
 
 class VidsPoolDispatcher:
@@ -373,6 +578,8 @@ class VidsPoolDispatcher:
 
     async def _eligible(self, kind):
         busy = False
+        exhausted = False
+        protected = False
         configured = False
         recoverable = None
         last = self.dispatcher._pool_last_selected.get(kind, 0)
@@ -400,6 +607,15 @@ class VidsPoolDispatcher:
                 continue
             if kind in {"image", "video"} and not getattr(token, f"{kind}_enabled", False):
                 continue
+            if (
+                self.dispatcher.account_policy is not None
+                and await self.dispatcher.account_policy.availability(token_id) is not None
+            ):
+                protected = True
+                continue
+            if self.dispatcher.quota_exhausted(token_id, kind):
+                exhausted = True
+                continue
             preflight = self.dispatcher._preflight_locks.get(token_id)
             if (
                 account.gateway.lock.locked()
@@ -418,6 +634,14 @@ class VidsPoolDispatcher:
             return recoverable
         if busy:
             raise VidsDispatchError(429, "busy", "All eligible Vids accounts are busy")
+        if exhausted:
+            raise VidsDispatchError(429, "quota_exhausted", "Vids generation quota is exhausted")
+        if protected:
+            raise VidsDispatchError(
+                429,
+                "vids_account_protected",
+                "Vids accounts are protected; check their recovery time",
+            )
         if configured:
             raise VidsDispatchError(
                 503, "account_disabled", "No eligible Vids account is available"

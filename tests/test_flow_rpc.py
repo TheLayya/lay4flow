@@ -179,7 +179,6 @@ class FlowRPCTests(unittest.IsolatedAsyncioTestCase):
     async def test_google_login_redirect_and_http_auth_statuses_need_login(self):
         for status, url, headers in [
             (401, FLOW_URL, {}),
-            (403, FLOW_URL, {}),
             (302, FLOW_URL, {"location": "https://accounts.google.com/ServiceLogin"}),
             (200, "https://accounts.google.com/signin/v2/identifier", {}),
         ]:
@@ -188,7 +187,7 @@ class FlowRPCTests(unittest.IsolatedAsyncioTestCase):
                 context.request.get.return_value = response(status=status, url=url, headers=headers)
                 await self.error(context, "login_required", "flow_bootstrap")
                 context.request.post.assert_not_awaited()
-        for status in (401, 403):
+        for status in (401,):
             await self.error(
                 self.context(identity=response(status=status, url=RPC_URL)),
                 "login_required",
@@ -199,6 +198,44 @@ class FlowRPCTests(unittest.IsolatedAsyncioTestCase):
                 "login_required",
                 "flow_credits",
             )
+
+    async def test_bare_http_forbidden_keeps_retryable_status_without_claiming_logout(self):
+        context = self.context()
+        context.request.get.return_value = response(status=403)
+        error = await self.error(context, "transient_error", "flow_bootstrap")
+        self.assertEqual(error.http_status, 403)
+        self.assertTrue(error.retryable)
+        context.request.post.assert_not_awaited()
+        for step, context, posts in (
+            ("flow_identity", self.context(identity=response(status=403, url=RPC_URL)), 1),
+            ("flow_credits", self.context(credits=response(status=403, url=RPC_URL)), 2),
+        ):
+            with self.subTest(step=step):
+                error = await self.error(context, "transient_error", step)
+                self.assertEqual(error.http_status, 403)
+                self.assertTrue(error.retryable)
+                self.assertFalse(error.submission_rejected)
+                self.assertEqual(context.request.post.await_count, posts)
+
+    async def test_http_forbidden_write_is_not_replayed_or_reported_as_confirmed_rejection(self):
+        context = self.context()
+        context.flow_bootstrap_cache = {}
+        context.request.post.side_effect = None
+        context.request.post.return_value = response(status=403, url=RPC_URL)
+        with self.assertRaises(FlowRPCError) as caught:
+            await flow_rpc(context, "ogiZ0b", ["synthetic-write"], expected_email=EMAIL)
+        self.assertEqual(caught.exception.reason, "transient_error")
+        self.assertEqual(caught.exception.http_status, 403)
+        self.assertFalse(caught.exception.submission_rejected)
+        context.request.post.assert_awaited_once()
+        self.assertEqual(context.flow_bootstrap_cache, {})
+
+    async def test_forbidden_response_from_untrusted_origin_is_not_a_session_signal(self):
+        context = self.context()
+        context.request.get.return_value = response(status=403, url="https://other.invalid/")
+        error = await self.error(context, "account_probe_error", "flow_bootstrap")
+        self.assertEqual(error.http_status, 403)
+        context.request.post.assert_not_awaited()
 
     async def test_missing_signed_in_identity_needs_login(self):
         for email in (None, ""):
@@ -533,11 +570,11 @@ class FlowRPCTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(caught.exception.submission_rejected)
             self.assertEqual(context.request.post.await_count, 1)
 
-    async def test_unknown_public_error_string_is_not_reflected_and_auth_xsrf_is_not_replayed(self):
+    async def test_new_safe_public_enum_is_preserved_but_arbitrary_text_and_tokens_are_not(self):
         for rows, reason in (
             (
                 [["wrb.fr", "ogiZ0b", None, None, None, [13, "PUBLIC_ERROR_PRIVATE_SECRET"]]],
-                "transient_error",
+                "rpc_rejected",
             ),
             ([["er", None, None, None, None, 401], ["xsrf", "private-token"]], "login_required"),
         ):
@@ -548,7 +585,8 @@ class FlowRPCTests(unittest.IsolatedAsyncioTestCase):
                 await flow_rpc(context, "ogiZ0b", [])
             self.assertEqual(caught.exception.reason, reason)
             self.assertEqual(context.request.post.await_count, 1)
-            self.assertNotIn("PRIVATE_SECRET", str(caught.exception))
+            if "PUBLIC_ERROR_PRIVATE_SECRET" in json.dumps(rows):
+                self.assertEqual(caught.exception.public_error, "PUBLIC_ERROR_PRIVATE_SECRET")
             self.assertNotIn("private-token", str(caught.exception))
 
 

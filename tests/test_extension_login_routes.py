@@ -2,8 +2,11 @@
 
 import asyncio
 import io
+import time
 import unittest
 import zipfile
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -14,6 +17,7 @@ from src.api.admin_routes.extension_login import (
     ExtensionLoginSessions,
     create_extension_login_router,
 )
+from src.services.browser.extension_import_jobs import ExtensionImportJobs
 
 
 class ExtensionLoginRouteTests(unittest.TestCase):
@@ -23,6 +27,9 @@ class ExtensionLoginRouteTests(unittest.TestCase):
         self.importer = AsyncMock(
             return_value={"success": True, "email": "member@example.test", "token_id": 7}
         )
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.job_store = ExtensionImportJobs(Path(directory.name), self.importer)
 
         async def verify(request: Request):
             if request.cookies.get("admin-session") != self.owner:
@@ -36,12 +43,22 @@ class ExtensionLoginRouteTests(unittest.TestCase):
                 verify,
                 sessions=self.sessions,
                 import_login=self.importer,
+                job_store=self.job_store,
             )
         )
-        self.client = TestClient(app)
-        self.addCleanup(self.client.close)
+        self.client = self.enterContext(TestClient(app))
         self.client.cookies.set("admin-session", self.owner)
         self.headers = {"Origin": "http://testserver"}
+
+    def wait_job(self, job_id):
+        for _ in range(100):
+            response = self.client.get(f"/api/plugin/import/jobs/{job_id}")
+            self.assertEqual(response.status_code, 200)
+            job = response.json()["job"]
+            if job["state"] in {"completed", "failed"}:
+                return job
+            time.sleep(0.01)
+        self.fail("job never reached its durable terminal state")
 
     def start(self):
         response = self.client.post("/api/plugin/import/start", json={}, headers=self.headers)
@@ -86,8 +103,10 @@ class ExtensionLoginRouteTests(unittest.TestCase):
         self.assertNotIn("proxy_pool_id", self.sessions.items[receipt["session_id"]])
         self.assertNotIn("proxy_url", self.sessions.items[receipt["session_id"]])
         response = self.complete(receipt, proxy_url="http://attacker.invalid:80", proxy_pool_id=99)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["email"], "member@example.test")
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.json()["accepted"])
+        done = self.wait_job(response.json()["job_id"])
+        self.assertEqual(done["email"], "member@example.test")
         args = self.importer.await_args
         self.assertEqual(args.kwargs, {})
         self.assertEqual(set(args.args[0]), {"google_cookies", "browser_identity"})
@@ -96,8 +115,12 @@ class ExtensionLoginRouteTests(unittest.TestCase):
 
     def test_retry_is_idempotent_and_bound_to_same_browser_and_administrator(self):
         receipt = self.start()
-        self.assertEqual(self.complete(receipt).status_code, 200)
-        self.assertTrue(self.complete(receipt).json()["idempotent"])
+        first = self.complete(receipt)
+        self.assertEqual(first.status_code, 202)
+        self.wait_job(first.json()["job_id"])
+        second = self.complete(receipt)
+        self.assertEqual(second.status_code, 200)
+        self.assertTrue(second.json()["idempotent"])
         self.importer.assert_awaited_once()
         self.assertEqual(self.complete(receipt, tab_id="other").status_code, 403)
         self.owner = "different-admin"
@@ -113,14 +136,49 @@ class ExtensionLoginRouteTests(unittest.TestCase):
         self.assertEqual(self.complete(receipt).status_code, 410)
         self.importer.assert_not_awaited()
 
+    def test_durable_receipt_can_be_recovered_after_handshake_metadata_is_lost(self):
+        receipt = self.start()
+        response = self.complete(receipt)
+        completed = self.wait_job(response.json()["job_id"])
+        self.sessions.items.clear()
+        recovered = self.complete(receipt)
+        self.assertEqual(recovered.status_code, 200)
+        self.assertEqual(recovered.json()["token_id"], completed["token_id"])
+        self.importer.assert_awaited_once()
+        self.assertEqual(self.complete({**receipt, "nonce": "wrong"}).status_code, 403)
+
+    def test_task_history_and_retry_are_owner_scoped(self):
+        receipt = self.start()
+        self.importer.side_effect = RuntimeError("synthetic-private-cookie")
+        response = self.complete(receipt)
+        job_id = response.json()["job_id"]
+        self.wait_job(job_id)
+        history = self.client.get("/api/plugin/import/jobs")
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(history.json()["jobs"][0]["state"], "failed")
+        self.assertNotIn("synthetic-private-cookie", history.text)
+        self.importer.side_effect = None
+        retried = self.client.post(f"/api/plugin/import/jobs/{job_id}/retry", headers=self.headers)
+        self.assertEqual(retried.status_code, 200)
+        self.assertEqual(self.wait_job(job_id)["state"], "completed")
+        self.owner = "another-admin"
+        self.client.cookies.set("admin-session", self.owner)
+        self.assertEqual(self.client.get("/api/plugin/import/jobs").json()["jobs"], [])
+        self.assertEqual(self.client.get(f"/api/plugin/import/jobs/{job_id}").status_code, 404)
+
     def test_failure_is_private_and_cannot_repeat_profile_mutations(self):
         receipt = self.start()
         self.importer.side_effect = RuntimeError("synthetic-private-cookie-content")
         response = self.complete(receipt)
-        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.status_code, 202)
         self.assertNotIn("synthetic-private", response.text)
         self.assertEqual(response.headers["cache-control"], "no-store")
-        self.assertEqual(self.complete(receipt).status_code, 422)
+        failed = self.wait_job(response.json()["job_id"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertTrue(failed["can_retry"])
+        self.assertNotIn("synthetic-private", str(failed))
+        repeated = self.complete(receipt)
+        self.assertEqual(repeated.json()["job"]["state"], "failed")
         self.importer.assert_awaited_once()
 
     def test_download_is_current_origin_only_and_contains_public_files(self):

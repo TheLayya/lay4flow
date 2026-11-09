@@ -5,10 +5,11 @@ import json
 import re
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from starlette.datastructures import UploadFile
 
 from ..services.vids.gateway import GatewayError
+from ..services.vids.media_cleanup import VidsFileResponse as FileResponse
 from .openai_common import APIError, OpenAIRoute, limit_request_body, read_json_body
 from .openai_images import image_dimensions
 from .vids_schemas import (
@@ -165,9 +166,12 @@ def public_video(record):
         "vids_status": status,
         "receipt_url": f"/v1/vids/generations/{identifier}",
         "retry_download_url": f"/v1/vids/generations/{identifier}/download"
-        if status in {"received", "download_failed"}
+        if status in {"received", "download_failed"} or record.get("media_expired")
         else None,
-        "content_url": f"/v1/videos/{identifier}/content" if status == "completed" else None,
+        "content_url": f"/v1/videos/{identifier}/content"
+        if status == "completed" and not record.get("media_expired")
+        else None,
+        **({"media_expired": True} if record.get("media_expired") else {}),
     }
 
 

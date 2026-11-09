@@ -9,6 +9,7 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from .cookie_import import CookieProfileImport, is_cookie_import
 from .profile_transfer import (
     FORMAT,
     TRANSFER_STAGES,
@@ -281,7 +282,15 @@ class ProfileImportJobs:
                             result = await self.transfer.import_bundle(
                                 value, **kwargs, on_stage=progress
                             )
-                            added, updated = 1, 0
+                            updated = int(result.get("action") == "updated")
+                            added = 1 - updated
+                        elif is_cookie_import(value):
+                            progress("cookie_import")
+                            result = await CookieProfileImport(self.transfer).import_account(
+                                value, **kwargs, on_stage=progress
+                            )
+                            updated = int(result.get("action") == "updated")
+                            added = 1 - updated
                         elif self.legacy_importer is not None:
                             progress("legacy_import")
                             result = await self.legacy_importer(value, **kwargs)

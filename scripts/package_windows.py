@@ -1,4 +1,4 @@
-"""Package the public runtime and native Docker Desktop one-click installer."""
+"""Package the public runtime and native Windows one-click installer."""
 
 import argparse
 import hashlib
@@ -7,7 +7,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from package_release import ROOT, package_release
+from package_release import ROOT, package_release, runtime_files
 
 
 def package_windows(
@@ -80,6 +80,13 @@ def package_windows(
                 if not (backend_runtime / "python.exe").is_file() or not inventory.is_file():
                     raise FileNotFoundError("Build the bundled Windows backend runtime first")
                 manifest = json.loads(inventory.read_text(encoding="utf-8"))
+                requirements_sha256 = hashlib.sha256(
+                    (root / "requirements.txt").read_bytes()
+                ).hexdigest()
+                if manifest.get("requirements_sha256") != requirements_sha256:
+                    raise ValueError(
+                        "Backend runtime dependencies do not match requirements.txt; rebuild the bundled runtime"
+                    )
                 if not manifest.get("cloak_binary"):
                     raise ValueError("Backend runtime is missing the Cloak browser binary")
                 cloak_binary = manifest.get("cloak_binary")
@@ -102,8 +109,12 @@ def package_windows(
                     if relative.is_absolute() or ".." in relative.parts:
                         raise ValueError("Unexpected backend runtime path")
                     path = backend_runtime / relative
-                    if not path.is_file():
+                    if path.is_dir():
                         continue
+                    if not path.is_file():
+                        raise FileNotFoundError(
+                            f"Backend runtime inventory file is missing: {name}"
+                        )
                     if relative.as_posix() == "runtime-manifest.json":
                         continue
                     if (
@@ -124,7 +135,19 @@ def package_windows(
                         raise ValueError(f"Backend runtime contains private state: {relative}")
                     archive.write(path, f"{bundle_name}/backend/windows-x64/{relative.as_posix()}")
                 archive.write(inventory, f"{bundle_name}/backend/windows-x64/runtime-manifest.json")
-            archive.write(root / "docs/WINDOWS_INSTALL.md", f"{bundle_name}/README.md")
+            # Keep the illustrated installation guide usable directly from the
+            # extracted ZIP. The runtime's public allowlist remains the source
+            # of truth for companion docs/images; no local state is scanned.
+            windows_guide = (root / "docs/WINDOWS_INSTALL.md").read_text(encoding="utf-8")
+            windows_guide = windows_guide.replace("](images/", "](docs/images/").replace(
+                "](EXTENSION_LOGIN.md", "](docs/EXTENSION_LOGIN.md"
+            )
+            archive.writestr(f"{bundle_name}/README.md", windows_guide.encode("utf-8"))
+            archive.write(root / "README.md", f"{bundle_name}/PROJECT_README.md")
+            for path in runtime_files(root):
+                relative = path.relative_to(root)
+                if relative.parts[0] in {"docs", "account_import_extension"}:
+                    archive.write(path, f"{bundle_name}/{relative.as_posix()}")
             archive.write(root / "LICENSE", f"{bundle_name}/LICENSE")
             archive.write(root / "NOTICE", f"{bundle_name}/NOTICE")
             archive.write(runtime_path, f"{bundle_name}/runtime/{runtime_name}")

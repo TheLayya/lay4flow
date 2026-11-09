@@ -24,6 +24,7 @@ import { api, notifyError } from '../lib/api'
 import {
     STUDIO_HISTORY_KEY,
     STUDIO_HISTORY_OWNER_KEY,
+    canRemoveStudioEntry,
     readStudioHistory,
     selectStudioHistory,
     studioHistoryKey,
@@ -111,7 +112,6 @@ const params = reactive({
     shotMode: 'auto',
     trimStartMs: 0,
     trimEndMs: 10000,
-    mediaId: '',
 })
 const kinds = [
     { value: 'image', label: '绘梦 · 图片', icon: Picture },
@@ -193,7 +193,9 @@ const vidsFallback = {
 }
 const models = computed(() =>
     provider.value === 'flow'
-        ? flowModels.value.filter((item) => item.type === kind.value)
+        ? [...flowModels.value.filter((item) => item.type === kind.value)].sort(
+              (left, right) => Number(right.id === 'omni_1.2_flash') - Number(left.id === 'omni_1.2_flash'),
+          )
         : vidsModels.value.filter((item) => item.kind === kind.value),
 )
 const model = computed(() => models.value.find((item) => item.id === selectedId.value) || models.value[0])
@@ -204,7 +206,7 @@ const modes = computed(() =>
     provider.value === 'flow'
         ? kind.value === 'image'
             ? ['text', 'edit']
-            : Object.keys(capabilities.value.modes || {})
+            : Object.keys(capabilities.value.modes || {}).filter((mode) => mode !== 'extend' || capabilities.value.modes[mode].videoInput)
         : capabilities.value.modes || [],
 )
 const imageEditing = computed(() => kind.value === 'image' && params.mode === 'edit')
@@ -232,6 +234,29 @@ const modeLimits = computed(() => {
     }
 })
 const flowModeRows = computed(() => (capabilities.value.combinations || []).filter((row) => row.mode === params.mode))
+const editTrimMaximum = computed(() => modeLimits.value.maxTrimMs || 10000)
+const editTrimMinimum = computed(() => modeLimits.value.minTrimMs || 1)
+const omni12 = computed(() => provider.value === 'flow' && model.value?.id === 'omni_1.2_flash')
+const flowVideoExtend = computed(() => omni12.value && params.mode === 'extend')
+const flowModelHint = computed(() => {
+    if (provider.value !== 'flow' || kind.value !== 'video') return ''
+    if (model.value?.id === 'omni_1.1_flash') return 'Omni 1.1 Flash 将于 2026 年 12 月 5 日停用；新创作可选择 Omni 1.2 Flash。'
+    if (!omni12.value) return ''
+    const limits = params.mode === 'first_last_frame'
+        ? '首尾帧支持 3–10 秒。'
+        : params.mode === 'extend'
+          ? '上传 3–60 秒 MP4，或从已有作品选择续写；追加 3–10 秒，需 Plus、Pro 或 Ultra。可加 3 张参考图；高清成品总长不超过 15 秒。'
+          : '3–10 秒可用；11–15 秒需 Plus、Pro 或 Ultra。'
+    const seconds = params.mode === 'edit'
+        ? Math.ceil((params.trimEndMs - params.trimStartMs) / 1000)
+        : params.durationSeconds
+    const native = ['360p', '720p'].includes(params.resolution)
+    const points = params.mode === 'extend' ? seconds : Math.min(seconds, 10) + 2 * Math.max(0, seconds - 10)
+    const price = native && Number.isInteger(seconds) && seconds >= 3 && seconds <= 15
+        ? `当前单条约 ${points * (params.resolution === '720p' ? 3 : 1)} 点；实际扣点以上游为准。`
+        : '高清输出另需放大，1080p 需订阅，4K 需 Ultra；实际扣点以上游为准。'
+    return `${limits} ${price}`
+})
 const priorities = computed(() => unique(flowModeRows.value.map((row) => row.priority || 'standard')))
 const qualities = computed(() =>
     unique(
@@ -281,6 +306,8 @@ const specificationSummary = computed(() =>
                       : imageEditing.value
                         ? ''
                         : `${params.count} 张`
+                  : provider.value === 'flow' && params.mode === 'edit'
+                    ? `${(params.trimEndMs - params.trimStartMs) / 1000} 秒片段 · ${params.resolution.toUpperCase()}`
                   : params.mode === 'upscale'
                     ? '1080P'
                     : `${params.durationSeconds} 秒 · ${params.resolution.toUpperCase()}`,
@@ -355,8 +382,13 @@ const validation = computed(() => {
     if (materials.value.length > max) return `当前方式最多接受 ${max} 张图片。`
     if (modeLimits.value.videoInput && !sourceVideo.value) return '请添加本次创作要使用的原视频。'
     if (provider.value === 'flow' && kind.value === 'video') {
-        if (modeLimits.value.mediaId && !modeLimits.value.videoInput && !params.mediaId.trim())
-            return '续写需要已有 Flow 视频的媒体 ID。'
+        if (flowVideoExtend.value) {
+            const duration = sourceVideo.value?.duration
+            if (!Number.isFinite(duration)) return '正在读取原视频时长，请稍候。'
+            if (duration < 3 || duration > (modeLimits.value.maxInputVideoSeconds || 60)) return '续写原视频请使用 3–60 秒的 MP4。'
+            if (['1080p', '4k'].includes(params.resolution) && duration + params.durationSeconds > 15)
+                return '高清续写的原视频与追加时长合计不能超过 15 秒；可改用 360p 或 720p。'
+        }
         if (
             !combinations.value.some(
                 (row) =>
@@ -371,9 +403,10 @@ const validation = computed(() => {
                 !Number.isInteger(params.trimEndMs) ||
                 params.trimStartMs < 0 ||
                 params.trimEndMs <= params.trimStartMs ||
-                params.trimEndMs - params.trimStartMs > 10000)
+                params.trimEndMs - params.trimStartMs > editTrimMaximum.value ||
+                params.trimEndMs - params.trimStartMs < editTrimMinimum.value)
         )
-            return '编辑范围请使用整数毫秒，单段最长 10 秒。'
+            return `编辑范围请使用整数毫秒，${editTrimMinimum.value > 1 ? `单段 ${editTrimMinimum.value / 1000}–${editTrimMaximum.value / 1000} 秒。` : `单段最长 ${editTrimMaximum.value / 1000} 秒。`}`
         if (
             params.mode === 'edit' &&
             sourceVideo.value?.duration &&
@@ -419,7 +452,6 @@ function selectModel() {
             shotMode: 'auto',
             trimStartMs: 0,
             trimEndMs: 10000,
-            mediaId: '',
         },
         model.value?.defaults || {},
     )
@@ -455,8 +487,12 @@ watch(selectedId, selectModel)
 watch(() => [params.mode, params.priority, params.quality], normalizeOptions)
 watch(
     () => params.mode,
-    () => {
-        resetMaterials()
+    (mode) => {
+        if (provider.value === 'flow' && mode === 'extend' && modeLimits.value.maxImages) {
+            materialRevision++
+            sourceVideo.value = null
+            materials.value = materials.value.slice(0, modeLimits.value.maxImages)
+        } else resetMaterials()
         error.value = ''
     },
 )
@@ -779,12 +815,12 @@ async function addVideo(uploadFile) {
     try {
         const limit = provider.value === 'vids' ? 50 : 100
         if (
-            !(provider.value === 'vids' ? ['video/mp4'] : ['video/mp4', 'video/webm', 'video/quicktime']).includes(
+            !(provider.value === 'vids' || flowVideoExtend.value ? ['video/mp4'] : ['video/mp4', 'video/webm', 'video/quicktime']).includes(
                 file.type,
             )
         )
             throw new Error(
-                provider.value === 'vids' ? '请选择 MP4 原视频。' : '请选择 MP4、WebM 或 QuickTime 原视频。',
+                provider.value === 'vids' || flowVideoExtend.value ? '请选择 MP4 原视频。' : '请选择 MP4、WebM 或 QuickTime 原视频。',
             )
         if (file.size > limit * 1024 ** 2) throw new Error(`视频大小请控制在 ${limit} MiB 内。`)
         sourceVideo.value = { name: file.name, bytes: file.size, data: await fileData(file), duration: null }
@@ -798,8 +834,11 @@ function videoMetadata(event) {
     const duration = event.target.duration
     if (sourceVideo.value && Number.isFinite(duration)) {
         sourceVideo.value.duration = duration
-        params.trimEndMs = Math.min(10000, Math.round(duration * 1000))
+        if (params.mode === 'edit') params.trimEndMs = Math.min(editTrimMaximum.value, Math.round(duration * 1000))
     }
+}
+function videoMetadataFailed() {
+    if (flowVideoExtend.value) error.value = '无法读取原视频时长，请选择有效的 3–60 秒 MP4。'
 }
 function buildBody() {
     if (validation.value) throw new Error(validation.value)
@@ -840,11 +879,6 @@ function buildBody() {
         else videoConfig.durationSeconds = params.durationSeconds
         generationConfig.videoConfig = videoConfig
         if (modeLimits.value.videoInput) content.push({ type: 'video_url', video_url: { url: sourceVideo.value.data } })
-        if (modeLimits.value.mediaId && !modeLimits.value.videoInput) {
-            const id = params.mediaId.trim().replace(/^extend:\/\//, '')
-            if (/\s/.test(id)) throw new Error('媒体 ID 请移除空白字符。')
-            content.push({ type: 'video_url', video_url: { url: `extend://${id}` } })
-        }
     }
     return {
         model: selectedId.value,
@@ -908,6 +942,7 @@ function persistHistory() {
             kind: entry.kind,
             model: String(entry.model || '').slice(0, 128),
             status: entry.status,
+            mediaExpired: entry.mediaExpired === true,
             started: entry.started,
             ended: entry.ended,
             key: String(entry.key || '').slice(0, 128),
@@ -1038,7 +1073,7 @@ function applyGenerationJob(job, snapshot = null) {
         if (item.retry_trace) current.retryTrace = item.retry_trace
         if (job.provider === 'vids') {
             if (item.receipt) current.receipt = item.receipt
-            if (item.vids_receipt) applyReceipt(current, item.vids_receipt)
+            if (item.vids_receipt) applyReceipt(current, item.vids_receipt, true)
             for (const output of current.outputs) if (!output.url) output.url = output.path
         } else if (Array.isArray(item.outputs) && item.outputs.length) {
             current.outputs = item.outputs.flatMap((output) => {
@@ -1188,22 +1223,24 @@ function contentPath(value, receipt) {
         throw new Error('成品地址与当前收据不匹配。')
     return url.pathname + url.search
 }
-function applyReceipt(current, data) {
+function applyReceipt(current, data, fromJob = false) {
     if (!/^vids_[a-f0-9]{64}$/.test(data.id || '') || (current.receipt && current.receipt !== data.id))
         throw new Error('服务器返回收据与原请求不匹配。')
     if (data.kind && data.kind !== current.kind) throw new Error('服务器返回的媒体类型与原请求不匹配。')
     const status = data.vids_status || data.status
     if (!Object.keys(taskStatusNames).includes(status)) throw new Error('服务器返回了未知任务状态。')
+    const mediaExpired = data.media_expired === true
     if (
         data.outputs !== undefined &&
         (!Array.isArray(data.outputs) ||
             data.outputs.length > 4 ||
-            data.outputs.some((item, index) => !item || item.index !== index || typeof item.content_url !== 'string'))
+            data.outputs.some((item, index) => !item || item.index !== index ||
+                (typeof item.content_url !== 'string' && !(mediaExpired && item.content_url === null))))
     )
         throw new Error('服务器返回的成品列表格式异常。')
     const previous = current.outputs || []
     const outputs = (
-        data.outputs?.length ? data.outputs : data.content_url ? [{ content_url: data.content_url }] : []
+        mediaExpired ? [] : data.outputs?.length ? data.outputs : data.content_url ? [{ content_url: data.content_url }] : []
     ).map((item, index) => {
         const path = contentPath(item.content_url, data.id)
         if (Number(new URL(path, origin).searchParams.get('index') || 0) !== index)
@@ -1217,14 +1254,20 @@ function applyReceipt(current, data) {
     })
     current.receipt = data.id
     current.status = status
+    current.mediaExpired = mediaExpired
     current.outputs = outputs
-    current.message = data.error
+    current.message = mediaExpired
+        ? '服务端成品已按缓存保留时间清理，生成收据仍保留；可尝试恢复原结果下载。'
+        : data.error
         ? `服务端状态：${status} · ${typeof data.error === 'string' ? data.error : data.error.code || ''}`
         : status === 'completed'
           ? '作品生成完成，正在读取成品。'
           : status === 'unknown'
             ? '原请求接受状态等待确认，请保留收据并查询。'
             : taskStatusNames[status]
+    // Discard older in-flight job-list responses in both directions: direct
+    // queries may learn expiry, while original-download recovery may clear it.
+    if (!fromJob) generationJobsVersion++
 }
 const blobURLs = new Set()
 const archiveRequests = new WeakMap()
@@ -1316,6 +1359,40 @@ async function mediaBlob(output, current = task.value, index = 0) {
     if (!removedEntries.has(current)) await putStudioMedia(mediaNamespace, current, index, blob, { kind: output.kind })
     return blob
 }
+async function extendOutput({ entry, output, index = 0 }) {
+    if (materialBusy.value || submitting.value || !entry || entry.status !== 'completed' || !output ||
+        (output.kind || entry.kind) !== 'video') return
+    materialBusy.value = true
+    error.value = ''
+    try {
+        const blob = await mediaBlob(output, entry, index)
+        if (!(blob instanceof Blob) || !blob.size) throw new Error('原视频暂不可用，请先恢复或下载原作品。')
+        if (blob.size > 100 * 1024 ** 2) throw new Error('续写原视频不能超过 100 MiB。')
+        if (blob.type.split(';')[0].toLowerCase() !== 'video/mp4') throw new Error('续写目前支持 MP4，请下载原视频后转换为 MP4 再上传。')
+        const signature = new Uint8Array(await blob.slice(0, 12).arrayBuffer())
+        if (signature.length < 12 || String.fromCharCode(...signature.slice(4, 8)) !== 'ftyp')
+            throw new Error('原成品不是有效的 MP4，请重新上传原视频。')
+        if (!pageActive) return
+        provider.value = 'flow'
+        kind.value = 'video'
+        await nextTick()
+        if (!models.value.some((item) => item.id === 'omni_1.2_flash')) throw new Error('当前模型目录尚未提供 Omni 1.2 Flash，请先同步能力。')
+        selectedId.value = 'omni_1.2_flash'
+        selectModel()
+        await nextTick()
+        params.mode = 'extend'
+        await nextTick()
+        const data = await fileData(blob)
+        if (!pageActive) return
+        sourceVideo.value = { name: `${entry.title || '原作品'}.mp4`, bytes: blob.size, data, duration: null }
+        prompt.value = entry.description || entry.title || ''
+        ElMessage.success('原视频已准备好，可修改续写描述后提交。')
+    } catch (cause) {
+        error.value = cause.status === 410 ? '原成品缓存已过期，请先恢复原下载再续写。' : cause.message
+    } finally {
+        materialBusy.value = false
+    }
+}
 async function cacheFlowImages(current) {
     if (current.provider !== 'flow') return
     for (const [index, output] of current.outputs.entries()) {
@@ -1331,7 +1408,7 @@ async function cacheFlowImages(current) {
     }
 }
 async function preview(current, force = false) {
-    if (current.status !== 'completed' || !pageActive) return
+    if (current.status !== 'completed' || current.mediaExpired || !pageActive) return
     for (const [index, output] of current.outputs.entries()) {
         if (output.url && !force) continue
         output.loading = true
@@ -1361,7 +1438,7 @@ async function preview(current, force = false) {
 }
 async function inspect(current = task.value, recover = false) {
     if (!/^vids_[a-f0-9]{64}$/.test(current?.receipt || '') || busy.value) return
-    if (recover && !['received', 'download_failed'].includes(current.status)) {
+    if (recover && !['received', 'download_failed'].includes(current.status) && !(current.status === 'completed' && current.mediaExpired)) {
         error.value = '当前原收据状态请先查询；下载恢复仅处理已接受结果。'
         return
     }
@@ -1549,7 +1626,7 @@ async function restoreOriginalReceipt(entry) {
         const data = await readJSON(response)
         const target = pageActive ? entry : { ...entry, outputs: [...(entry.outputs || [])] }
         applyReceipt(target, data)
-        if (target.status === 'completed') {
+        if (target.status === 'completed' && !target.mediaExpired) {
             for (const output of target.outputs) {
                 if (!output.url) output.url = contentPath(output.path, entry.receipt)
             }
@@ -1602,28 +1679,33 @@ async function retryPreview({ entry }) {
             if (output.previewError) output.previewError = output.archiveError || cause.message
     }
 }
+function hiddenEntryKey(entry) {
+    return String(entry.key || entry.receipt || `${entry.provider}:${entry.started}`)
+}
 async function removeEntry(entry) {
-    if (!['completed', 'failed', 'no_result', 'specification_mismatch'].includes(entry?.status)) {
-        ElMessage.info('原任务仍待确认，先查询收据后再清理记录')
-        return
+    if (!canRemoveStudioEntry(entry)) {
+        ElMessage.info('任务正在排队或生成，暂不能清理记录')
+        return false
     }
     const index = history.value.indexOf(entry)
-    if (index < 0) return
-    if (entry.jobId) {
-        hiddenGenerationKeys.add(entry.key)
-        try {
-            localStorage.setItem(hiddenGenerationStorageKey, JSON.stringify([...hiddenGenerationKeys]))
-        } catch {}
+    if (index < 0) return false
+    const key = hiddenEntryKey(entry)
+    const hidden = new Set([...hiddenGenerationKeys, key])
+    try {
+        localStorage.setItem(hiddenGenerationStorageKey, JSON.stringify([...hidden]))
+    } catch {
+        error.value = '删除未完成：浏览器未能保存清理记录，请检查本地存储后重试。'
+        return false
     }
+    hiddenGenerationKeys.add(key)
     history.value.splice(index, 1)
     if (task.value === entry) task.value = history.value[0] || null
     persistHistory()
     await deleteEntryMedia(entry)
+    return true
 }
 async function removeMany(entries = []) {
-    const removable = entries.filter((entry) =>
-        ['completed', 'failed', 'no_result', 'specification_mismatch'].includes(entry.status),
-    )
+    const removable = entries.filter(canRemoveStudioEntry)
     if (!removable.length) return
     if (removable.some((entry) => entry.status === 'completed')) {
         try {
@@ -1636,7 +1718,7 @@ async function removeMany(entries = []) {
             return
         }
     }
-    for (const entry of removable) await removeEntry(entry)
+    for (const entry of removable) if (!(await removeEntry(entry))) break
 }
 async function downloadMany(entries = []) {
     for (const entry of entries) {
@@ -1692,6 +1774,7 @@ function restoreHistory() {
         for (const entry of selectStudioHistory(saved)) {
             if (
                 !entry ||
+                hiddenGenerationKeys.has(hiddenEntryKey(entry)) ||
                 !['flow', 'vids'].includes(entry.provider) ||
                 !['image', 'video', 'speech'].includes(entry.kind) ||
                 !Object.hasOwn(taskStatusNames, entry.status) ||
@@ -1746,6 +1829,7 @@ function restoreHistory() {
                     ? '页面曾在生成时离开，请先查看请求日志确认结果。'
                     : String(entry.message || '').slice(0, 1000),
                 status: interrupted ? 'unknown' : entry.status,
+                mediaExpired: entry.provider === 'vids' && entry.mediaExpired === true,
                 outputs,
             })
         }
@@ -1947,6 +2031,7 @@ onUnmounted(() => {
                         :aria-label="kind === 'speech' ? '声线设置' : '画面设定'"
                     >
                         <p class="editor-specification">{{ specificationSummary }}</p>
+                        <p v-if="flowModelHint" class="field-hint" role="note">{{ flowModelHint }}</p>
                         <div class="parameter-grid">
                             <el-form-item v-if="kind !== 'speech'" label="创作方式">
                                 <el-select v-model="params.mode">
@@ -2100,17 +2185,12 @@ onUnmounted(() => {
                             :closable="false"
                             show-icon
                         />
-                        <el-form-item
-                            v-if="provider === 'flow' && modeLimits.mediaId && !modeLimits.videoInput"
-                            label="源视频媒体 ID"
-                        >
-                            <el-input v-model="params.mediaId" placeholder="填写 Flow 生成返回的 media ID" />
-                        </el-form-item>
                         <div v-if="provider === 'flow' && params.mode === 'edit'" class="parameter-grid">
                             <el-form-item label="片段起点（毫秒）">
                                 <el-input-number
                                     v-model="params.trimStartMs"
                                     :min="0"
+                                    :max="Math.max(0, params.trimEndMs - editTrimMinimum)"
                                     :step="1000"
                                     controls-position="right"
                                 />
@@ -2118,7 +2198,8 @@ onUnmounted(() => {
                             <el-form-item label="片段终点（毫秒）">
                                 <el-input-number
                                     v-model="params.trimEndMs"
-                                    :min="1"
+                                    :min="params.trimStartMs + editTrimMinimum"
+                                    :max="params.trimStartMs + editTrimMaximum"
                                     :step="1000"
                                     controls-position="right"
                                 />
@@ -2150,7 +2231,7 @@ onUnmounted(() => {
                             <div class="section-heading small">
                                 <h3>原视频</h3>
                                 <span class="muted">
-                                    {{ provider === 'vids' ? 'MP4 · 50 MiB' : 'MP4 / WebM / MOV · 100 MiB' }}
+                                    {{ provider === 'vids' ? 'MP4 · 50 MiB' : flowVideoExtend ? 'MP4 · 3–60 秒 · 100 MiB' : 'MP4 / WebM / MOV · 100 MiB' }}
                                 </span>
                             </div>
                             <el-upload
@@ -2159,7 +2240,7 @@ onUnmounted(() => {
                                 :auto-upload="false"
                                 :show-file-list="false"
                                 :limit="1"
-                                :accept="provider === 'vids' ? 'video/mp4' : 'video/mp4,video/webm,video/quicktime'"
+                                :accept="provider === 'vids' || flowVideoExtend ? 'video/mp4' : 'video/mp4,video/webm,video/quicktime'"
                                 :on-change="addVideo"
                                 :disabled="materialBusy"
                             >
@@ -2176,6 +2257,7 @@ onUnmounted(() => {
                                     controls
                                     preload="metadata"
                                     @loadedmetadata="videoMetadata"
+                                    @error="videoMetadataFailed"
                                 />
                                 <div>
                                     <span>{{ sourceVideo.name }}</span>
@@ -2346,6 +2428,7 @@ onUnmounted(() => {
                         @edit-image="openImageEditor"
                         @reference-image="referenceResult($event)"
                         @animate-image="referenceResult($event, true)"
+                        @extend-video="extendOutput"
                         @remove="removeEntry"
                         @remove-many="removeMany"
                         @download-many="downloadMany"

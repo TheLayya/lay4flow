@@ -1,5 +1,6 @@
 """Contract checks for the native Windows shell and installer allow-list."""
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -104,6 +105,32 @@ class DesktopContractTests(unittest.TestCase):
                 package_windows(
                     ROOT, fixture / "native.zip", runtime_archive, backend_runtime=backend
                 )
+
+    def test_native_package_rejects_stale_dependencies_and_incomplete_inventory(self):
+        with tempfile.TemporaryDirectory(prefix="lay4flow-native-integrity-") as directory:
+            fixture = Path(directory)
+            archive = fixture / "fixture-runtime.tar.gz"
+            archive.write_bytes(b"synthetic public archive")
+            backend = fixture / "backend"
+            (backend / "cloakbrowser").mkdir(parents=True)
+            (backend / "python.exe").write_bytes(b"synthetic python")
+            (backend / "cloakbrowser/chrome.exe").write_bytes(b"synthetic browser")
+            manifest = {
+                "cloak_binary": "cloakbrowser/chrome.exe",
+                "files": ["python.exe", "cloakbrowser/chrome.exe"],
+                "requirements_sha256": "stale",
+            }
+            inventory = backend / "runtime-manifest.json"
+            inventory.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "dependencies do not match"):
+                package_windows(ROOT, fixture / "stale.zip", archive, backend_runtime=backend)
+            manifest["requirements_sha256"] = hashlib.sha256(
+                (ROOT / "requirements.txt").read_bytes()
+            ).hexdigest()
+            manifest["files"].append("missing-python-module.pyd")
+            inventory.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, "inventory file is missing"):
+                package_windows(ROOT, fixture / "incomplete.zip", archive, backend_runtime=backend)
 
 
 if __name__ == "__main__":

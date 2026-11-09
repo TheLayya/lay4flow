@@ -5,6 +5,7 @@ without browser request execution. See docs/vids for exact tested specifications
 Callers supply refreshed cookies. This module never starts or drives a browser.
 """
 
+import asyncio
 import hashlib
 import json
 import re
@@ -21,12 +22,15 @@ from urllib.request import Request
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.exceptions import RequestException
 
+from ...core.config import config
 from ..browser.cloak_proxy import transport_proxy
 
 DOCS_ORIGIN = "https://docs.google.com"
 BEFORE_PAID_REQUEST = ContextVar("vids_before_paid_request", default=None)
 MIME_TYPE = "application/vnd.google-apps.flix"
 CONTENT_TYPE = "application/json+protobuf"
+READ_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0)
+READ_RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -238,6 +242,8 @@ def video_feature(flags: dict[str, Any]) -> int:
             return feature
     if enabled(flags, "flix-evga"):
         return 374 if enabled(flags, "flix-evg1p2ui") else 342
+    if enabled(flags, "flix-evg1p2ui"):
+        return 374
     return 104
 
 
@@ -788,13 +794,40 @@ class VidsClient:
             if checkpoint and self.on_cookies_changed is not None:
                 self.on_cookies_changed()
 
+    async def _send_read(self, method, *args, headers_factory=None, **kwargs):
+        """Retry only explicitly selected reads; writes always call _send directly."""
+        checkpoint = kwargs.pop("checkpoint", True)
+        settings = config.get_raw_config().get("vids", {})
+        configured = settings.get("read_max_attempts", 3) if isinstance(settings, dict) else 3
+        attempts = max(1, min(configured, 5)) if type(configured) is int else 3
+        for attempt in range(attempts):
+            if headers_factory is not None:
+                # A preceding response can rotate the signing Cookie.
+                kwargs["headers"] = headers_factory()
+            try:
+                try:
+                    response = await self._send(method, *args, checkpoint=False, **kwargs)
+                except (RequestException, OSError):
+                    if attempt + 1 == attempts:
+                        raise
+                else:
+                    if response.status_code not in READ_RETRY_STATUSES or attempt + 1 == attempts:
+                        return response
+            finally:
+                # Storage failures must not be mistaken for retryable network errors.
+                # Bootstrap validates identity before running its own checkpoint.
+                if checkpoint and self.on_cookies_changed is not None:
+                    self.on_cookies_changed()
+            # Cancellation propagates through both the request and the backoff.
+            await asyncio.sleep(READ_RETRY_DELAYS[attempt])
+
     async def bootstrap(self) -> None:
         self.initialization_valid = False
         self.model_chunk = None
         self.document_session_id = None
         self.document_save_config = None
         try:
-            response = await self._send(
+            response = await self._send_read(
                 "get", self.editor_url, allow_redirects=False, checkpoint=False
             )
         except (RequestException, OSError):
@@ -880,26 +913,31 @@ class VidsClient:
                 await admission()
             if self.before_generate is not None:
                 self.before_generate()
+        read_only = (
+            method == "POST" and path in {"/v1/genai/quotaSummary", "/v1/genai/getSettings"}
+        ) or (method == "GET" and path.startswith("/v1/operations/"))
         # No submission retries: a transport failure can follow an accepted paid task.
-        headers = self._headers()
+        sender = self._send_read if read_only else self._send
+        header_options = (
+            {"headers_factory": self._headers} if read_only else {"headers": self._headers()}
+        )
         try:
-            response = await self._send(
+            response = await sender(
                 "request",
                 method,
                 self.service_origin + path,
                 params={"key": self.flags["espresso_api_key"]},
-                headers=headers,
+                **header_options,
                 data=json.dumps(body, separators=(",", ":")) if body is not None else None,
                 allow_redirects=False,
                 timeout=300 if path == "/v1/genai/generate" else self.timeout,
             )
         except (RequestException, OSError):
             raise VidsTransportError(
-                "Vids request failed; acceptance unknown, not retried"
+                "Vids read request failed"
+                if read_only
+                else "Vids request failed; acceptance unknown, not retried"
             ) from None
-        read_only = path in {"/v1/genai/quotaSummary", "/v1/genai/getSettings"} or (
-            method == "GET" and path.startswith("/v1/operations/")
-        )
         if response.status_code == 401 and refresh_read and read_only:
             await self.bootstrap()
             return await self._request(method, path, body, refresh_read=False)
@@ -1381,8 +1419,12 @@ class VidsClient:
         return await self._download_other(audio["url"], path, "audio/")
 
     async def _download_other(self, url: str, path: str | Path, mime_prefix: str) -> Path:
-        for _ in range(5):
+        # Each redirect is a fresh credential boundary. Never let the transport
+        # follow one before validating the destination and scoping its Cookie jar.
+        for redirects in range(6):
             try:
+                if not isinstance(url, str) or any(ord(char) < 33 or char == "\\" for char in url):
+                    raise ValueError
                 target = urlsplit(url)
                 host = target.hostname or ""
                 port = target.port
@@ -1400,16 +1442,13 @@ class VidsClient:
                         and DOCUMENT_IMAGE_PATH_PATTERN.fullmatch(target.path)
                         and mime_prefix == "image/"
                     )
-                    or host
-                    in {
-                        "contribution-rt.usercontent.google.com",
-                        "work.fife.usercontent.google.com",
-                    }
+                    or host == "contribution-rt.usercontent.google.com"
+                    or (mime_prefix != "video/" and host == "work.fife.usercontent.google.com")
                 )
             ):
                 raise ValueError("Unexpected Vids media host")
             try:
-                response = await self._send(
+                response = await self._send_read(
                     "get",
                     url,
                     allow_redirects=False,
@@ -1419,11 +1458,23 @@ class VidsClient:
             except (RequestException, OSError):
                 raise VidsTransportError("Vids media download failed") from None
             if response.status_code in (301, 302, 303, 307, 308):
-                url = urljoin(url, response.headers.get("Location", ""))
+                if redirects == 5:
+                    raise ValueError("Vids media redirect limit exceeded")
+                location = response.headers.get("Location", "")
+                if (
+                    not isinstance(location, str)
+                    or not location
+                    or any(ord(char) < 33 or char == "\\" for char in location)
+                ):
+                    raise ValueError("Vids media redirect destination absent")
+                url = urljoin(url, location)
                 continue
             if response.status_code != 200:
                 raise VidsProtocolError("download", response.status_code)
-            if not response.headers.get("Content-Type", "").startswith(mime_prefix):
+            if mime_prefix == "video/":
+                if len(response.content) < 12 or response.content[4:8] != b"ftyp":
+                    raise ValueError("Vids media response is not an MP4")
+            elif not response.headers.get("Content-Type", "").startswith(mime_prefix):
                 raise ValueError("Unexpected Vids media content type")
             output = Path(path)
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -1431,7 +1482,6 @@ class VidsClient:
             temporary.write_bytes(response.content)
             temporary.replace(output)
             return output
-        raise ValueError("Vids media redirect limit exceeded")
 
     async def operation(self, name: str) -> Any:
         if not isinstance(name, str) or not name or len(name) > 4096:
@@ -1439,40 +1489,6 @@ class VidsClient:
         return await self._request("GET", "/v1/operations/" + quote(name, safe=""))
 
     async def download_video(self, video: dict[str, Any], path: str | Path) -> Path:
-        target = urlsplit(video.get("url", ""))
-        host = target.hostname or ""
-        if (
-            target.scheme != "https"
-            or target.username
-            or target.password
-            or target.port not in (None, 443)
-            or not (
-                host == "contribution-rt.usercontent.google.com"
-                or host.endswith(".googleusercontent.com")
-            )
-        ):
-            raise ValueError("Unexpected Vids media URL")
         # Google scopes the existing jar to the validated media host. Never attach
         # generation Authorization, API key or X-Server-Token to the media request.
-        try:
-            response = await self._send(
-                "get",
-                video["url"],
-                allow_redirects=False,
-                headers={"Referer": DOCS_ORIGIN + "/"},
-                timeout=120,
-            )
-        except (RequestException, OSError):
-            raise VidsTransportError("Vids media download failed") from None
-        if response.status_code != 200:
-            raise VidsProtocolError("download", response.status_code)
-        if len(response.content) < 12 or response.content[4:8] != b"ftyp":
-            raise ValueError("Vids media response is not an MP4")
-        output = Path(path)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        # ponytail: callers serialize writes to the same destination; use unique
-        # temporary files if concurrent downloads to one path become necessary.
-        temporary = output.with_suffix(output.suffix + ".part")
-        temporary.write_bytes(response.content)
-        temporary.replace(output)
-        return output
+        return await self._download_other(video.get("url", ""), path, "video/")

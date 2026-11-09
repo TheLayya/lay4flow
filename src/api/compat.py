@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from ..core.auth import verify_openai_api_key
 from ..core.media_skus import SKU_ALIASES, get_sku_entry, list_sku_models, prepare_sku_request
 from ..core.models import ChatCompletionRequest
+from ..services.flow.video_extend import expected_extension_duration_ms
 from . import routes
 from .compat_schemas import ERROR_RESPONSES, MODEL_SCHEMA, chat_schema, json_response, list_schema
 from .openai_common import APIError, OpenAIRoute, load_generated_asset, read_json_body
@@ -162,6 +163,17 @@ async def _validated_media(request, payload, entry, normalized):
             if options.get("mode") == "edit"
             else options["durationSeconds"] * 1000
         )
+        if options.get("mode") == "extend" and str(normalized.model).startswith("omni_1_2_"):
+            try:
+                expected_duration = expected_extension_duration_ms(
+                    options,
+                    normalized.video_media_id,
+                    media.get("extension"),
+                    uploaded_video=getattr(normalized, "video_bytes", None),
+                    mime=getattr(normalized, "video_mime_type", "video/mp4"),
+                )
+            except ValueError as exc:
+                raise APIError(502, str(exc), "extension_metadata_invalid") from None
         if duration is None or abs(duration - expected_duration) > 250:
             raise APIError(
                 502, "Generated video duration differs from the SKU", "output_duration_mismatch"

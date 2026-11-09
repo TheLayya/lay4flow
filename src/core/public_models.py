@@ -1,5 +1,6 @@
 """Public media models and strict parameter resolution into existing internal keys."""
 
+from copy import deepcopy
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -12,7 +13,6 @@ from .model_resolver import (
     _extract_generation_params,
     _infer_aspect_ratio_from_images,
 )
-
 
 _ASPECTS = {
     "16:9": "landscape",
@@ -197,6 +197,73 @@ PUBLIC_MODELS["omni_1.1_flash"] = {
     },
     "defaults": {"mode": "auto", "durationSeconds": 8, "resolution": "720p", "aspectRatio": "16:9"},
 }
+
+_OMNI12_MODES = {
+    **deepcopy(_VIDEO_MODES),
+    "reference_to_video": {"minImages": 1, "maxImages": 7, "videoInput": False, "mediaId": False},
+    "edit": {
+        "minImages": 0,
+        "maxImages": 5,
+        "videoInput": True,
+        "mediaId": True,
+        "minTrimMs": 3000,
+        "maxTrimMs": 15000,
+        "paidAboveTrimMs": 10000,
+    },
+    "extend": {"minImages": 0, "maxImages": 3, "videoInput": False, "mediaId": True},
+}
+_OMNI12_COMBINATIONS = []
+for _mode in _OMNI12_MODES:
+    _lengths = list(range(3, 11 if _mode in {"first_last_frame", "extend"} else 16))
+    for _resolution in ("720p", "360p", "1080p", "4k"):
+        if _mode == "edit":
+            _OMNI12_COMBINATIONS.append(
+                {
+                    **_combination(_mode, None, [], [_resolution]),
+                    **(
+                        {"minTier": "plus"}
+                        if _resolution == "1080p"
+                        else {"minTier": "ultra"}
+                        if _resolution == "4k"
+                        else {}
+                    ),
+                }
+            )
+            continue
+        for _long in (False, True):
+            _durations = [seconds for seconds in _lengths if (seconds > 10) == _long]
+            if not _durations:
+                continue
+            _tier = (
+                "ultra"
+                if _resolution == "4k"
+                else "plus"
+                if (_long or _mode == "extend" or _resolution == "1080p")
+                else None
+            )
+            _OMNI12_COMBINATIONS.append(
+                {
+                    **_combination(_mode, None, _durations, [_resolution]),
+                    **({"minTier": _tier} if _tier else {}),
+                }
+            )
+PUBLIC_MODELS["omni_1.2_flash"] = {
+    "type": "video",
+    "description": "Gemini Omni 1.2 Flash",
+    "usage": "视频生成、编辑和已有媒体续写；3–15 秒，首尾帧最长 10 秒。超过 10 秒及续写需要订阅。",
+    "recommended_endpoint": "/v1/videos",
+    "capabilities": {
+        "aspectRatios": ["16:9", "9:16"],
+        "qualities": [],
+        "modes": _OMNI12_MODES,
+        "combinations": _OMNI12_COMBINATIONS,
+        "subscriptionNotes": "原生 360p/720p 最长 10 秒对所有账号开放；11–15 秒、续写和 1080p 需要 Plus、Pro 或 Ultra，4K 需要 Ultra。最终以账号实时模型权限为准。",
+    },
+    "defaults": {"mode": "auto", "durationSeconds": 8, "resolution": "720p", "aspectRatio": "16:9"},
+}
+PUBLIC_MODELS["omni_1.2_flash"]["capabilities"]["modes"]["extend"].update(
+    videoInput=True, mediaId=True, maxInputVideoSeconds=60
+)
 
 _PUBLIC_USAGE = {
     "gemini-3.1-flash-image": "\u6839\u636e\u63d0\u793a\u8bcd\u751f\u6210\u56fe\u7247\u3002",
@@ -424,6 +491,22 @@ def _video_internal(model: str, options: dict) -> str:
     orientation = _ASPECTS[options["aspectRatio"]]
     portrait = "_portrait" if orientation == "portrait" else ""
     resolution = "" if options["resolution"] == "720p" else "_" + options["resolution"]
+    if model == "omni_1.2_flash":
+        base = {
+            "text_to_video": "omni_1_2",
+            "reference_to_video": "omni_1_2_r2v",
+            "image_to_video": "omni_1_2_i2v",
+            "first_last_frame": "omni_1_2_i2v",
+            "edit": "omni_1_2_edit",
+            "extend": "omni_1_2_extend",
+        }[mode]
+        seconds = options.get("durationSeconds", 10)
+        if mode == "edit":
+            seconds = (
+                options.get("trimEndMs", 10000) - options.get("trimStartMs", 0) + 999
+            ) // 1000
+        frames = "_first_last" if mode == "first_last_frame" else ""
+        return f"{base}{portrait}_{seconds}s{frames}{resolution}"
     if model == "omni_1.1_flash":
         if mode == "edit":
             return f"omni_edit{portrait}{resolution}"
@@ -515,7 +598,7 @@ def resolve_public_model(
         mode = options["mode"]
         if mode == "auto":
             if has_video or video_media_id:
-                if model != "omni_1.1_flash":
+                if model not in {"omni_1.1_flash", "omni_1.2_flash"}:
                     raise ValueError("Veo video input requires explicit mode=extend and a media ID")
                 mode = "edit"
             else:
@@ -539,9 +622,14 @@ def resolve_public_model(
                 )
             options.pop("durationSeconds", None)
         elif mode == "extend":
-            if has_video or not video_media_id:
+            if model == "omni_1.2_flash":
+                if not (has_video or video_media_id):
+                    raise ValueError(
+                        "Omni Extend requires an uploaded original video or existing media ID"
+                    )
+            elif has_video or not video_media_id:
                 raise ValueError("extend requires a media ID, not uploaded video bytes")
-            if "quality" not in supplied:
+            if "quality" not in supplied and model != "omni_1.2_flash":
                 options["quality"] = "quality"
         elif has_video or video_media_id:
             raise ValueError(f"{mode} does not accept video input")
@@ -553,8 +641,12 @@ def resolve_public_model(
             raise ValueError("Trim parameters require uploaded video bytes, not a media ID")
         if mode == "edit" and has_video:
             trim_start, trim_end = supplied.get("trimStartMs", 0), supplied.get("trimEndMs", 10000)
-            if not 0 <= trim_start < trim_end or trim_end - trim_start > 10000:
-                raise ValueError("Trim must satisfy 0 <= start < end and end-start <= 10000 ms")
+            maximum = mode_caps.get("maxTrimMs", 10000)
+            minimum = mode_caps.get("minTrimMs", 1)
+            if not 0 <= trim_start < trim_end or not minimum <= trim_end - trim_start <= maximum:
+                raise ValueError(
+                    f"Trim must satisfy 0 <= start < end and {minimum} <= end-start <= {maximum} ms"
+                )
             options.update(trimStartMs=trim_start, trimEndMs=trim_end)
         if options["aspectRatio"] not in caps["aspectRatios"]:
             raise ValueError(f"Unsupported video aspectRatio: {options['aspectRatio']}")

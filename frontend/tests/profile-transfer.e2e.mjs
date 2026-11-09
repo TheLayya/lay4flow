@@ -4,7 +4,6 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
-
 // All requests are synthetic; no real Google session or runtime account is used.
 const base = process.env.FRONTEND_PREVIEW_URL || 'http://127.0.0.1:38126'
 assert.match(base, /^http:\/\/(127\.0\.0\.1|localhost):\d+$/)
@@ -55,6 +54,7 @@ await context.route('**/*', async (route) => {
     if (!url.pathname.startsWith('/api/') && url.pathname !== '/health') return route.continue()
     requests.push({ method: request.method(), path: url.pathname, body: request.postDataJSON() })
     if (url.pathname === '/health') return json(route, { backend_running: true, has_active_tokens: true })
+    if (url.pathname === '/api/plugin/import/jobs') return json(route, { success: true, jobs: [] })
     if (url.pathname === '/api/stats')
         return json(route, { total_tokens: accounts.length, active_tokens: accounts.length })
     if (url.pathname === '/api/tokens') return json(route, accounts)
@@ -132,8 +132,8 @@ await context.route('**/*', async (route) => {
                 {
                     email: bundle.account.email,
                     state: 'running',
-                    stage: 'cold_check_1',
-                    message: '首次重开校验',
+                    stage: 'flow_verification',
+                    message: '验证 Flow 会话',
                     elapsed_seconds: 2,
                 },
             ],
@@ -151,14 +151,14 @@ try {
     await page.goto(`${base}/#/accounts`)
     await page.locator('.accounts-view h1').waitFor()
     await page.locator('.page-actions').getByRole('button', { name: '扩展登录', exact: true }).click()
-    const extensionDialog = page.getByRole('dialog', { name: '扩展登录 · 指纹浏览器' })
+    const extensionDialog = page.getByRole('dialog', { name: '扩展登录 · 本机浏览器' })
     await extensionDialog.waitFor()
     assert.equal(await extensionDialog.locator('.el-select').count(), 0)
     assert.equal(await extensionDialog.getByText('管理代理池', { exact: true }).count(), 0)
-    await extensionDialog.getByText('登录使用指纹浏览器中已配置的网络与代理。', { exact: false }).waitFor()
+    await extensionDialog.getByText('使用普通 Chrome 或 Edge 即可。', { exact: false }).waitFor()
     await extensionDialog.getByRole('button', { name: '关闭', exact: true }).click()
     await extensionDialog.waitFor({ state: 'hidden' })
-    record('Extension login uses the fingerprint browser network without asking for another proxy')
+    record('Extension login uses Chrome or Edge network settings without asking for another proxy')
     await page.locator('.page-actions').getByRole('button', { name: '添加账号', exact: true }).click()
     await loginDialog().getByRole('button', { name: '打开 Cloak 登录', exact: true }).waitFor()
     assert.equal(
@@ -197,13 +197,13 @@ try {
     const exported = await readFile(await download.path(), 'utf8')
     assert.deepEqual(JSON.parse(exported), { format: 'lay4flow-profile-bundle', version: 1, accounts: [bundle] })
     await page.getByRole('button', { name: '导入 JSON', exact: true }).click()
-    const importDialog = page.getByRole('dialog').filter({ hasText: '导入账号 Profile' })
-    await importDialog.getByPlaceholder('粘贴导出的 Profile JSON').fill(exported)
+    const importDialog = page.getByRole('dialog').filter({ hasText: '导入账号 JSON' })
+    await importDialog.getByPlaceholder('粘贴 Cookie JSON、Profile JSON 或账号数组').fill(exported)
     await importDialog.locator('.el-select').click()
     await page.getByRole('option', { name: /#17/ }).click()
     await importDialog.getByRole('button', { name: '后台导入', exact: true }).click()
     await importDialog.waitFor({ state: 'hidden' })
-    await page.locator('.profile-import-jobs').waitFor()
+    await page.locator('#profile-import-jobs').waitFor()
     const importRequest = requests.find((item) => item.path === '/api/profile-transfer/jobs' && item.method === 'POST')
     assert.deepEqual(importRequest.body.bundles, [bundle])
     assert.equal(importRequest.body.proxy_pool_id, 17)
@@ -243,7 +243,7 @@ try {
     record('Navigation and reload recover progress and the specific failed result without resubmitting JSON')
 
     await task.getByRole('button', { name: /重试失败/ }).click()
-    await task.getByText('首次重开校验', { exact: false }).waitFor()
+    await task.getByText('验证 Flow 会话', { exact: false }).waitFor()
     assert.equal(retryCount, 1)
     importJob = {
         ...importJob,
@@ -267,7 +267,13 @@ try {
         1,
     )
     assert.equal(requests.filter((item) => item.path === '/api/profile-transfer/import').length, 0)
-    assert.ok(requests.every((item) => !item.path.includes('/plugin/')))
+    assert.ok(
+        requests.every(
+            (item) =>
+                !item.path.includes('/plugin/') ||
+                (item.path === '/api/plugin/import/jobs' && item.method === 'GET'),
+        ),
+    )
     await page.screenshot({ path: resolve(output, 'profile-import-result.png'), fullPage: true })
     record('Retry operates only on failed server-side items and completes without repeating successful imports')
     assert.deepEqual(errors, [])

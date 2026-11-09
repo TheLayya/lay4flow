@@ -103,6 +103,62 @@ const receipt = context => ({
     if (mode === 'profile') assert.ok(!f.removed.some(row => row[0] === 'cookie'), 'Current fingerprint login must survive completion');
     else assert.ok(f.removed.some(row => row[0] === 'window'));
   }
+  // Captures share a browser Cookie store, so only a durable server receipt
+  // can release the first capture before starting the next account.
+  {
+    const f = await fixture();
+    const accepted = [];
+    await f.api.startImport(receipt('batch-one'), admin, value => accepted.push(value));
+    await f.api.startImport(receipt('batch-two'), admin, value => accepted.push(value));
+    assert.equal(f.api.activeImports.size, 1);
+    assert.equal(accepted[1].error_code, 'session_busy');
+    await f.api.finishSubmit(f.api.activeImports.get('batch-one'), {
+      ok: true, status: 202, result: { success: true, action: 'queued' }
+    });
+    assert.equal(f.api.activeImports.size, 0);
+    await f.api.startImport(receipt('batch-two'), admin, value => accepted.push(value));
+    assert.equal(f.api.activeImports.size, 1);
+    assert.equal(accepted[2].type, 'import.accepted');
+    assert.ok(f.messages.some(message => message.type === 'import.result' && message.action === 'queued'));
+  }
+  for (const status of [0, 409, 429, 500, 503]) {
+    const failed = await fixture();
+    await failed.api.startImport(receipt('profile'), admin, () => {});
+    const record = failed.api.activeImports.get('profile');
+    await failed.api.finishSubmit(record, { ok: false, status, result: {} });
+    assert.equal(failed.api.activeImports.size, 0, 'Failed submissions must stop instead of automatically retrying');
+    assert.ok(failed.messages.some(message => message.error_code === 'submission_failed'));
+  }
+  {
+    const noPermission = await fixture();
+    noPermission.chrome.extension = { isAllowedIncognitoAccess(done) { done(false); } };
+    let result;
+    await noPermission.api.startImport(receipt('isolated'), admin, value => { result = value; });
+    assert.equal(result.error_code, 'incognito_permission_required');
+    assert.equal(noPermission.api.activeImports.size, 0);
+    assert.ok(!noPermission.removed.some(row => row[0] === 'cookie'));
+  }
+  {
+    const existingPrivate = await fixture();
+    existingPrivate.chrome.tabs.query = async () => [{ id: 88, incognito: true }];
+    let result;
+    await existingPrivate.api.startImport(receipt('isolated'), admin, value => { result = value; });
+    assert.equal(result.error_code, 'incognito_in_use');
+    assert.equal(existingPrivate.api.activeImports.size, 0);
+    assert.ok(!existingPrivate.removed.some(row => row[0] === 'cookie'));
+  }
+  {
+    const timedOut = await fixture();
+    await timedOut.api.startImport(receipt('profile'), admin, () => {});
+    const record = timedOut.api.activeImports.get('profile');
+    record.state = 'submitting';
+    record.submitAt = Date.now() - 31000;
+    record.payload = { google_cookies: 'synthetic-never-resubmit' };
+    await timedOut.api.probe(record);
+    assert.equal(timedOut.api.activeImports.size, 0);
+    assert.ok(!timedOut.messages.some(message => message.type === 'import.submit'));
+    assert.ok(timedOut.messages.some(message => message.error_code === 'submission_timeout'));
+  }
   const f = await fixture();
   let rejected;
   await f.api.startImport({ ...receipt('profile'), complete_url: 'https://evil.test/collect' }, admin, r => { rejected = r; });

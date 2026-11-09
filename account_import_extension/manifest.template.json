@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "lay4flow-remote OAuth Account Import",
-  "version": "1.8.0",
+  "version": "1.8.4",
   "description": "One-time Google account login for lay4flow-remote.",
   "permissions": [
     "cookies",

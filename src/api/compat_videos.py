@@ -144,6 +144,8 @@ async def execute_sku_video(normalized, base_url):
     duration = options.get("durationSeconds")
     if options.get("mode") == "edit":
         duration = (options.get("trimEndMs", 10000) - options.get("trimStartMs", 0)) / 1000
+    elif options.get("mode") == "extend":
+        duration = None  # The common executor validates authoritative source+added metadata.
     async with aclosing(execute_video(normalized, base_url, expected_duration=duration)) as stream:
         async for event in stream:
             if event.get("type") == "completed":
@@ -202,6 +204,7 @@ def create_compat_videos_router(get_service):
                                 "first_last_frame",
                                 "reference_to_video",
                                 "edit",
+                                "extend",
                             ],
                         },
                         "aspectRatio": {"type": "string", "enum": ["16:9", "9:16"]},
@@ -221,6 +224,10 @@ def create_compat_videos_router(get_service):
                     "items": reference_schema,
                 },
             ]
+        },
+        "input_video_media_id": {
+            "type": "string",
+            "description": "Existing Flow source media ID for Omni 1.2 Extend; never a URL.",
         },
     }
     json_schema = {"type": "object", "required": ["model", "prompt"], "properties": properties}
