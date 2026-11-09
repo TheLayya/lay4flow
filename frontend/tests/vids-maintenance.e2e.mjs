@@ -43,6 +43,8 @@ page.on('pageerror', (error) => errors.push(error.message))
 let settings = { keepalive_enabled: true, keepalive_interval_minutes: 10, repair_cooldown_seconds: 300,
     consecutive_failure_threshold: 3, failure_cooldown_seconds: 300, rules: '' }
 let protection = { status: 'cooldown', reason: 'upstream_http_429', until: '2026-11-09T06:00:00Z' }
+let sessionOverride = {}
+let rejectReconnect = true
 const token = { id: 81, email: 'synthetic@example.test', is_active: false, image_enabled: true, video_enabled: true,
     credits: 100, image_count: 2, video_count: 3, refresh_status: 'idle', browser_profile_source: 'cloak',
     user_paygate_tier: 'PAYGATE_TIER_ONE', browser_profile_status: 'ready' }
@@ -51,7 +53,7 @@ const vidsAccount = () => ({ token_id: 81, email: token.email, enabled: false, r
     maintenance: { status: 'retry_wait', last_probe_at: '2026-11-09T03:00:00Z', last_success_at: '2026-11-09T02:50:00Z',
         next_probe_at: '2026-11-09T03:10:00Z', last_error: 'transport_failed' },
     stats: { image_count: 17, video_count: 8, speech_count: 4, error_count: 3, consecutive_error_count: protection ? 3 : 0,
-        last_used_at: '2026-11-09T02:45:00Z' }, last_quota: {},
+        last_used_at: '2026-11-09T02:45:00Z' }, last_quota: {}, ...sessionOverride,
 })
 const log = (id, status_text, operation) => ({ id, status_text, operation, status_code: 202, token_id: 81,
     token_email: token.email, duration: 1, created_at: '2026-11-09T02:45:00Z', progress: 0,
@@ -76,6 +78,11 @@ await context.route('**/*', async (route) => {
             protection = null
             return json(route, { success: true })
         }
+        if (url.pathname === '/api/admin/vids/onboard/81/reconnect') {
+            if (rejectReconnect) return json(route, { error: { code: 'session_starting', message: 'Vids runtime is unavailable' } }, 503)
+            sessionOverride = { enabled: true, ready: true, identity_verified: true, session_state: 'ready', runtime_error: null }
+            return json(route, { token_id: 81, state: 'ready', identity_verified: true })
+        }
         return json(route, { detail: 'Unexpected fixture write' }, 503)
     }
     if (request.method() !== 'GET') return json(route, { detail: 'Unexpected fixture mutation' }, 503)
@@ -84,6 +91,7 @@ await context.route('**/*', async (route) => {
     if (url.pathname === '/api/admin/vids/config') return json(route, { config: settings })
     if (url.pathname === '/api/admin/config') return json(route, { admin_username: 'synthetic-admin' })
     if (url.pathname === '/api/config/generation') return json(route, { config: { image_timeout: 300, video_timeout: 1500, max_retries: 3 } })
+    if (url.pathname === '/api/profile-maintenance/config') return json(route, { config: { enabled: true, refresh_interval_minutes: 30 } })
     if (url.pathname === '/api/account-error-policy') return json(route, { config: { rules: '', consecutive_failure_threshold: 3, failure_cooldown_seconds: 300, max_account_attempts: 3 } })
     if (url.pathname === '/api/call-logic/config') return json(route, { config: { call_mode: 'default' } })
     if (url.pathname === '/api/cache/config') return json(route, { config: { enabled: true, timeout: 7200, base_url: '' } })
@@ -148,6 +156,24 @@ try {
     assert.equal(token.is_active, false)
     assert.equal(writes.at(-1).path, '/api/admin/vids/accounts/81/protection/clear')
     record('Vids account details show maintenance/protection/provider stats and clear preserves manual disable')
+
+    token.is_active = true
+    sessionOverride = { enabled: true, ready: false, identity_verified: false, session_state: 'starting', runtime_error: 'session_starting' }
+    await page.evaluate(() => sessionStorage.clear())
+    await page.goto(`${base}/__vids_test__#/accounts`, { waitUntil: 'domcontentloaded' })
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    const restoringRow = page.locator('.accounts-table .el-table__row').filter({ hasText: token.email }).first()
+    await restoringRow.getByRole('button', { name: `${token.email} 成员 #81`, exact: true }).click()
+    const restoringSession = page.locator('.account-drawer:visible').getByRole('region', { name: 'Vids 会话' })
+    await restoringSession.locator('.session-section-heading').getByText('正在恢复连接', { exact: true }).waitFor()
+    await restoringSession.getByText('Vids 会话正在后台恢复，请稍候', { exact: true }).waitFor()
+    await restoringSession.getByRole('button', { name: '重新连接', exact: true }).click()
+    await page.getByRole('alert').filter({ hasText: 'Vids 会话正在后台恢复，请稍候' }).last().waitFor()
+    rejectReconnect = false
+    await restoringSession.getByRole('button', { name: '重新连接', exact: true }).click()
+    await restoringSession.locator('.session-section-heading').getByText('会话就绪', { exact: true }).waitFor()
+    assert.equal(writes.filter(item => item.path.endsWith('/81/reconnect')).length, 2)
+    record('Vids restoring state is distinct from identity failure; reconnect shows a readable reason and recovers only the target account')
 
     await page.setViewportSize({ width: 1440, height: 1000 })
     await page.goto(`${base}/__vids_test__#/logs`, { waitUntil: 'domcontentloaded' })

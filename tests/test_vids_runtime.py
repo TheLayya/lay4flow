@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, patch
 
 from cryptography.fernet import Fernet
 
+from src.core.models import ProxyPoolEntry
+from src.services.proxy_manager import ProxyManager
 from src.services.vids.client import VidsProtocolError, VidsTransportError
 from src.services.vids.dispatcher import VidsAccount, VidsDispatchError, VidsProviderDispatcher
 from src.services.vids.gateway import GatewayError, VidsGateway
@@ -39,6 +41,143 @@ class VidsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with patch("src.services.vids.gateway.VidsClient", side_effect=self.upstream):
             await self.runtime.start({"accounts": self.rows, "read_max_attempts": 3})
         self.assertEqual(set(self.dispatcher._accounts), {1, 2})
+
+    async def test_batch_preparation_reads_accounts_and_fixed_proxies_once(self):
+        for identifier, token in self.tokens.items():
+            token.proxy_pool_id = identifier
+            token.proxy_url = f"http://synthetic-fixed-{identifier}.invalid:8080"
+        self.db.get_all_tokens = AsyncMock(return_value=list(self.tokens.values()))
+        self.db.list_proxy_pool = AsyncMock(
+            return_value=[
+                ProxyPoolEntry(id=token.id, proxy_url=token.proxy_url)
+                for token in self.tokens.values()
+            ]
+        )
+        self.db.get_proxy_pool_entry = AsyncMock(
+            side_effect=AssertionError("Per-account proxy read")
+        )
+        self.db.get_proxy_config = AsyncMock(side_effect=AssertionError("No unbound fallback"))
+        self.db.get_token.side_effect = AssertionError("Per-account token read")
+        self.runtime.proxy_manager = ProxyManager(self.db)
+        factory = await self.start()
+        self.assertEqual(set(self.dispatcher._accounts), {1, 2})
+        self.db.get_all_tokens.assert_awaited_once()
+        self.db.list_proxy_pool.assert_awaited_once()
+        self.db.get_token.assert_not_awaited()
+        self.db.get_proxy_pool_entry.assert_not_awaited()
+        self.db.get_proxy_config.assert_not_awaited()
+        self.assertEqual(
+            {call.kwargs["proxy"] for call in factory.call_args_list},
+            {token.proxy_url for token in self.tokens.values()},
+        )
+
+    async def test_batch_preparation_preserves_failed_proxy_error_and_receipt_root(self):
+        self.tokens[1].proxy_pool_id = 1
+        self.tokens[1].proxy_url = "http://synthetic-fixed.invalid:8080"
+        self.tokens[2].proxy_url = "http://synthetic-own.invalid:8080"
+        self.db.get_all_tokens = AsyncMock(return_value=list(self.tokens.values()))
+        self.db.list_proxy_pool = AsyncMock(
+            return_value=[
+                ProxyPoolEntry(id=1, proxy_url=self.tokens[1].proxy_url, last_check_ok=False)
+            ]
+        )
+        self.runtime.proxy_manager = ProxyManager(self.db)
+        await self.start()
+        self.assertEqual(set(self.dispatcher._accounts), {2})
+        self.assertEqual(self.runtime.account_errors, {1: "proxy_unavailable"})
+        self.assertEqual(
+            self.dispatcher.unavailable_receipt_roots, {1: Path(self.rows[0]["runtime_dir"])}
+        )
+
+    async def test_slow_account_times_out_alone_and_healthy_account_serves_during_restore(self):
+        entered = asyncio.Event()
+
+        async def blocked():
+            entered.set()
+            await asyncio.Event().wait()
+
+        def upstream(editor, rows, **options):
+            value = self.upstream(editor, rows, **options)
+            if "synthetic-2" in editor:
+                value.bootstrap.side_effect = blocked
+            return value
+
+        with (
+            patch("src.services.vids.gateway.VidsClient", side_effect=upstream),
+            patch("src.services.vids.runtime.ACCOUNT_STARTUP_TIMEOUT", 0.05),
+        ):
+            startup = asyncio.create_task(self.runtime.start({"accounts": self.rows}))
+            await entered.wait()
+            self.assertTrue(self.runtime._started)
+            self.assertFalse(self.runtime._lifecycle_lock.locked())
+            self.assertEqual(set(self.dispatcher._accounts), {1})
+            self.assertEqual(self.runtime.account_errors, {2: "session_starting"})
+            await self.dispatcher.read_quota(1, "image")
+            self.dispatcher._claims["existing-synthetic-receipt"] = 1
+            await asyncio.wait_for(startup, 1)
+        self.assertEqual(self.runtime.account_errors, {2: "session_start_timeout"})
+        self.assertEqual(set(self.dispatcher._accounts), {1})
+        self.assertEqual(self.dispatcher._claims, {"existing-synthetic-receipt": 1})
+        self.assertIsNone(self.runtime.last_error_code)
+        self.assertEqual(
+            self.dispatcher.unavailable_receipt_roots, {2: Path(self.rows[1]["runtime_dir"])}
+        )
+        self.assertIsNone(self.runtime._startup_task)
+        self.assertEqual(self.runtime._startup_accounts, {})
+        self.upstreams[1].session.close.assert_awaited_once()
+
+    async def test_remove_pending_target_does_not_wait_for_sibling_or_republish_it(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def blocked():
+            entered.set()
+            await release.wait()
+
+        def upstream(editor, rows, **options):
+            value = self.upstream(editor, rows, **options)
+            if "synthetic-2" in editor:
+                value.bootstrap.side_effect = blocked
+            return value
+
+        with patch("src.services.vids.gateway.VidsClient", side_effect=upstream):
+            startup = asyncio.create_task(self.runtime.start({"accounts": self.rows}))
+            await entered.wait()
+            async with asyncio.timeout(1):
+                async with self.runtime.login_maintenance(1):
+                    self.assertTrue(self.dispatcher._accounts[1].gateway._ready)
+                await self.runtime.remove_account(2)
+                await startup
+        self.assertEqual(set(self.dispatcher._accounts), {1})
+        self.assertNotIn(2, self.runtime.binding_rows)
+        self.assertNotIn(2, self.dispatcher.unavailable_receipt_roots)
+        self.assertNotIn(2, self.runtime.account_errors)
+
+    async def test_queued_startup_target_cancellation_closes_unstarted_gateway(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def blocked():
+            entered.set()
+            await release.wait()
+
+        def upstream(editor, rows, **options):
+            value = self.upstream(editor, rows, **options)
+            if "synthetic-1" in editor:
+                value.bootstrap.side_effect = blocked
+            return value
+
+        with (
+            patch("src.services.vids.gateway.VidsClient", side_effect=upstream),
+            patch("src.services.vids.runtime.STARTUP_CONCURRENCY", 1),
+        ):
+            startup = asyncio.create_task(self.runtime.start({"accounts": self.rows}))
+            await entered.wait()
+            self.assertEqual(len(self.upstreams), 1)
+            await asyncio.wait_for(self.runtime.remove_account(2), 1)
+            release.set()
+            await asyncio.wait_for(startup, 1)
+        self.assertEqual(set(self.dispatcher._accounts), {1})
+        self.assertEqual(len(self.upstreams), 1)
+        self.assertEqual(self.runtime._startup_accounts, {})
 
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -678,7 +817,7 @@ class VidsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ):
             pending = asyncio.create_task(self.runtime.start({"accounts": self.rows}))
             await entered.wait()
-            self.assertEqual(self.dispatcher._accounts, {})
+            self.assertEqual(set(self.dispatcher._accounts), {1})
             pending.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await pending
@@ -736,7 +875,8 @@ class VidsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             shutdown.cancel()
             await asyncio.sleep(0)
             release.set()
-            await startup
+            with self.assertRaises(asyncio.CancelledError):
+                await startup
             with self.assertRaises(asyncio.CancelledError):
                 await shutdown
         self.assert_empty()
@@ -984,22 +1124,35 @@ class VidsMainIntegrationTests(unittest.IsolatedAsyncioTestCase):
             close.assert_awaited_once_with()
         self.assertEqual(events, ["flow_enter", "body", "flow_exit"])
 
-    async def test_vids_startup_cancellation_propagates_instead_of_serving_partial_start(self):
+    async def test_network_startup_does_not_delay_serving_and_shutdown_drains_it(self):
         from src import main
+
+        entered, cleaned = asyncio.Event(), asyncio.Event()
 
         @asynccontextmanager
         async def flow_lifespan(app):
             yield
 
+        async def blocked_start(settings):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
         with (
             patch.object(main, "_flow_lifespan", flow_lifespan),
             patch.object(main.config, "get_raw_config", return_value={"vids": {"accounts": []}}),
-            patch.object(main.vids_runtime, "start", side_effect=asyncio.CancelledError()),
+            patch.object(main.vids_runtime, "start", side_effect=blocked_start),
             patch.object(main.vids_runtime, "close", AsyncMock()) as close,
         ):
-            with self.assertRaises(asyncio.CancelledError):
+            async with asyncio.timeout(1):
                 async with main.lifespan(main.app):
-                    self.fail("A cancelled startup must not serve the app")
+                    self.assertTrue(entered.is_set())
+                    self.assertFalse(cleaned.is_set())
+                    self.assertFalse(main.app.state.vids_startup_task.done())
+            self.assertTrue(cleaned.is_set())
+            self.assertIsNone(main.app.state.vids_startup_task)
             close.assert_awaited_once_with()
 
     async def test_main_lifespan_passes_configuration_and_always_closes_before_flow_exit(self):
@@ -1029,6 +1182,7 @@ class VidsMainIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 async def exercise():
                     async with main.lifespan(main.app):
                         events.append("body")
+                        await main.app.state.vids_startup_task
                         if failure == "body":
                             raise RuntimeError("synthetic body failure")
 
@@ -1038,16 +1192,19 @@ class VidsMainIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(main.vids_runtime, "start", side_effect=start) as startup,
                     patch.object(main.vids_runtime, "close", side_effect=close) as shutdown,
                 ):
-                    if failure is None:
+                    if failure != "body":
                         await exercise()
+                        if failure == "startup":
+                            self.assertEqual(
+                                main.vids_runtime.last_error_code, "session_unavailable"
+                            )
                     else:
                         with self.assertRaisesRegex(RuntimeError, f"synthetic {failure} failure"):
                             await exercise()
                 startup.assert_awaited_once_with(settings)
                 shutdown.assert_awaited_once_with()
                 expected = ["flow_enter", "vids_start"]
-                if failure != "startup":
-                    expected.append("body")
+                expected.append("body")
                 self.assertEqual(events, expected + ["vids_close", "flow_exit"])
 
     async def test_main_factory_state_and_account_routes_share_the_same_dispatcher(self):

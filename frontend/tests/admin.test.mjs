@@ -1925,6 +1925,31 @@ test('account overview gives priority to paused, identity and Profile failures i
     assert.equal(s.profileLabel('ready'), '已就绪')
 })
 
+test('Vids startup and transport failures stay distinct from identity mismatch', () => {
+    const { state: s } = view('Accounts')
+    const base = { enabled: true, ready: false, identity_verified: false }
+    assert.equal(s.vidsState({ ...base, session_state: 'starting', runtime_error: 'session_starting' }), '正在恢复连接')
+    assert.equal(s.vidsState({ ...base, session_state: 'unavailable', runtime_error: 'session_start_timeout' }), '连接超时')
+    assert.equal(s.vidsState({ ...base, session_state: 'unavailable', runtime_error: 'startup_timeout' }), '连接超时')
+    assert.equal(s.vidsState({ ...base, session_state: 'unavailable', runtime_error: 'session_unavailable' }), '待重新连接')
+    assert.equal(s.vidsState({ ...base, session_state: 'unavailable', runtime_error: 'proxy_unavailable' }), '代理连接异常')
+    assert.equal(s.vidsState({ ...base, session_state: 'authentication_expired' }), '登录已过期')
+    assert.equal(s.vidsState({ ...base, session_state: 'identity_mismatch' }), '身份待核对')
+    assert.match(s.quotaError('session_start_timeout'), /此账号.*超时/)
+    assert.match(s.quotaError('session_starting'), /后台恢复/)
+})
+
+test('Vids reconnect errors show the recovery reason instead of generic runtime English', async () => {
+    const fixture = view('Accounts', { api: { post: async () => {
+        const error = new Error('Vids runtime is unavailable')
+        error.payload = { error: { code: 'session_starting' } }
+        throw error
+    } } })
+    await fixture.state.action({ id: 7 }, 'reconnect')
+    assert.match(fixture.errors.at(-1).message, /后台恢复/)
+    assert.equal(fixture.state.busy.has('7:reconnect'), false)
+})
+
 test('account protection exposes exact local unlock time and a bounded shared-clock countdown', () => {
     const { state: s } = view('Accounts')
     const until = '2026-11-11T01:02:03+08:00'

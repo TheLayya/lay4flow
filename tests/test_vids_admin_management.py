@@ -203,6 +203,8 @@ class VidsAdminManagementTests(unittest.IsolatedAsyncioTestCase):
         self.binding.gateway.identity = "healthy-vids@example.test"
         self.settings["accounts"].append({"token_id": 7, "identity_hash": "private-other-identity"})
         for code, state in (
+            ("session_starting", "starting"),
+            ("session_start_timeout", "unavailable"),
             ("session_authentication_failed", "authentication_expired"),
             ("session_identity_mismatch", "identity_mismatch"),
             ("session_unavailable", "unavailable"),

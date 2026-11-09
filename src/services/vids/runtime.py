@@ -1,12 +1,14 @@
 """Restore explicit Vids accounts while isolating per-account session failures."""
 
 import asyncio
+import inspect
 import os
 import re
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from ..proxy_manager import AccountProxyUnavailable, ProxyManager
 from ..proxy_urls import normalize_proxy_url
 from .bindings import read_bindings, session_key_file
 from .client import VidsClient, VidsProtocolError, cookie_rows
@@ -14,6 +16,9 @@ from .deletion_markers import is_deleted
 from .dispatcher import VidsAccount, VidsProviderDispatcher
 from .gateway import GatewayError, VidsGateway
 from .session_store import SessionStore
+
+STARTUP_CONCURRENCY = 4
+ACCOUNT_STARTUP_TIMEOUT = 45
 
 
 class VidsRuntime:
@@ -28,21 +33,39 @@ class VidsRuntime:
         self.account_errors = {}
         self.binding_rows = {}
         self._lifecycle_lock = asyncio.Lock()
+        self._startup_task = None
+        self._startup_accounts = {}
+        self._startup_gateways = {}
 
     async def start(self, settings, *, cookie_sources=None):
-        if self._lifecycle_lock.locked():
+        if self._lifecycle_lock.locked() or self._startup_task is not None or self._started:
             raise GatewayError(503, "runtime_busy", "Vids runtime lifecycle is busy")
-        async with self._lifecycle_lock:
-            self.last_error_code = None
-            try:
-                await self._start(settings, cookie_sources=cookie_sources)
-            except GatewayError as error:
+        self._startup_task = asyncio.current_task()
+        self.last_error_code = None
+        try:
+            async with self._lifecycle_lock:
+                candidates = await self._prepare(settings, cookie_sources=cookie_sources)
+                self._started = True
+            await self._restore(candidates)
+        except BaseException as error:
+            async with self._lifecycle_lock:
+                try:
+                    await self._close()
+                except Exception:
+                    pass
+            if isinstance(error, GatewayError):
                 self.last_error_code = error.code
                 raise
+            if isinstance(error, asyncio.CancelledError):
+                raise
+            self.last_error_code = "session_unavailable"
+            raise GatewayError(
+                503, "session_unavailable", "Vids account pool could not start"
+            ) from None
+        finally:
+            self._startup_task = None
 
-    async def _start(self, settings, *, cookie_sources=None):
-        if self._started or self._gateways:
-            raise GatewayError(503, "runtime_busy", "Vids runtime is already started")
+    async def _prepare(self, settings, *, cookie_sources=None):
         self.account_errors.clear()
         try:
             if not isinstance(settings, dict) or set(settings) - {
@@ -150,6 +173,28 @@ class VidsRuntime:
 
         self.binding_rows = {row["token_id"]: dict(row) for row, _, _ in prepared}
         try:
+            # Preserve receipt ownership before the network restore begins.
+            # A healthy sibling must never claim work from a pending account.
+            self.dispatcher.unavailable_receipt_roots = {
+                row["token_id"]: root for row, root, _ in prepared
+            }
+            self.account_errors.update(
+                {row["token_id"]: "session_starting" for row, _, _ in prepared}
+            )
+            # Windows bind-mounted SQLite connections are costly. Restore reads
+            # shared account/proxy rows in batches instead of two DB opens for
+            # every saved Vids account before any gateway can become ready.
+            reader = getattr(self.dispatcher.db, "get_all_tokens", None)
+            tokens = (
+                {token.id: token for token in await reader()}
+                if inspect.iscoroutinefunction(reader)
+                else None
+            )
+            snapshot = None
+            if tokens is not None and type(self.proxy_manager) is ProxyManager:
+                snapshot = await self.proxy_manager.account_proxy_snapshot(
+                    [tokens[row["token_id"]] for row, _, _ in prepared if row["token_id"] in tokens]
+                )
             # Phase 1: prepare every account's gateway without network I/O.
             candidates = []  # (token_id, gateway, identity_hash)
             for row, root, key_source in prepared:
@@ -161,18 +206,27 @@ class VidsRuntime:
                         else session_key_file(key_source)
                     )
                     store = SessionStore(root, key)
-                    token = await self.dispatcher.db.get_token(token_id)
+                    token = (
+                        tokens.get(token_id)
+                        if tokens is not None
+                        else await self.dispatcher.db.get_token(token_id)
+                    )
                     if token is None:
                         self.account_errors[token_id] = "account_not_found"
                         continue
                     if "proxy" in row:
                         proxy = normalize_proxy_url(row["proxy"])
                     elif hasattr(self.proxy_manager, "resolve_account_proxy"):
-                        proxy = await self.proxy_manager.resolve_account_proxy(token)
+                        proxy = await self.proxy_manager.resolve_account_proxy(
+                            token, **({"snapshot": snapshot} if snapshot is not None else {})
+                        )
                     else:
                         proxy = normalize_proxy_url(getattr(token, "proxy_url", None))
                         if proxy is None:
                             proxy = await self.proxy_manager.get_request_proxy_url()
+                except AccountProxyUnavailable:
+                    self.account_errors[token_id] = "proxy_unavailable"
+                    continue
                 except Exception:
                     self.account_errors[token_id] = "invalid_configuration"
                     continue
@@ -195,56 +249,113 @@ class VidsRuntime:
                 self._gateways.append(gateway)
                 candidates.append((token_id, gateway, row["identity_hash"]))
 
-            # Phase 2: bootstrap every gateway concurrently. Each account owns its
-            # own runtime directory lock, so parallel session setup is safe.
-            results = await asyncio.gather(
-                *(gateway.start() for _, gateway, _ in candidates),
-                return_exceptions=True,
-            )
+            return candidates
+        except BaseException:
+            # Local preparation can be cancelled while reading the account DB.
+            # The caller owns closing every candidate constructed before then.
+            raise
 
-            # Phase 3: keep successful gateways and clean up failed ones.
-            bindings = []
-            for (token_id, gateway, identity_hash), result in zip(candidates, results):
-                if isinstance(result, BaseException):
+    async def _restore(self, candidates):
+        limit = asyncio.Semaphore(STARTUP_CONCURRENCY)
+
+        async def restore_account(token_id, gateway, identity_hash):
+            try:
+                async with limit:
+                    async with asyncio.timeout(ACCOUNT_STARTUP_TIMEOUT):
+                        await gateway.start()
+                    async with self._lifecycle_lock:
+                        binding = VidsAccount(token_id, gateway, identity_hash)
+                        # A healthy account becomes routable immediately. Never
+                        # replace the pool here: that clears existing receipts.
+                        self.dispatcher.register(binding)
+                        self.dispatcher.unavailable_receipt_roots.pop(token_id, None)
+                        self.account_errors.pop(token_id, None)
+                        # This gateway now participates in normal busy guards.
+                        # Slow receipt diagnostics must not let a later login
+                        # cancel a published gateway as if it were still queued.
+                        self._startup_accounts.pop(token_id, None)
+                        self._startup_gateways.pop(token_id, None)
+                policy = self.dispatcher.account_policy
+                if policy is not None:
                     try:
-                        await self._finish_cleanup(gateway.close())
+                        await policy.reconcile(token_id, gateway.root)
                     except Exception:
-                        pass
-                    self._gateways.remove(gateway)
-                    self.account_errors[token_id] = self._account_error_code(result)
-                    continue
-                bindings.append(VidsAccount(token_id, gateway, identity_hash))
-            self.dispatcher.replace(bindings)
-            policy = self.dispatcher.account_policy
-            if policy is not None:
-                for binding in bindings:
-                    try:
-                        await policy.reconcile(binding.token_id, binding.gateway.root)
-                    except Exception:
-                        # A diagnostics write failure cannot invalidate a
-                        # validated session or replay any provider operation.
                         from ...core.logger import debug_logger
 
                         debug_logger.log_warning("[VIDS_RECEIPT_RECOVERY] storage_unavailable")
-            self.dispatcher.unavailable_receipt_roots = {
-                row["token_id"]: root
-                for row, root, _ in prepared
-                if row["token_id"] in self.account_errors
-            }
-            # A valid configuration stays running even if every session needs
-            # repair, so the admin can reconnect one account later.
-            self._started = True
-        except BaseException as error:
-            # Cancellation remains pool-wide: release all candidate locks.
-            try:
-                await self._close()
-            except Exception:
+            except BaseException as error:
+                # Cancellation of this target cannot cancel healthy siblings.
+                try:
+                    await self._finish_cleanup(gateway.close())
+                except Exception:
+                    pass
+                async with self._lifecycle_lock:
+                    if self.dispatcher._accounts.get(token_id, None) is not None:
+                        if self.dispatcher._accounts[token_id].gateway is gateway:
+                            self.dispatcher._accounts.pop(token_id, None)
+                            self.dispatcher._roots.pop(token_id, None)
+                    if gateway in self._gateways:
+                        self._gateways.remove(gateway)
+                    if token_id in self.binding_rows:
+                        self.dispatcher.unavailable_receipt_roots[token_id] = gateway.root
+                        self.account_errors[token_id] = (
+                            "session_start_timeout"
+                            if isinstance(error, TimeoutError)
+                            else self._account_error_code(error)
+                        )
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+            finally:
+                self._startup_accounts.pop(token_id, None)
+                self._startup_gateways.pop(token_id, None)
+
+        tasks = []
+        for token_id, gateway, identity_hash in candidates:
+            task = asyncio.create_task(restore_account(token_id, gateway, identity_hash))
+            self._startup_accounts[token_id] = task
+            self._startup_gateways[token_id] = gateway
+            tasks.append(task)
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+
+            async def drain():
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            await self._finish_cleanup(drain())
+
+    async def cancel_account_restore(self, token_id):
+        """An explicit target operation supersedes only that saved-session restore."""
+        if self._startup_task is not None and self._lifecycle_lock.locked():
+            # Preparation owns the lifecycle lock before it creates restore
+            # tasks. Wait for that local phase before selecting this target,
+            # otherwise a queued remove could miss and later resurrect it.
+            async with self._lifecycle_lock:
                 pass
-            if isinstance(error, (GatewayError, asyncio.CancelledError)):
-                raise
-            raise GatewayError(
-                503, "session_unavailable", "Vids account pool could not start"
-            ) from None
+        task = self._startup_accounts.get(token_id)
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+
+        async def drain():
+            await asyncio.gather(task, return_exceptions=True)
+
+        await self._finish_cleanup(drain())
+        # A queued Task can be cancelled before running its first instruction,
+        # so its coroutine's finally block might not have released this entry.
+        if self._startup_accounts.get(token_id) is task:
+            self._startup_accounts.pop(token_id, None)
+            gateway = self._startup_gateways.pop(token_id, None)
+            if gateway is not None:
+                await self._finish_cleanup(gateway.close())
+                async with self._lifecycle_lock:
+                    if gateway in self._gateways:
+                        self._gateways.remove(gateway)
+                    if token_id in self.binding_rows:
+                        self.account_errors[token_id] = "session_unavailable"
 
     @staticmethod
     def _account_error_code(error):
@@ -256,6 +367,10 @@ class VidsRuntime:
 
     async def close(self):
         async def locked_close():
+            startup = self._startup_task
+            if startup is not None and startup is not asyncio.current_task():
+                startup.cancel()
+                await asyncio.gather(startup, return_exceptions=True)
             async with self._lifecycle_lock:
                 await self._close()
 
@@ -264,6 +379,7 @@ class VidsRuntime:
     @asynccontextmanager
     async def login_maintenance(self, token_id):
         """Reserve account work without requiring a healthy preceding login."""
+        await self.cancel_account_restore(token_id)
         # Queue this one reservation behind unrelated lifecycle work. Rejecting
         # immediately makes Flow reauthentication fail throughout Vids startup
         # or automatic onboarding of any other account.
@@ -294,6 +410,7 @@ class VidsRuntime:
     @asynccontextmanager
     async def proxy_switch(self, token_id, target_proxy):
         """Stage one verified HTTP transport while the caller commits its Profile and DB."""
+        await self.cancel_account_restore(token_id)
         if self._lifecycle_lock.locked():
             raise GatewayError(409, "runtime_busy", "Vids lifecycle maintenance is busy")
         async with self._lifecycle_lock:
@@ -437,6 +554,8 @@ class VidsRuntime:
         self.dispatcher.replace([])
         gateways, self._gateways = self._gateways, []
         self._started = False
+        self._startup_accounts.clear()
+        self._startup_gateways.clear()
         self.account_errors.clear()
         self.binding_rows.clear()
 
@@ -453,6 +572,7 @@ class VidsRuntime:
         """Detach one account without closing sibling Vids gateways."""
         if type(token_id) is not int or token_id <= 0:
             raise GatewayError(400, "invalid_account", "A valid Flow account is required")
+        await self.cancel_account_restore(token_id)
         async with self._lifecycle_lock:
             account = self.dispatcher._accounts.get(token_id)
             preflight = self.dispatcher._preflight_locks.get(token_id)

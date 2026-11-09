@@ -922,6 +922,13 @@ const quotaValue = (value) => quotaNumber(value)?.toLocaleString('zh-CN') ?? '�
 const quotaError = (value) =>
     ({
         session_authentication_failed: '登录已过期，请重新连接账号',
+        session_starting: 'Vids 会话正在后台恢复，请稍候',
+        session_start_timeout: '此账号恢复连接超时，可单独重新连接',
+        startup_timeout: 'Vids 启动超时，请重新连接账号',
+        runtime_unavailable: 'Vids 服务尚未就绪，请稍后重新连接',
+        runtime_busy: 'Vids 正在维护会话，请稍后重试',
+        session_unavailable: 'Vids 会话暂不可用，请重新连接',
+        proxy_unavailable: '账号绑定代理连接异常，请先修复代理',
         transport_failed: '额度连接暂时中断',
         quota_unavailable: '额度暂未读取成功',
         account_mismatch: '账号身份待核对',
@@ -1012,7 +1019,13 @@ const vidsState = (row) =>
           ? '已暂停'
           : row.protection
             ? vidsProtectionLabel(row.protection)
-          : row.identity_verified === false
+          : row.session_state === 'starting' || row.runtime_error === 'session_starting'
+            ? '正在恢复连接'
+          : row.runtime_error === 'session_start_timeout' || row.runtime_error === 'startup_timeout'
+            ? '连接超时'
+          : row.runtime_error === 'proxy_unavailable'
+            ? '代理连接异常'
+          : row.identity_verified === false && !['unavailable', 'authentication_expired'].includes(row.session_state)
             ? '身份待核对'
             : {
                   ready: '会话就绪',
@@ -1347,7 +1360,12 @@ async function action(row, type) {
         )
         await load(true, true)
     } catch (error) {
-        if (error !== 'cancel' && error !== 'close') notifyError(error)
+        if (error !== 'cancel' && error !== 'close') {
+            const code = error?.payload?.error?.code
+            const message = ['quota', 'onboard', 'reconnect'].includes(type) && quotaError(code)
+            if (message && message !== code) error.message = message
+            notifyError(error)
+        }
     } finally {
         busy.delete(key)
     }

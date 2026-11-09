@@ -2,14 +2,96 @@
 
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from src.core.database import Database
-from src.core.models import Token
+from src.core.models import ProxyPoolEntry, Token
 from src.services.proxy_manager import AccountProxyUnavailable, ProxyManager
 
 
 class AccountProxyPoolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bad_fallback_is_isolated_and_whitespace_proxy_keeps_fallback(self):
+        fixed = SimpleNamespace(proxy_pool_id=7, proxy_url="http://fixed.invalid:8080")
+        inherited = SimpleNamespace(proxy_pool_id=None, proxy_url="   ")
+        db = SimpleNamespace(
+            list_proxy_pool=AsyncMock(
+                return_value=[ProxyPoolEntry(id=7, proxy_url=fixed.proxy_url)]
+            ),
+            get_proxy_config=AsyncMock(return_value=SimpleNamespace(enabled=True, proxy_url="")),
+        )
+        manager = ProxyManager(db)
+        snapshot = await manager.account_proxy_snapshot([fixed, inherited])
+        self.assertEqual(
+            await manager.resolve_account_proxy(fixed, snapshot=snapshot), fixed.proxy_url
+        )
+        with self.assertRaises(AccountProxyUnavailable):
+            await manager.resolve_account_proxy(inherited, snapshot=snapshot)
+        db.get_proxy_config.return_value = SimpleNamespace(
+            enabled=True, proxy_url="http://fallback.invalid:8080"
+        )
+        snapshot = await manager.account_proxy_snapshot([inherited])
+        self.assertEqual(
+            await manager.resolve_account_proxy(inherited, snapshot=snapshot),
+            "http://fallback.invalid:8080",
+        )
+
+    async def test_batch_snapshot_retains_fixed_proxy_health_and_no_fallback_contract(self):
+        current = SimpleNamespace(proxy_pool_id=7, proxy_url="http://fixed.invalid:8080")
+        own = SimpleNamespace(proxy_pool_id=None, proxy_url="socks5h://own.invalid:1080")
+        inherited = SimpleNamespace(proxy_pool_id=None, proxy_url="")
+        db = SimpleNamespace(
+            list_proxy_pool=AsyncMock(),
+            get_proxy_pool_entry=AsyncMock(side_effect=AssertionError("Must use batch")),
+            get_proxy_config=AsyncMock(
+                return_value=SimpleNamespace(enabled=True, proxy_url="http://fallback.invalid:8080")
+            ),
+        )
+        manager = ProxyManager(db)
+        for entry in (
+            ProxyPoolEntry(id=7, proxy_url=current.proxy_url),
+            ProxyPoolEntry(id=7, proxy_url=current.proxy_url, enabled=False),
+            ProxyPoolEntry(id=7, proxy_url=current.proxy_url, last_check_ok=False),
+            ProxyPoolEntry(
+                id=7,
+                proxy_url=current.proxy_url,
+                cooldown_until=datetime.now(timezone.utc) - timedelta(seconds=1),
+            ),
+            ProxyPoolEntry(id=7, proxy_url="http://changed.invalid:8080"),
+            None,
+        ):
+            with self.subTest(entry=entry):
+                db.list_proxy_pool.return_value = [] if entry is None else [entry]
+                snapshot = await manager.account_proxy_snapshot([current, own, inherited])
+                if (
+                    entry is not None
+                    and entry.enabled
+                    and entry.last_check_ok is not False
+                    and entry.cooldown_until is None
+                    and entry.proxy_url == current.proxy_url
+                ):
+                    self.assertEqual(
+                        await manager.resolve_account_proxy(current, snapshot=snapshot),
+                        current.proxy_url,
+                    )
+                    manager._probe_pending.add(7)
+                    with self.assertRaises(AccountProxyUnavailable):
+                        await manager.resolve_account_proxy(current, snapshot=snapshot)
+                    manager._probe_pending.clear()
+                else:
+                    with self.assertRaises(AccountProxyUnavailable):
+                        await manager.resolve_account_proxy(current, snapshot=snapshot)
+                self.assertEqual(
+                    await manager.resolve_account_proxy(own, snapshot=snapshot), own.proxy_url
+                )
+                self.assertEqual(
+                    await manager.resolve_account_proxy(inherited, snapshot=snapshot),
+                    "http://fallback.invalid:8080",
+                )
+        db.get_proxy_pool_entry.assert_not_awaited()
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

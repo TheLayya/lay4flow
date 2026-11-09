@@ -146,6 +146,8 @@ def create_vids_admin_router(
                     error = failure.code
             if identity_verified:
                 session_state = "ready"
+            elif error == "session_starting":
+                session_state = "starting"
             elif error == "session_authentication_failed":
                 session_state = "authentication_expired"
             elif error in {"account_mismatch", "session_identity_mismatch"}:

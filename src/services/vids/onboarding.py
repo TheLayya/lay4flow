@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlsplit
 
 from ..browser.profile_verifier import ProfileVerifier
+from ..proxy_manager import AccountProxyUnavailable
 from ..proxy_urls import normalize_proxy_url
 from .auto_onboarding import read_auto_onboarding_state
 from .bindings import read_bindings, session_key_file, write_bindings
@@ -355,11 +356,13 @@ class VidsOnboardingService:
         if type(token_id) is not int or token_id <= 0:
             raise OnboardingError(400, "invalid_account", "A valid Flow account is required")
         async with self._lock:
+            await self.runtime.cancel_account_restore(token_id)
             if not self.runtime._started:
                 if self.get_settings is None or self.runtime.last_error_code not in {
                     "session_authentication_failed",
                     "session_unavailable",
                     "profile_refresh_failed",
+                    "startup_timeout",
                 }:
                     raise OnboardingError(503, "runtime_unavailable", "Vids runtime is unavailable")
                 try:
@@ -453,9 +456,19 @@ class VidsOnboardingService:
                 else session_key_file(row["session_key_file"])
             )
             store = SessionStore(Path(row["runtime_dir"]), key)
-            proxy = normalize_proxy_url(row.get("proxy", getattr(token, "proxy_url", None)))
-            if "proxy" not in row and proxy is None:
-                proxy = await self.runtime.proxy_manager.get_request_proxy_url()
+            if "proxy" in row:
+                proxy = normalize_proxy_url(row["proxy"])
+            elif hasattr(self.runtime.proxy_manager, "resolve_account_proxy"):
+                try:
+                    proxy = await self.runtime.proxy_manager.resolve_account_proxy(token)
+                except AccountProxyUnavailable:
+                    raise OnboardingError(
+                        503, "proxy_unavailable", "账号绑定代理连接异常，请先修复代理"
+                    ) from None
+            else:
+                proxy = normalize_proxy_url(getattr(token, "proxy_url", None))
+                if proxy is None:
+                    proxy = await self.runtime.proxy_manager.get_request_proxy_url()
 
             async def cookies(editor_url, actual_proxy):
                 return await self._profile_cookies(token.email, editor_url, actual_proxy)

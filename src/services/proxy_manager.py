@@ -28,6 +28,13 @@ class AccountProxyUnavailable(ValueError):
         super().__init__("账号绑定出口不可用，请在代理池检查启用状态与账号绑定")
 
 
+@dataclass(frozen=True)
+class AccountProxySnapshot:
+    entries: dict
+    request_proxy: str | None
+    request_proxy_unavailable: bool = False
+
+
 class ProxyManager:
     """Read and update request/media proxy configuration."""
 
@@ -340,24 +347,54 @@ class ProxyManager:
         selected = min(entries, key=lambda entry: (entry.bound_account_count, entry.id))
         return await self.select_account_proxy(selected.id)
 
-    async def resolve_account_proxy(self, token) -> str | None:
+    async def account_proxy_snapshot(self, tokens) -> AccountProxySnapshot:
+        """Read one pool snapshot for a startup batch, without changing bindings."""
+        entries = await self.db.list_proxy_pool()
+        fallback = None
+        fallback_unavailable = False
+        if any(
+            getattr(token, "proxy_pool_id", None) is None
+            and not str(getattr(token, "proxy_url", None) or "").strip()
+            for token in tokens
+        ):
+            try:
+                fallback = await self.get_request_proxy_url()
+            except ValueError:
+                fallback_unavailable = True
+        return AccountProxySnapshot(
+            {entry.id: entry for entry in entries}, fallback, fallback_unavailable
+        )
+
+    async def resolve_account_proxy(self, token, *, snapshot=None) -> str | None:
         """Resolve fixed account egress, rejecting broken bindings without fallback."""
         entry_id = getattr(token, "proxy_pool_id", None)
         if entry_id is not None:
-            entry = await self.db.get_proxy_pool_entry(entry_id)
+            entry = (
+                snapshot.entries.get(entry_id)
+                if snapshot is not None
+                else await self.db.get_proxy_pool_entry(entry_id)
+            )
             if pool_entry_unavailable(entry) or entry_id in self._probe_pending:
                 raise AccountProxyUnavailable()
             try:
                 proxy = normalize_proxy_url(entry.proxy_url)
-                snapshot = normalize_proxy_url(getattr(token, "proxy_url", None))
+                bound_url = normalize_proxy_url(getattr(token, "proxy_url", None))
             except ValueError:
                 raise AccountProxyUnavailable() from None
-            if not proxy or proxy != snapshot:
+            if not proxy or proxy != bound_url:
                 raise AccountProxyUnavailable()
             return proxy
         try:
             own_proxy = normalize_proxy_url(getattr(token, "proxy_url", None))
-            return own_proxy or await self.get_request_proxy_url()
+            if own_proxy:
+                return own_proxy
+            if snapshot is not None and snapshot.request_proxy_unavailable:
+                raise AccountProxyUnavailable()
+            return (
+                snapshot.request_proxy
+                if snapshot is not None
+                else await self.get_request_proxy_url()
+            )
         except ValueError:
             raise AccountProxyUnavailable() from None
 

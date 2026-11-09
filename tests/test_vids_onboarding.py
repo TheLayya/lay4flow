@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 
 from src.api.admin_routes.vids import create_vids_admin_router
 from src.api.admin_routes.vids_onboarding import create_vids_onboarding_router
+from src.services.proxy_manager import AccountProxyUnavailable
 from src.services.vids.bindings import read_bindings, session_key_file, write_bindings
 from src.services.vids.client import VidsProtocolError
 from src.services.vids.deletion_markers import is_deleted
@@ -366,6 +367,28 @@ class VidsOnboardingTests(unittest.IsolatedAsyncioTestCase):
             await self.runtime.start({"accounts": [bad]})
         self.assertEqual(len(session_key_file(rows[0]["session_key_file"])), 44)
 
+    async def test_failed_binding_bad_proxy_stops_before_opening_profile(self):
+        from src.services.proxy_manager import AccountProxyUnavailable
+
+        await self.service.onboard(1)
+        row = read_bindings(self.service.registry_path)[0]
+        await self.runtime.close()
+        await self.runtime.start({})
+        self.runtime.binding_rows[1] = row
+        self.runtime.account_errors[1] = "proxy_unavailable"
+        self.runtime.proxy_manager.resolve_account_proxy = AsyncMock(
+            side_effect=AccountProxyUnavailable()
+        )
+        profile = AsyncMock(side_effect=AssertionError("unhealthy proxy must not open a Profile"))
+        with (
+            patch.object(self.service, "_profile_cookies", profile),
+            self.assertRaises(OnboardingError) as failure,
+        ):
+            await self.service.reconnect(1)
+        self.assertEqual(failure.exception.code, "proxy_unavailable")
+        profile.assert_not_awaited()
+        self.assertNotIn(1, self.dispatcher._accounts)
+
     async def test_reconnect_invalid_session_preserves_gateway_affinity_and_receipts(self):
         await self.service.onboard(1)
         await self.service.onboard(2)
@@ -630,6 +653,90 @@ class VidsOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all(not upstream.generate_speech.await_count for upstream in self.upstreams)
         )
+
+    async def test_legacy_pool_startup_timeout_allows_explicit_reconnect(self):
+        await self.service.onboard(1)
+        root = self.dispatcher._roots[1]
+        await self.runtime.close()
+        self.runtime.last_error_code = "startup_timeout"
+        self.service.get_settings = lambda: {
+            "accounts": [],
+            "registry_path": str(self.service.registry_path),
+        }
+        result = await self.service.reconnect(1)
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(self.dispatcher._roots[1], root)
+        self.assertTrue(self.runtime._started)
+        self.assertIsNone(self.runtime.last_error_code)
+        for upstream in self.upstreams:
+            upstream.generate_speech.assert_not_awaited()
+
+    async def test_unhealthy_fixed_proxy_blocks_profile_recovery_until_it_is_healthy(self):
+        await self.service.onboard(1)
+        await self.runtime.close()
+        await self.runtime.start({})
+        row = read_bindings(self.service.registry_path)[0]
+        self.runtime.binding_rows[1] = row
+        self.runtime.account_errors[1] = "proxy_unavailable"
+        self.runtime.proxy_manager.resolve_account_proxy = AsyncMock(
+            side_effect=AccountProxyUnavailable()
+        )
+        self.service._profile_cookies = AsyncMock(return_value=cookies("synthetic-repaired"))
+        before = len(self.upstreams)
+        with self.assertRaises(OnboardingError) as caught:
+            await self.service.reconnect(1)
+        self.assertEqual(caught.exception.code, "proxy_unavailable")
+        self.service._profile_cookies.assert_not_awaited()
+        self.assertEqual(len(self.upstreams), before)
+        self.assertEqual(self.runtime.account_errors[1], "proxy_unavailable")
+        self.runtime.proxy_manager.resolve_account_proxy.side_effect = None
+        self.runtime.proxy_manager.resolve_account_proxy.return_value = None
+        self.assertEqual((await self.service.reconnect(1))["state"], "ready")
+        self.service._profile_cookies.assert_awaited_once()
+
+    async def test_pending_target_reconnect_does_not_cancel_slow_sibling_restore(self):
+        await self.service.onboard(1)
+        await self.service.onboard(2)
+        await self.runtime.close()
+        rows = read_bindings(self.service.registry_path)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        counts = {}
+
+        def restoring(editor, rows, *, auth_user, proxy):
+            identifier = 1 if "/one/" in editor else 2
+            counts[identifier] = counts.get(identifier, 0) + 1
+            value = client(rows, identity=self.tokens[identifier].email)
+            value.editor_url, value.auth_user, value.proxy = editor, auth_user, proxy
+            value.initialization_valid = True
+            self.upstreams.append(value)
+
+            async def blocked():
+                entered.set()
+                await release.wait()
+
+            if counts[identifier] == 1:
+                value.bootstrap.side_effect = blocked
+            return value
+
+        with patch("src.services.vids.gateway.VidsClient", side_effect=restoring):
+            startup = asyncio.create_task(self.runtime.start({"accounts": rows}))
+            await entered.wait()
+            try:
+                async with asyncio.timeout(1):
+                    result = await self.service.reconnect(1)
+                self.assertEqual(result["state"], "ready")
+                self.assertIn(1, self.dispatcher._accounts)
+                self.assertIn(2, self.runtime._startup_accounts)
+                release.set()
+                await asyncio.wait_for(startup, 1)
+            finally:
+                if not startup.done():
+                    startup.cancel()
+                await asyncio.gather(startup, return_exceptions=True)
+        self.assertEqual(set(self.dispatcher._accounts), {1, 2})
+        for upstream in self.upstreams:
+            upstream.generate_speech.assert_not_awaited()
 
     async def test_explicit_startup_repair_retries_after_profile_refresh_failure(self):
         await self.service.onboard(1)

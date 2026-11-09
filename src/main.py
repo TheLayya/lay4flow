@@ -31,6 +31,7 @@ from .api.vids_media import (
     create_vids_media_router,
 )
 from .core.config import config
+from .core.logger import debug_logger
 from .core.monitoring import CONTENT_TYPE_LATEST, render_main_metrics
 from .core.update_guard import UpdateActivity, UpdateGuardMiddleware
 from .core.version import VERSION
@@ -252,30 +253,47 @@ async def _flow_lifespan(app: FastAPI):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with _flow_lifespan(app):
+        vids_startup = None
         try:
             app.state.profile_cache_maintenance.start()
             if not _SKIP_VIDS:
-                try:
-                    # Vids bootstraps every bound account over the network; a slow
-                    # or unreachable provider must not stall the Flow startup.
-                    await asyncio.wait_for(
-                        vids_runtime.start(config.get_raw_config().get("vids", {})),
-                        timeout=60,
-                    )
-                except GatewayError as error:
-                    # A provider session failure must not stop Flow or its management UI.
-                    vids_runtime.last_error_code = error.code
-                except TimeoutError:
-                    vids_runtime.last_error_code = "startup_timeout"
-                for token_id in sorted(services.vids_dispatcher._accounts):
+
+                async def restore_vids():
                     try:
-                        await services.vids_dispatcher.reconcile_outcomes(token_id)
+                        # Network session restore is independent of HTTP/Flow
+                        # startup. Runtime bounds each account, preserving every
+                        # healthy sibling instead of cancelling the whole pool.
+                        await vids_runtime.start(config.get_raw_config().get("vids", {}))
+                    except GatewayError as error:
+                        vids_runtime.last_error_code = error.code
+                        return
+                    except TimeoutError:
+                        vids_runtime.last_error_code = "startup_timeout"
+                        return
                     except Exception:
-                        # Local diagnostics recovery cannot block media/account startup.
-                        pass
-                if app.state.vids_auto_onboarding is not None:
-                    for token in await db.get_all_tokens():
-                        app.state.vids_auto_onboarding.schedule(token.id)
+                        vids_runtime.last_error_code = "session_unavailable"
+                        debug_logger.log_warning("[VIDS_STARTUP] session_unavailable")
+                        return
+                    for token_id in sorted(services.vids_dispatcher._accounts):
+                        try:
+                            await services.vids_dispatcher.reconcile_outcomes(token_id)
+                        except Exception:
+                            # Diagnostics recovery cannot invalidate a session
+                            # or resubmit any provider operation.
+                            pass
+                    if app.state.vids_auto_onboarding is not None:
+                        for token in await db.get_all_tokens():
+                            if token.id not in vids_runtime.binding_rows:
+                                # Bound failures use keepalive backoff or an
+                                # explicit reconnect; do not reopen every slow
+                                # Profile as a second boot-time attempt.
+                                app.state.vids_auto_onboarding.schedule(token.id)
+
+                vids_startup = asyncio.create_task(restore_vids(), name="vids-startup")
+                app.state.vids_startup_task = vids_startup
+                # Let the local preparation begin, without awaiting any provider
+                # bootstrap. Empty/offline pools still become ready immediately.
+                await asyncio.sleep(0)
                 app.state.vids_maintenance.start()
                 app.state.vids_media_cleanup.start()
             # Extension-import worker is independent of Vids; it must start even
@@ -285,6 +303,14 @@ async def lifespan(app: FastAPI):
             get_extension_import_jobs(token_manager).start()
             yield
         finally:
+            if vids_startup is not None:
+                vids_startup.cancel()
+
+                async def drain_vids_startup():
+                    await asyncio.gather(vids_startup, return_exceptions=True)
+
+                await vids_runtime._finish_cleanup(drain_vids_startup())
+                app.state.vids_startup_task = None
             await app.state.profile_cache_maintenance.close()
             studio_jobs = getattr(app.state, "studio_jobs", None)
             if studio_jobs is not None:
