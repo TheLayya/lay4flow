@@ -1,6 +1,6 @@
 # WINDOWS-EXTENSION-DOCS-RELEASE
 
-- State: in_review
+- State: done
 - Owner: Codex
 - Requirement: verify and build the Windows native package and account login extension, update README with current screenshots, commit and push this checkout's completed changes.
 - Profiles: Windows desktop/backend packaging, Chrome/Edge extension, web documentation, Git delivery.
@@ -23,3 +23,7 @@
 - Docs: 7 current application screenshots plus extension setup/connection screenshots, synthetic data only; 4 lossless WebP previews. Reproducible script generated fresh sample MP4 with Pillow/FFmpeg and passed with zero writes/page errors. 46 local doc links resolve; package inventory includes every new public image and companion guide. Evidence: tmp/release160-docs-reproduction.txt, tmp/release160-links.py.
 - Independent release audit: 21 release/metadata/Windows packaging tests passed; no blocking source/inventory finding. Existing runtime HTTP /docs documents are plain text; illustrated offline guides ship in ZIP and source repository.
 - Git candidate: 271 public changed files reviewed/staged; runtime directories, user-supplied credential strings, private configs, databases and diagnostic artifacts excluded. Root will record source commit/push and canonical artifact results in final delivery, without committing ignored build outputs.
+
+- 2026-11-10, Codex: in_review -> verified -> done after clean-source canonical packaging, hash verification and normal push. Source commit df328e18dda4f3ab48df1e919b819ec936e99198 is on origin/main; build-manifest records this exact source and working_tree_dirty=false. This delivery-record update does not change packaged runtime files.
+- Canonical local dist/1.6.0 contains runtime archive, Windows ZIP, actual setup EXE, extension ZIP, release notes, SHA256SUMS and build-manifest. All four asset hashes verified. Setup EXE SHA256: 74b3b7a48409e2007cd77376e91bb8165143a5d06330dd8933a3a8883b00f199. Public archive's 304 files match source byte-for-byte; final Windows ZIP audit covers 2404 entries and 16 offline documentation links. Final compile passed. No GitHub Release/tag or asset upload was requested or created.
+- Remote Actions status query timed out during TLS handshake; local verification results above are complete, remote CI conclusion is not claimed.
