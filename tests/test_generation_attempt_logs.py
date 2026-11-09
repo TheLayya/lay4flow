@@ -84,7 +84,8 @@ class GenerationAttemptLogTests(unittest.IsolatedAsyncioTestCase):
             yield
 
         self.handler._handle_video_generation = pipeline
-        values = [v async for v in self.handler.handle_generation("video-test", "prompt")]
+        with patch("src.services.generation_handler.config._config", {"flow": {"max_retries": 2}}):
+            values = [v async for v in self.handler.handle_generation("video-test", "prompt")]
         self.assertIn("error", json.loads(values[-1]))
         logs = await self.handler.db.get_logs(include_payload=True)
         self.assertEqual(len(logs), 1)
@@ -124,7 +125,9 @@ class GenerationAttemptLogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(values, ["result"])
         log, history = await self.final_log()
         self.assertEqual(log["status_code"], 200)
-        self.assertEqual(history["accounts_limit"], 1)
+        self.assertEqual(history["version"], 2)
+        self.assertEqual(history["account_allocations"], 1)
+        self.assertNotIn("accounts_limit", history)
         self.assertEqual(history["attempts"][0]["status"], "success")
 
     async def test_preflight_timeout_records_failed_attempt_and_releases_pending(self):

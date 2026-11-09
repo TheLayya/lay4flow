@@ -10,6 +10,7 @@ from ..core.database import Database
 from ..core.models import ProxyConfig
 from .browser.cloak_proxy import transport_proxy
 from .flow.retry import is_proxy_connection_error, is_retryable_network_error
+from .proxy_health import pool_entry_unavailable
 from .proxy_urls import normalize_proxy_url
 
 
@@ -143,7 +144,7 @@ class ProxyManager:
             entries = [
                 entry
                 for entry in await self.db.list_proxy_pool()
-                if entry.enabled
+                if not pool_entry_unavailable(entry)
                 and entry.id not in self._probe_pending
                 and entry.cooldown_until is None
             ]
@@ -343,12 +344,15 @@ class ProxyManager:
         """Resolve fixed account egress, rejecting broken bindings without fallback."""
         entry_id = getattr(token, "proxy_pool_id", None)
         if entry_id is not None:
-            _, proxy = await self.select_account_proxy(entry_id)
+            entry = await self.db.get_proxy_pool_entry(entry_id)
+            if pool_entry_unavailable(entry) or entry_id in self._probe_pending:
+                raise AccountProxyUnavailable()
             try:
+                proxy = normalize_proxy_url(entry.proxy_url)
                 snapshot = normalize_proxy_url(getattr(token, "proxy_url", None))
             except ValueError:
                 raise AccountProxyUnavailable() from None
-            if proxy != snapshot:
+            if not proxy or proxy != snapshot:
                 raise AccountProxyUnavailable()
             return proxy
         try:

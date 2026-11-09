@@ -39,7 +39,6 @@ class GenerationAttempts:
     limit: int
     used: int = 0
     excluded: set[int] = field(default_factory=set)
-    accounts_limit: int = 0
     history: list[dict] = field(default_factory=list)
     account_id: int | None = None
     account_email: str = ""
@@ -163,7 +162,7 @@ class GenerationAttempts:
             rows.append(item)
         count = len(rows)
         return {
-            "version": 1,
+            "version": 2,
             "request_id": self.request_id,
             "total_attempts": count,
             "retry_count": max(0, count - 1),
@@ -171,7 +170,7 @@ class GenerationAttempts:
                 {row["account_id"] for row in rows if row["account_id"] is not None}
             ),
             "limit": self.limit,
-            "accounts_limit": self.accounts_limit,
+            "account_allocations": self.account_runs,
             "attempts": rows,
         }
 

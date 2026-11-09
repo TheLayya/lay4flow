@@ -388,12 +388,12 @@ class GenerationAccountPolicyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(budget.history[0]["rule_action"], "LIMIT")
                 self.assertEqual(budget.history[0]["rule_seconds"], 0)
 
-    async def test_rejected_writes_use_outer_allocation_bound_not_twenty_inner_replays(self):
+    async def test_twenty_rejected_writes_use_total_budget_despite_legacy_three_account_cap(self):
         await self.prepare()
         self.policy.match.return_value = self.policy.record_failure.return_value = {
             "action": "RETRY"
         }
-        self.handler.load_balancer.select_token.side_effect = [self.token] * 3
+        self.handler.load_balancer.select_token.side_effect = [self.token] * 20
         budget = None
 
         async def pipeline(token, *args, **kwargs):
@@ -416,10 +416,15 @@ class GenerationAccountPolicyTests(unittest.IsolatedAsyncioTestCase):
                 chunk async for chunk in self.handler.handle_generation("video-test", "prompt")
             ]
         self.assertIn("error", json.loads(values[-1]))
-        self.assertEqual(self.handler.load_balancer.select_token.await_count, 3)
-        self.assertEqual(self.policy.record_failure.await_count, 3)
-        self.assertEqual(budget.used, 3)
+        self.assertEqual(self.handler.load_balancer.select_token.await_count, 20)
+        self.assertEqual(self.policy.record_failure.await_count, 20)
+        self.assertEqual(budget.used, 20)
         self.assertEqual(budget.limit, 20)
+        self.assertEqual(budget.snapshot()["retry_count"], 19)
+        self.assertEqual(budget.snapshot()["account_allocations"], 20)
+        self.assertEqual(budget.snapshot()["version"], 2)
+        self.assertNotIn("accounts_limit", budget.snapshot())
+        self.assertIn("20 次", json.loads(values[-1])["error"]["message"])
         self.assertEqual(budget.history[-1]["next_action"], "stop")
 
     async def test_consecutive_protection_can_override_retry_before_next_allocation(self):

@@ -111,12 +111,14 @@ def _extract_attempt_history(payload: Any) -> dict | None:
     if (
         not isinstance(history, dict)
         or type(history.get("version")) is not int
-        or history["version"] != 1
+        or history["version"] not in {1, 2}
         or not isinstance(history.get("attempts"), list)
     ):
         return None
-    result = {"version": 1}
-    for name in ("total_attempts", "retry_count", "account_count", "limit", "accounts_limit"):
+    result = {"version": history["version"]}
+    count_fields = ["total_attempts", "retry_count", "account_count", "limit"]
+    count_fields.append("accounts_limit" if history["version"] == 1 else "account_allocations")
+    for name in count_fields:
         count = _attempt_count(history.get(name))
         if count is not None:
             result[name] = count

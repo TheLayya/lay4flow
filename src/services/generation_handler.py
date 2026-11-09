@@ -320,14 +320,10 @@ class GenerationHandler:
 
     async def handle_generation(self, *args, **kwargs) -> AsyncGenerator:
         """Retry confirmed rejected Flow submissions with another eligible account."""
-        policy = getattr(self.token_manager, "generation_error_policy", None)
-        settings = await policy.get_config() if policy is not None else {"max_account_attempts": 1}
         attempts = GenerationAttempts(max(1, int(config.flow_max_retries)))
-        max_accounts = min(attempts.limit, settings["max_account_attempts"])
-        attempts.accounts_limit = max_accounts
         try:
             async with aclosing(
-                self._handle_generation_attempts(attempts, max_accounts, *args, **kwargs)
+                self._handle_generation_attempts(attempts, *args, **kwargs)
             ) as pipeline:
                 async for chunk in pipeline:
                     yield chunk
@@ -364,11 +360,10 @@ class GenerationHandler:
         finally:
             CURRENT_ATTEMPTS.reset(marker)
 
-    async def _handle_generation_attempts(
-        self, attempts, max_accounts, *args, **kwargs
-    ) -> AsyncGenerator:
+    async def _handle_generation_attempts(self, attempts, *args, **kwargs) -> AsyncGenerator:
         last_error = None
-        for index in range(max_accounts):
+        while attempts.used < attempts.limit:
+            previous_used = attempts.used
             pipeline = self._handle_generation_once(*args, **kwargs)
             try:
                 while True:
@@ -383,15 +378,17 @@ class GenerationHandler:
             except AccountGenerationRetry as retry:
                 last_error = retry.error
                 attempts.finish("failed", retry.error)
-                if attempts.used <= index:
-                    attempts.used = index + 1
+                # Preflight handoffs also consume one attempt. Modern captcha
+                # and submission paths already share this counter; never count
+                # their same failed attempt twice or loop without progress.
+                attempts.used = max(attempts.used, previous_used + 1)
                 if retry.decision.get("action") not in {"RETRY", "DELAY"}:
                     attempts.excluded.add(retry.token_id)
                 attempts.decision(
                     retry.decision,
-                    retry=index + 1 < max_accounts and attempts.used < attempts.limit,
+                    retry=attempts.used < attempts.limit,
                 )
-                if index + 1 >= max_accounts or attempts.used >= attempts.limit:
+                if attempts.used >= attempts.limit:
                     marker = CURRENT_ATTEMPTS.set(attempts)
                     try:
                         if attempts.last_log:
@@ -426,7 +423,7 @@ class GenerationHandler:
                 finally:
                     CURRENT_ATTEMPTS.reset(marker)
         yield self._create_error_response(
-            f"生成失败，已达到账号尝试上限：{last_error}", status_code=503
+            f"生成失败，已达到最大尝试次数（含首次）{attempts.limit} 次：{last_error}", status_code=503
         )
 
     async def _handle_generation_once(
@@ -973,8 +970,7 @@ class GenerationHandler:
                     attempts.finish("failed", e.error)
                     attempts.decision(
                         e.decision,
-                        retry=attempts.used < attempts.limit
-                        and attempts.account_runs < attempts.accounts_limit,
+                        retry=attempts.used < attempts.limit,
                     )
                 raise
             if (
@@ -1037,8 +1033,7 @@ class GenerationHandler:
                     if attempts is not None:
                         attempts.decision(
                             decision,
-                            retry=attempts.used < attempts.limit
-                            and attempts.account_runs < attempts.accounts_limit,
+                            retry=attempts.used < attempts.limit,
                         )
                     await self._log_request(
                         token.id,

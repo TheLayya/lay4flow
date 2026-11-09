@@ -21,6 +21,8 @@ DEFAULT_CONFIG = {
     "rules": DEFAULT_RULES,
     "consecutive_failure_threshold": 3,
     "failure_cooldown_seconds": 300,
+    # Retained for old API/config clients; generation uses flow_max_retries as
+    # its only work budget. This legacy field no longer truncates retries.
     "max_account_attempts": 3,
 }
 ACTIONS = {"LIMIT", "DEACTIVE", "RETRY", "DISABLE", "DELAY"}

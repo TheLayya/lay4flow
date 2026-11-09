@@ -69,12 +69,12 @@ const errors = [],
     checks = []
 page.on('pageerror', (error) => errors.push(error.message))
 const history = {
-    version: 1,
+    version: 2,
     total_attempts: 3,
     retry_count: 2,
     account_count: 2,
-    limit: 3,
-    accounts_limit: 3,
+    limit: 20,
+    account_allocations: 2,
     attempts: [
         {
             attempt: 1,
@@ -196,6 +196,9 @@ try {
     await attempts.getByText('第 3 次尝试', { exact: true }).waitFor()
     assert.equal(await attempts.locator('.attempt-item').count(), 3)
     assert.match(await attempts.innerText(), /重试 2 次/)
+    assert.match(await attempts.innerText(), /本次生成尝试上限 20 次/)
+    assert.match(await attempts.innerText(), /所有账号共用此总次数/)
+    assert.doesNotMatch(await attempts.innerText(), /账号分配上限/)
     const first = attempts.locator('.attempt-item').nth(0)
     assert.match(await first.innerText(), /first@example.test/)
     assert.match(await first.innerText(), /SYNTHETIC_CAPTCHA/)

@@ -80,7 +80,7 @@ const logs=accounts.slice(0,12).map((a,i)=>({id:301-i,token_id:a.id,token_email:
     operation:i%3===0?'generate_video':'generate_image',status_code:i===3?429:200,status_text:i===3?'failed':'completed',
     error_summary:i===3?'PUBLIC_ERROR_USER_QUOTA_REACHED':'',duration:i===0?31.8:12+i*2,progress:i===3?0:100,created_at:date,
     attempt_count:i===0?3:1,retry_count:i===0?2:0,account_count:i===0?2:1}))
-const history={version:1,total_attempts:3,retry_count:2,account_count:2,limit:3,accounts_limit:3,attempts:[
+const history={version:2,total_attempts:3,retry_count:2,account_count:2,limit:20,account_allocations:2,attempts:[
     {attempt:1,account_id:3,account_email:accounts[2].email,status:'failed',stage:'captcha',started_at:date,duration_ms:2200,error_code:'REMOTE_CAPTCHA_TIMEOUT',error:'远程验证码服务响应超时',next_action:'retry_same_account'},
     {attempt:2,account_id:3,account_email:accounts[2].email,status:'failed',stage:'submit',started_at:'2026-11-09T02:00:03Z',duration_ms:3600,error_code:'PUBLIC_ERROR_USER_QUOTA_REACHED',error:'当前账号的可用额度已用完',rule_keyword:'PUBLIC_ERROR_USER_QUOTA_REACHED',rule_action:'LIMIT',rule_seconds:86400,next_action:'switch_account'},
     {attempt:3,account_id:4,account_email:accounts[3].email,status:'success',stage:'submit',started_at:'2026-11-09T02:00:07Z',duration_ms:26000,next_action:'completed'},

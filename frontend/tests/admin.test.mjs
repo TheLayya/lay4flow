@@ -277,7 +277,7 @@ test('account error policy loads separately and is searchable without losing rul
     await s.readSettings()
     assert.equal(s.loaded.has('errorPolicy'), true)
     assert.equal(s.accountErrorPolicy.rules, 'synthetic quota|LIMIT|24h')
-    assert.equal(s.accountErrorPolicy.max_account_attempts, 5)
+    assert.equal('max_account_attempts' in s.accountErrorPolicy, false)
     assert.equal(s.dirty('errorPolicy', s.accountErrorPolicy), false)
     s.accountErrorPolicy.rules = 'another synthetic failure|RETRY'
     s.settingsQuery.value = 'RESOURCE_EXHAUSTED'
@@ -314,7 +314,6 @@ test('account error policy saves only editable fields and snapshots submitted ru
             rules: 'synthetic quota|LIMIT|24h\nsynthetic delay|DELAY|10s',
             consecutive_failure_threshold: 5,
             failure_cooldown_seconds: 300,
-            max_account_attempts: 3,
         },
     }])
     assert.equal(JSON.parse(s.snapshots.errorPolicy).rules, writes[0].body.rules)
@@ -344,10 +343,10 @@ test('account error policy shows server rule line errors and preserves the rejec
     assert.equal(s.dirty('errorPolicy', s.accountErrorPolicy), true)
     assert.equal(s.accountErrorPolicy.rules, writes[0].body.rules)
     assert.equal(fixture.errors.length, 1)
-    s.accountErrorPolicy.max_account_attempts = 0
+    s.accountErrorPolicy.consecutive_failure_threshold = 0
     await s.saveAccountErrorPolicy()
     assert.equal(writes.length, 1)
-    assert.match(s.accountErrorPolicyError.value, /最多账号尝试次数/)
+    assert.match(s.accountErrorPolicyError.value, /连续失败保护阈值/)
     assert.equal(s.busy.has('errorPolicy'), false)
 })
 

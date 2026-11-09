@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ...core.logger import debug_logger
+from ..proxy_health import bound_proxy_unavailable, proxy_pool_snapshot
 from .client import VidsProtocolError, VidsTransportError, video_feature
 from .gateway import GatewayError, VidsGateway
 
@@ -340,7 +341,9 @@ class VidsProviderDispatcher:
             account = self._account(token_id)
             if generation_id is not None and account.gateway._path(generation_id).exists():
                 return
-            await self._admission(token_id, kind, check_session=False)
+            await self._admission(
+                token_id, kind, check_session=False, check_proxy=generation_id is not None
+            )
             if not account.gateway._ready:
                 raise VidsDispatchError(503, "session_unavailable", "Vids session is unavailable")
             if account.gateway.lock.locked():
@@ -389,7 +392,9 @@ class VidsProviderDispatcher:
                 503, "session_unavailable", "Vids session repair failed"
             ) from None
 
-    async def _admission(self, token_id, kind, *, check_session=True, check_quota=False):
+    async def _admission(
+        self, token_id, kind, *, check_session=True, check_quota=False, check_proxy=False
+    ):
         self._account(token_id, network=check_session)
         try:
             token = await self.db.get_token(token_id)
@@ -411,6 +416,12 @@ class VidsProviderDispatcher:
             reason = await self.account_policy.availability(token_id)
             if reason is not None:
                 raise VidsDispatchError(429, "vids_account_protected", reason)
+        if (check_proxy or check_quota) and bound_proxy_unavailable(
+            token, await proxy_pool_snapshot(self.db)
+        ):
+            raise VidsDispatchError(
+                503, "account_proxy_unavailable", "账号绑定代理连接异常、已停用或正在冷却"
+            )
         if check_quota and self.quota_exhausted(token_id, kind):
             raise VidsDispatchError(429, "quota_exhausted", "Vids generation quota is exhausted")
 
@@ -582,6 +593,8 @@ class VidsPoolDispatcher:
         protected = False
         configured = False
         recoverable = None
+        proxy_blocked = False
+        proxy_entries = await proxy_pool_snapshot(self.dispatcher.db)
         last = self.dispatcher._pool_last_selected.get(kind, 0)
         candidates = sorted(self.dispatcher._accounts)
         candidates = [identifier for identifier in candidates if identifier > last] + [
@@ -604,6 +617,9 @@ class VidsPoolDispatcher:
             if not account.gateway._ready:
                 continue
             if token is None or not getattr(token, "is_active", False):
+                continue
+            if bound_proxy_unavailable(token, proxy_entries):
+                proxy_blocked = True
                 continue
             if kind in {"image", "video"} and not getattr(token, f"{kind}_enabled", False):
                 continue
@@ -641,6 +657,10 @@ class VidsPoolDispatcher:
                 429,
                 "vids_account_protected",
                 "Vids accounts are protected; check their recovery time",
+            )
+        if proxy_blocked:
+            raise VidsDispatchError(
+                503, "account_proxy_unavailable", "账号绑定代理连接异常、已停用或正在冷却"
             )
         if configured:
             raise VidsDispatchError(

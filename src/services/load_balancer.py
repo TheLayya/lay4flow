@@ -17,6 +17,7 @@ from ..core.models import Token
 from ..core.observability import OBSERVABILITY
 from .concurrency_manager import ConcurrencyManager
 from .generation_attempts import CURRENT_ATTEMPTS
+from .proxy_health import bound_proxy_unavailable, proxy_pool_snapshot
 from .proxy_manager import AccountProxyUnavailable
 
 
@@ -232,6 +233,7 @@ class LoadBalancer:
         required_tier = get_required_paygate_tier_for_model(model)
         policy = getattr(self.token_manager, "generation_error_policy", None)
         protection = await policy.public_states() if policy is not None else {}
+        proxy_entries = await proxy_pool_snapshot(getattr(self.token_manager, "db", None))
 
         for selection_order, token in enumerate(active_tokens):
             attempts = CURRENT_ATTEMPTS.get()
@@ -240,6 +242,9 @@ class LoadBalancer:
                 continue
             if token.id in protection:
                 filtered_reasons[token.id] = protection[token.id]["reason"]
+                continue
+            if bound_proxy_unavailable(token, proxy_entries):
+                filtered_reasons[token.id] = "绑定代理连接异常、已停用或正在冷却"
                 continue
             normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
             if model and not supports_model_for_tier(model, normalized_tier):
@@ -447,6 +452,11 @@ class LoadBalancer:
                 return "当前有符合档位的账号，但视频生成功能已全部禁用。"
 
         resolver = getattr(self.token_manager, "resolve_account_proxy", None)
+        proxy_entries = await proxy_pool_snapshot(getattr(self.token_manager, "db", None))
+        if capability_tokens and all(
+            bound_proxy_unavailable(token, proxy_entries) for token in capability_tokens
+        ):
+            return "账号绑定代理连接异常、已停用或正在冷却，请在代理池修复后重试"
         if capability_tokens and resolver:
             for token in capability_tokens:
                 try:

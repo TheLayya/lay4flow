@@ -94,7 +94,6 @@ const accountErrorPolicy = reactive({
     rules: defaultAccountErrorRules,
     consecutive_failure_threshold: 3,
     failure_cooldown_seconds: 300,
-    max_account_attempts: 3,
 })
 const accountErrorPolicyError = ref('')
 const vidsConfig = reactive({
@@ -169,7 +168,6 @@ function accountErrorPolicyPayload(value = accountErrorPolicy) {
         rules: value.rules,
         consecutive_failure_threshold: value.consecutive_failure_threshold,
         failure_cooldown_seconds: value.failure_cooldown_seconds,
-        max_account_attempts: value.max_account_attempts,
     }
 }
 function fillAccountRuleExamples() {
@@ -393,7 +391,6 @@ function validateAccountErrorPolicy(value) {
     const bounds = [
         ['consecutive_failure_threshold', 1, 100, '连续失败保护阈值'],
         ['failure_cooldown_seconds', 1, 86400, '连续失败冷却时间'],
-        ['max_account_attempts', 1, 10, '最多账号尝试次数'],
     ]
     for (const [field, min, max, label] of bounds) {
         if (!Number.isInteger(value[field]) || value[field] < min || value[field] > max)
@@ -692,7 +689,7 @@ onMounted(load)
                                             controls-position="right"
                                         />
                                         <span class="field-note">
-                                            每份作品独立计数，包含首次提交；验证码异常也遵循此上限，保存后对新任务生效
+                                            每份作品的统一总上限，包含首次、验证码失败、同账号重试和换号尝试；保存后对新任务生效
                                         </span>
                                     </el-form-item>
                                 </el-form>
@@ -834,15 +831,6 @@ onMounted(load)
                                         <el-button text :disabled="!loaded.has('errorPolicy')" @click="fillAccountRuleExamples">填入示例规则</el-button>
                                     </div>
                                     <div class="settings-form-grid error-policy-limits">
-                                        <el-form-item label="最多账号尝试次数（含首次）">
-                                            <el-input-number
-                                                v-model="accountErrorPolicy.max_account_attempts"
-                                                :min="1"
-                                                :max="10"
-                                                controls-position="right"
-                                            />
-                                            <span class="field-note">每份作品的账号尝试上限，达到后返回最后的错误。</span>
-                                        </el-form-item>
                                         <el-form-item label="连续失败保护阈值">
                                             <el-input-number
                                                 v-model="accountErrorPolicy.consecutive_failure_threshold"
@@ -863,7 +851,7 @@ onMounted(load)
                                         </el-form-item>
                                     </div>
                                 </el-form>
-                                <p class="field-note error-policy-safety">仅对明确未受理的生成请求自动重试；已受理、已返回作品或提交结果未知时，不会重复发起生成。</p>
+                                <p class="field-note error-policy-safety">所有账号共用「生成与调度」中的最大尝试次数，不再单独限制账号分配轮数。仅对明确未受理的请求自动重试；已受理或提交结果未知时不重复生成。没有可用账号时会提前结束并显示原因。</p>
                                 <div class="save-row">
                                     <span>{{ savedAt.errorPolicy ? '已保存于 ' + savedAt.errorPolicy : '保存后对新请求生效' }}</span>
                                     <el-button

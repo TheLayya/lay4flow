@@ -46,6 +46,20 @@ function logsView() {
 }
 const plain = (value) => JSON.parse(JSON.stringify(value))
 
+test('current attempt history has one total budget while legacy cap remains historical only', () => {
+    const source = readFileSync(new URL('../src/views/LogsView.vue', import.meta.url), 'utf8')
+    assert.match(source, /attemptHistory\.version === 1 && Number\(attemptHistory\.accounts_limit\)/)
+    assert.match(source, /所有账号共用此总次数/)
+    const state = logsView()
+    state.detail.value = { attempt_history: {
+        version: 2, limit: 20, total_attempts: 20, retry_count: 19,
+        account_count: 20, account_allocations: 20, attempts: [],
+    } }
+    assert.equal(state.attemptHistory.value.limit, 20)
+    assert.equal('accounts_limit' in state.attemptHistory.value, false)
+    assert.deepEqual(plain(state.detailAttempts.value), { attempts: 20, retries: 19, accounts: 20 })
+})
+
 test('retry summaries distinguish unknown historical counts from a request with no attempts', () => {
     const s = logsView()
     assert.deepEqual(plain(s.attemptSummary({})), { attempts: null, retries: null, accounts: null })

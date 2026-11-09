@@ -701,8 +701,11 @@ onUnmounted(() => {
                     </div>
                     <p v-if="attemptHistory && recordedCount(attemptHistory.limit) !== null" class="attempt-budget">
                         本次生成尝试上限 {{ attemptHistory.limit }} 次（含首次）
-                        <template v-if="Number(attemptHistory.accounts_limit) > 0">
-                            · 账号分配上限 {{ attemptHistory.accounts_limit }} 次（含同账号重新分配）
+                        <template v-if="attemptHistory.version === 1 && Number(attemptHistory.accounts_limit) > 0">
+                            · 旧版账号分配上限 {{ attemptHistory.accounts_limit }} 次
+                        </template>
+                        <template v-else>
+                            · 所有账号共用此总次数
                         </template>
                     </p>
                     <div v-if="attemptRows.length" class="attempt-table-scroll" tabindex="0" aria-label="横向滚动尝试记录">

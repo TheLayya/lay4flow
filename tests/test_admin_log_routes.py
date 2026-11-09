@@ -13,6 +13,28 @@ from src.api.admin_routes.logs import _extract_attempt_history
 
 
 class AdminLogRouteTests(unittest.TestCase):
+    def test_version_two_attempt_history_has_one_budget_and_ignores_legacy_account_cap(self):
+        result = _extract_attempt_history(
+            {
+                "attempt_history": {
+                    "version": 2,
+                    "limit": 20,
+                    "total_attempts": 20,
+                    "retry_count": 19,
+                    "account_count": 20,
+                    "account_allocations": 20,
+                    "accounts_limit": 3,
+                    "attempts": [
+                        {"attempt": 20, "account_id": 20, "stage": "submit", "status": "failed"}
+                    ],
+                }
+            }
+        )
+        self.assertEqual(result["version"], 2)
+        self.assertEqual(result["limit"], 20)
+        self.assertEqual(result["account_allocations"], 20)
+        self.assertNotIn("accounts_limit", result)
+
     def setUp(self):
         self.db = SimpleNamespace(
             get_logs=AsyncMock(
