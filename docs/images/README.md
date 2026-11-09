@@ -13,7 +13,7 @@
 | `omni12-video-upload.png` | 续写原视频上传入口 |
 | `extension-connected.png` | 隔离 Chromium 实际加载 1.8.4 扩展后，管理页显示已连接；后台 API 使用模拟响应 |
 | `extension-install.png` | 隔离 Chromium 的扩展版本、站点权限与无痕设置；仅用于说明设置位置 |
-| `account-expanded-info.png` / `account-expanded-proxy.png` | 同一账号展开区的两个标签；登录凭据保持折叠，代理仅为合成演示出口 |
+| `account-expanded-info.png` / `account-expanded-proxy.png` | 同一账号展开区的两个标签；直接显示合成 Cookie JSON，代理仅为合成演示出口 |
 | `account-maintenance-settings.png` | 设置页的全局 Profile 自动维护开关与统一周期 |
 
 视频画面是本地绘制的山谷示例，经本地编码为 8 秒 MP4，非生成服务的质量或成功率示例。WebP 文件是对应 PNG 的无损副本，用于 README 加载；截图中的模拟套餐和额度不构成上游服务承诺。

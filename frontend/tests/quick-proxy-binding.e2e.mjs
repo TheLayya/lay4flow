@@ -75,6 +75,7 @@ const accounts = [
     is_active: true,
     st: `plain-st-${row.id}`,
     at: `plain-at-${row.id}`,
+    google_cookies: JSON.stringify({SID:`plain-cookie-${row.id}`}),
     login_password: `login-pass-${row.id}`,
     login_account: row.email,
     remark: '',
@@ -137,8 +138,9 @@ await context.route('**/*', async (route) => {
     }
     if (url.pathname === '/health') return json(route, { backend_running: true, has_active_tokens: true })
     if (url.pathname === '/api/stats') return json(route, { total_tokens: 3, active_tokens: 3 })
+    if (url.pathname === '/api/admin/network') return json(route, { mode: 'direct', reachable: true })
     if (url.pathname === '/api/tokens') return json(route, accounts)
-    if (url.pathname === '/api/profile-transfer/jobs') return json(route, { success: true, jobs: [] })
+    if (url.pathname === '/api/profile-transfer/jobs' || url.pathname === '/api/plugin/import/jobs') return json(route, { success: true, jobs: [] })
     if (url.pathname === '/api/proxy/pool')
         return json(route, {
             success: true,
@@ -242,8 +244,8 @@ try {
     await quick.getByRole('button', { name: '复制代理密码', exact: true }).click()
     assert.equal((await page.evaluate(() => window.bindingCopies)).at(-1), 'second-password')
     await quick.getByRole('tab', { name: '账号信息', exact: true }).click()
-    await quick.locator('.quick-credentials summary').click()
-    assert.match(await quick.innerText(), /plain-at-11/)
+    assert.match(await quick.innerText(), /plain-cookie-11/)
+    assert.equal(await quick.locator('.quick-account-section details').count(),0)
     await quick.screenshot({ path: resolve(output, 'account-binding-1600.png'), animations: 'disabled' })
     record('Account row binds a new proxy and copies decoded credentials without a drawer, dialog or route change')
     await quick.getByRole('tab', { name: '代理', exact: true }).click()

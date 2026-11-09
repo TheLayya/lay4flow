@@ -1,6 +1,5 @@
 <script setup>
 import { computed } from 'vue'
-import { parseDate } from '../lib/api'
 
 const props = defineProps({
     account: { type: Object, required: true },
@@ -24,23 +23,57 @@ function navigateTabs(event, index) {
     emit('update:activeTab', tabs[next].id)
     event.currentTarget.parentElement.querySelectorAll('[role="tab"]')[next]?.focus()
 }
-function formatDate(value) {
-    if (!value) return '暂无'
-    const date = parseDate(value)
-    return Number.isNaN(date.getTime()) ? '暂无' : date.toLocaleString('zh-CN', { hour12: false })
+const cookieDocument = computed(() => {
+    const raw = props.account.google_cookies
+    if (raw == null || typeof raw === 'string' && !raw.trim()) return { text: '', format: 'empty' }
+    let parsed = raw
+    if (typeof raw === 'string') {
+        try { parsed = JSON.parse(raw) } catch { return { text: raw, format: 'raw' } }
+    }
+    const wrapper = parsed && !Array.isArray(parsed) && typeof parsed === 'object' &&
+        ['refreshCookie', 'cookies'].some(key => Object.hasOwn(parsed, key)) ? parsed : null
+    // Older saved jars use refreshCookie/cookies wrappers. Unwrap them using
+    // the same priority as the server, retaining the full scoped cookie rows.
+    const seen = new Set()
+    while (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const key = ['refreshCookie', 'cookies'].find(name => Object.hasOwn(parsed, name))
+        if (!key || seen.has(parsed)) break
+        seen.add(parsed)
+        parsed = parsed[key]
+        if (typeof parsed === 'string') {
+            try { parsed = JSON.parse(parsed) } catch { return { text: String(raw), format: 'raw' } }
+        }
+    }
+    if (parsed == null || parsed === '' || typeof parsed === 'object' && !Object.keys(parsed).length)
+        return { text: '', format: 'empty' }
+    if (typeof parsed !== 'object') return { text: String(raw), format: 'raw' }
+    // Keep browser cookie rows intact: a name/value map loses domains, expiry
+    // and multiple cookies with the same name. The import route accepts both.
+    const document = wrapper ? { ...wrapper, cookies: parsed } : { cookies: parsed }
+    delete document.refreshCookie
+    const email = props.account.email || props.account.login_account
+    if (email) document.email = email
+    if (props.account.current_project_id) document.projectId = props.account.current_project_id
+    if (props.account.user_paygate_tier) document.userPaygateTier = props.account.user_paygate_tier
+    return { text: JSON.stringify(document, null, 2), format: 'json' }
+})
+function highlightLine(text) {
+    const tokens = []
+    const pattern = /("(?:\\.|[^"\\])*"\s*:)|("(?:\\.|[^"\\])*")|\b(true|false|null)\b|(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/g
+    let cursor = 0
+    for (const match of text.matchAll(pattern)) {
+        if (match.index > cursor) tokens.push({ text: text.slice(cursor, match.index), kind: 'plain' })
+        tokens.push({ text: match[0], kind: match[1] ? 'key' : match[2] ? 'string' : match[3] ? 'literal' : 'number' })
+        cursor = match.index + match[0].length
+    }
+    if (cursor < text.length) tokens.push({ text: text.slice(cursor), kind: 'plain' })
+    return tokens
 }
-const tier = computed(() => ({ PAYGATE_TIER_NOT_PAID: 'Free', PAYGATE_TIER_ZERO: 'Plus',
-    PAYGATE_TIER_ONE: 'Pro', PAYGATE_TIER_TWO: 'Ultra' })[props.account.user_paygate_tier] || '未知')
-const information = computed(() => [
-    { label: '账号', value: props.account.email || props.account.login_account || '暂无' },
-    { label: '账号 ID', value: '#' + props.account.id },
-    { label: 'Flow 套餐', value: tier.value },
-    { label: 'Flow 积分', value: props.account.credits == null ? '尚未同步' : Number(props.account.credits).toLocaleString('zh-CN') },
-    { label: '会话状态', value: ({ ready: '会话正常', idle: '等待维护', refreshing: '正在维护', retrying: '等待重试', login_required: '需要重新登录', config_error: '配置需要调整' })[props.account.refresh_status] || (props.account.browser_profile_status === 'ready' ? '会话正常' : '待验证') },
-    { label: '项目', value: props.account.current_project_name || props.account.current_project_id || '暂无' },
-    { label: '最近维护', value: formatDate(props.account.last_refresh_at || props.account.last_st_refresh_at) },
-    { label: '最近使用', value: formatDate(props.account.last_used_at) },
-])
+const cookieLines = computed(() => cookieDocument.value.text.split('\n').map(line =>
+    cookieDocument.value.format === 'json' ? highlightLine(line) : [{ text: line, kind: 'plain' }]))
+function copyCookies() {
+    if (cookieDocument.value.text) emit('copy', cookieDocument.value.text)
+}
 const current = computed(() => props.proxies.find((row) => row.id === props.account.proxy_pool_id))
 const picked = computed(() => props.proxies.find((row) => row.id === props.draft.proxy_pool_id))
 const proxyChanged = computed(() => props.draft.proxy_pool_id !== (props.account.proxy_pool_id ?? null))
@@ -69,13 +102,6 @@ const proxyFields = computed(() => {
         return []
     }
 })
-const credentials = computed(() => [
-    { label: 'Session Token', value: props.account.st },
-    { label: 'Access Token', value: props.account.at || props.account.token },
-    { label: 'Google Cookies', value: props.account.google_cookies },
-    { label: '登录账号', value: props.account.login_account || props.account.email },
-    { label: '登录密码', value: props.account.login_password },
-])
 const options = computed(() => props.proxies.filter((row) => row.enabled || row.id === props.account.proxy_pool_id))
 function proxyIdentity(value) {
     let raw = String(value || '').trim()
@@ -121,20 +147,19 @@ const optionLabel = (row) =>
         </div>
         <section v-show="activeTab === 'account'" :id="`account-${account.id}-panel-account`" role="tabpanel"
             :aria-labelledby="`account-${account.id}-tab-account`" class="quick-account-section">
-            <dl class="quick-account-fields">
-                <div v-for="field in information" :key="field.label"><dt>{{ field.label }}</dt><dd>{{ field.value }}</dd></div>
-            </dl>
-            <p v-if="account.refresh_error || account.browser_profile_error" class="quick-error" role="status">{{ account.refresh_error || account.browser_profile_error }}</p>
-            <p class="quick-maintenance-link">会话维护周期在<a :href="`#/settings?section=generation&account_id=${account.id}`">工坊设置</a>中统一管理。</p>
-            <details class="quick-credentials">
-                <summary>登录凭据 · 展开查看与复制</summary>
-                <dl>
-                    <div v-for="field in credentials" :key="field.label">
-                        <dt>{{ field.label }}</dt>
-                        <dd><code>{{ field.value || '未填写' }}</code><el-button v-if="field.value" text size="small" @click="emit('copy', field.value)">复制</el-button></dd>
-                    </div>
-                </dl>
-            </details>
+            <div class="quick-cookie-toolbar">
+                <strong>{{ cookieDocument.format === 'raw' ? 'Cookie 原文' : 'Cookie JSON' }}</strong>
+                <el-button size="small" :disabled="!cookieDocument.text" @click="copyCookies">
+                    {{ cookieDocument.format === 'raw' ? '复制 Cookie' : '复制 JSON' }}
+                </el-button>
+            </div>
+            <div v-if="cookieDocument.text" class="quick-cookie-editor" :data-format="cookieDocument.format"
+                tabindex="0" role="region" :aria-label="cookieDocument.format === 'raw' ? 'Cookie 原文（只读）' : 'Cookie JSON（只读）'">
+                <div class="quick-cookie-gutter" aria-hidden="true"><span v-for="(_, index) in cookieLines" :key="index">{{ index + 1 }}</span></div>
+                <pre class="quick-cookie-content"><code><template v-for="(line, index) in cookieLines" :key="index"><span v-for="(token, tokenIndex) in line" :key="tokenIndex" :class="'cookie-' + token.kind">{{ token.text }}</span>{{ index < cookieLines.length - 1 ? '\n' : '' }}</template></code></pre>
+            </div>
+            <p v-else class="quick-cookie-empty">暂无保存的 Google Cookies。</p>
+            <p v-if="cookieDocument.format === 'raw'" class="quick-hint">保存的内容不是 Cookie JSON，按原文展示与复制。</p>
         </section>
         <section v-show="activeTab === 'proxy'" :id="`account-${account.id}-panel-proxy`" role="tabpanel"
             :aria-labelledby="`account-${account.id}-tab-proxy`" class="account-quick-grid">
@@ -256,10 +281,20 @@ const optionLabel = (row) =>
 .account-quick-tabs button { padding: 12px 2px 10px; background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--muted); cursor: pointer; font-size: 13px; }
 .account-quick-tabs button[aria-selected='true'] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 .account-quick-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.quick-account-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 24px; margin: 0; }
-.quick-account-fields dd { display: block; overflow-wrap: anywhere; }
-.quick-maintenance-link { font-size: 12px; color: var(--muted); margin: 12px 0 0; }
-.quick-maintenance-link a { margin-left: 3px; color: var(--accent); text-decoration: none; }
+.quick-account-section { min-width: 0; }
+.quick-cookie-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; font-size: 12px; }
+.quick-cookie-toolbar strong { font-weight: 550; color: var(--muted); }
+.quick-cookie-editor { display: grid; grid-template-columns: 42px minmax(0, 1fr); min-height: 140px; max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.quick-cookie-editor:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.quick-cookie-gutter, .quick-cookie-content { padding: 10px 12px; font: 12px/20px ui-monospace, SFMono-Regular, Consolas, monospace; }
+.quick-cookie-gutter { position: sticky; left: 0; z-index: 1; text-align: right; user-select: none; color: var(--muted); background: var(--ground); border-right: 1px solid var(--line); }
+.quick-cookie-gutter span { display: block; }
+.quick-cookie-content { margin: 0; min-width: max-content; white-space: pre; tab-size: 2; }
+.quick-cookie-content code { font: inherit; }
+.cookie-key { color: var(--ink); font-weight: 600; }
+.cookie-string { color: var(--accent); }
+.cookie-number, .cookie-literal { color: var(--muted); }
+.quick-cookie-empty { margin: 0; padding: 20px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font-size: 13px; }
 .quick-proxy-section, .quick-proxy-details { min-width: 0; }
 h3 {
     font-size: 14px;
@@ -348,33 +383,11 @@ dd {
     margin: 12px 0 0;
     font-size: 13px;
 }
-.quick-credentials {
-    margin-top: 15px;
-    font-size: 13px;
-}
-.quick-credentials summary {
-    cursor: pointer;
-    color: var(--muted);
-}
-.quick-credentials dl {
-    margin: 10px 0 0;
-    display: grid;
-    gap: 8px;
-}
-.quick-credentials dd {
-    align-items: flex-start;
-    gap: 16px;
-}
-.quick-credentials code {
-    max-height: 96px;
-    overflow: auto;
-}
 @media (max-width: 1100px) {
     .account-quick-grid {
         grid-template-columns: 1fr;
         gap: 22px;
     }
-    .quick-account-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 700px) {
     .account-quick-panel {

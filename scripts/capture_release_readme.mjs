@@ -70,6 +70,7 @@ const accounts=Array.from({length:28},(_,i)=>({
     refresh_status:'idle',protocol_mode:'session',auto_refresh_enabled:true,refresh_interval_minutes:30,
     last_refresh_at:date,next_refresh_at:'2026-11-09T02:30:00Z',created_at:'2026-11-01T02:00:00Z',last_used_at:date,
     current_project_id:`demo-project-${i+1}`, current_project_name:'演示项目',proxy_pool_id:i+1,
+    google_cookies:JSON.stringify({SID:`synthetic-cookie-${i+1}`,OSID:`synthetic-flow-cookie-${i+1}`}),
     proxy_url:`socks5h://exit-${String(i+1).padStart(2,'0')}.example.test:1080`,submission_proxy_mode:'fixed',
     generation_protection:i===0?{action:'LIMIT',status:'cooldown',until:new Date(Date.now()+24*60*60*1000).toISOString(),reason:'PUBLIC_ERROR_USER_QUOTA_REACHED'}:null,
 }))
@@ -138,7 +139,8 @@ try{
     await page.locator('.accounts-table .el-table__row').first().locator('.el-table__expand-icon').click()
     const expanded = page.locator('.account-quick-panel').first()
     await expanded.getByRole('tab', {name:'账号信息',exact:true}).waitFor()
-    assert.equal(await expanded.locator('details[open]').count(),0)
+    assert.equal(await expanded.locator('details').count(),0)
+    await expanded.getByText('synthetic-cookie-1',{exact:false}).waitFor()
     await shot('account-expanded-info.png')
     await expanded.getByRole('tab', {name:'代理',exact:true}).click()
     await expanded.getByText('账号绑定出口',{exact:true}).waitFor()

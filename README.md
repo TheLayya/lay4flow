@@ -38,12 +38,12 @@ Free / Plus / Pro / Ultra、Flow 积分、Vids 配额、会话维护、固定代
 
 ![账号管理：套餐、积分、会话与代理集中在表格](docs/images/release-accounts.webp)
 
-展开账号后通过「账号信息 / 代理」切换，避免把重复配置堆在同一面板。会话维护使用设置页中的全局开关与统一间隔。
+展开账号后，「账号信息」直接显示 Cookie JSON，支持选中和一键复制；「代理」管理账号绑定与生成出口。会话维护使用设置页中的全局开关与统一间隔。
 
 <details>
 <summary>查看账号展开区和会话维护设置</summary>
 
-![账号信息标签：身份、会话和显式登录资料入口](docs/images/account-expanded-info.png)
+![账号信息标签：直接显示并复制 Cookie JSON](docs/images/account-expanded-info.png)
 
 ![代理标签：绑定与生成出口策略](docs/images/account-expanded-proxy.png)
 

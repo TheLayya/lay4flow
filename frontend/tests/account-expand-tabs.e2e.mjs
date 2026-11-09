@@ -43,7 +43,10 @@ page.setDefaultTimeout(20000)
 const errors = [], writes = [], blocked = [], checks = []
 page.on('pageerror', error => errors.push(error.message))
 const account = { id: 11, email: 'creator@example.test', name: '演示账号', remark: '主表备注', st: 'synthetic-session',
-    at: 'synthetic-access', google_cookies: 'synthetic-cookie-placeholder', credits: 1000, user_paygate_tier: 'PAYGATE_TIER_ONE',
+    at: 'synthetic-access', google_cookies: JSON.stringify([
+        {name:'SID',value:'synthetic-cookie-'+'x'.repeat(240),domain:'.google.com',path:'/',secure:true,httpOnly:true},
+        {name:'OSID',value:'</code><img src=x onerror="window.cookieExecuted=true">',domain:'flow.google.com',path:'/',secure:true},
+    ]), credits: 1000, user_paygate_tier: 'PAYGATE_TIER_ONE',
     is_active: true, browser_profile_source: 'cookies', browser_profile_status: 'ready', refresh_status: 'ready',
     auto_refresh_enabled: true, refresh_interval_minutes: 30, image_enabled: true, video_enabled: true,
     proxy_pool_id: 1, proxy_url: 'socks5://synthetic:password@192.0.2.1:1080', submission_proxy_mode: 'fixed',
@@ -79,17 +82,26 @@ try {
     await panel.waitFor()
     assert.equal(await panel.getByRole('tab',{name:'账号信息',exact:true}).getAttribute('aria-selected'),'true')
     assert.equal(await panel.getByRole('tab',{name:'代理',exact:true}).getAttribute('aria-selected'),'false')
-    await panel.locator('[role="tabpanel"]:visible').getByText('Pro',{exact:true}).waitFor()
+    const accountPanel=panel.locator('.quick-account-section')
+    await accountPanel.getByText('synthetic-cookie-',{exact:false}).waitFor()
     assert.equal(await panel.locator('input:visible, .el-switch:visible, .el-input-number:visible').count(),0)
-    assert.doesNotMatch(await panel.innerText(),/常用配置|图片创作|视频创作|刷新间隔|保存配置/)
-    assert.equal(await panel.getByRole('link',{name:'工坊设置',exact:true}).getAttribute('href'),'#/settings?section=generation&account_id=11')
-    await panel.locator('.quick-credentials summary').click()
-    assert.match(await panel.innerText(),/synthetic-access/)
+    assert.equal(await accountPanel.locator('details').count(),0)
+    assert.doesNotMatch(await accountPanel.innerText(),/常用配置|Flow 套餐|Flow 积分|最近维护|最近使用|账号 ID|会话维护周期/)
+    assert.equal(await accountPanel.locator('img,script').count(),0)
+    assert.equal(await page.evaluate(()=>window.cookieExecuted),undefined)
+    await accountPanel.getByRole('button',{name:/复制/}).click()
+    const copied=JSON.parse((await page.evaluate(()=>window.copies)).at(-1))
+    assert.deepEqual(copied.cookies,JSON.parse(account.google_cookies))
+    assert.equal(copied.email,account.email)
+    assert.equal(copied.userPaygateTier,account.user_paygate_tier)
+    assert.equal(Object.hasOwn(copied,'sid'),false)
+    assert.equal(Object.hasOwn(copied,'st'),false)
+    assert.ok(!JSON.stringify(copied).includes('synthetic-session'))
     assert.deepEqual(writes,[])
     const bounds=await panel.evaluate(element=>({panel:element.getBoundingClientRect().width, wrap:element.closest('.account-table-wrap').getBoundingClientRect().width}))
     assert.ok(bounds.panel>=bounds.wrap-2, JSON.stringify(bounds))
     await page.screenshot({path:resolve(output,'account-info-desktop.png'),fullPage:true})
-    record('Expanded arrow opens read-only account information, credentials stay explicit, and panel fills actual viewport')
+    record('Default account tab directly displays complete Cookie JSON, copies import-compatible attributes and renders untrusted values as plain text')
     await panel.getByRole('tab',{name:'账号信息',exact:true}).focus()
     await page.keyboard.press('ArrowRight')
     assert.equal(await panel.getByRole('tab',{name:'代理',exact:true}).getAttribute('aria-selected'),'true')
@@ -112,6 +124,12 @@ try {
     const mobile=await panel.evaluate(element=>({panel:element.getBoundingClientRect().width,wrap:element.closest('.account-table-wrap').getBoundingClientRect().width}))
     assert.ok(mobile.panel>=mobile.wrap-2 && mobile.panel<=mobile.wrap+2,JSON.stringify(mobile))
     await page.screenshot({path:resolve(output,'proxy-mobile.png'),fullPage:true})
+    await panel.getByRole('tab',{name:'账号信息',exact:true}).click()
+    await accountPanel.getByText('synthetic-cookie-',{exact:false}).waitFor()
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1))
+    await accountPanel.getByRole('button',{name:/复制/}).click()
+    assert.deepEqual(JSON.parse((await page.evaluate(()=>window.copies)).at(-1)).cookies,JSON.parse(account.google_cookies))
+    await page.screenshot({path:resolve(output,'account-info-mobile.png'),fullPage:true})
     assert.deepEqual(errors,[]); assert.deepEqual(blocked,[])
     record('Proxy trigger opens its own tab without folding or saving; mobile uses available width without page overflow')
     await writeFile(resolve(output,'verification.json'),JSON.stringify({checks,writes,errors,blocked},null,2))
