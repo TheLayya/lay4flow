@@ -82,7 +82,7 @@ const savedAt = reactive({})
 const admin = reactive({ admin_username: '', api_key: '', debug_enabled: false })
 const password = reactive({ username: '', old_password: '', new_password: '', confirm_password: '' })
 const newKey = ref('')
-const generation = reactive({ image_timeout: 300, video_timeout: 1500, max_retries: 3 })
+const generation = reactive({ image_timeout: 300, video_timeout: 1500, max_retries: 20 })
 const defaultAccountErrorRules = [
     'PUBLIC_ERROR_MODEL_ACCESS_DENIED|LIMIT|0s',
     'PUBLIC_ERROR_USER_QUOTA_REACHED|LIMIT|24h',

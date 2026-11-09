@@ -49,7 +49,7 @@ class DatabaseSettingsTests(unittest.IsolatedAsyncioTestCase):
         await self.database.update_captcha_config()
         refresh = await self.database.update_token_refresh_config(enabled=False)
         self.assertFalse((await self.database.get_proxy_config()).enabled)
-        self.assertEqual((await self.database.get_generation_config()).max_retries, 3)
+        self.assertEqual((await self.database.get_generation_config()).max_retries, 20)
         self.assertEqual((await self.database.get_cache_config()).cache_base_url, "")
         self.assertFalse((await self.database.get_debug_config()).log_requests)
         self.assertEqual(
@@ -154,7 +154,7 @@ class DatabaseSettingsTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.database.update_captcha_config(captcha_method="unsupported")
         await self.database.update_generation_config(max_retries="invalid")
-        self.assertEqual((await self.database.get_generation_config()).max_retries, 3)
+        self.assertEqual((await self.database.get_generation_config()).max_retries, 20)
         await self.database.update_generation_config(max_retries=0)
         self.assertEqual((await self.database.get_generation_config()).max_retries, 1)
         self.assertEqual(

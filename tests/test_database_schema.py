@@ -172,7 +172,7 @@ class DatabaseSchemaTests(unittest.IsolatedAsyncioTestCase):
         generation = await self.database.get_generation_config()
         self.assertEqual(
             (generation.image_timeout, generation.video_timeout, generation.max_retries),
-            (123, 456, 3),
+            (123, 456, 20),
         )
         for log_id, code, progress in ((1, 200, 100), (2, 500, 0), (3, 102, 0)):
             detail = await self.database.get_log_detail(log_id)

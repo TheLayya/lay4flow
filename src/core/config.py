@@ -10,6 +10,7 @@ import tomli
 UNCONFIGURED_API_KEY = "__configure_api_key__"
 UNCONFIGURED_ADMIN_PASSWORD = "__configure_admin_password__"
 REMOTE_BROWSER_BASE_URL = "https://cap.tk218.top"
+DEFAULT_FLOW_MAX_RETRIES = 20
 
 
 def normalize_public_origin(value: str) -> str:
@@ -137,11 +138,11 @@ class Config:
 
     @property
     def flow_max_retries(self) -> int:
-        retries = self._config.get("flow", {}).get("max_retries", 3)
+        retries = self._config.get("flow", {}).get("max_retries", DEFAULT_FLOW_MAX_RETRIES)
         try:
             return max(1, int(retries))
         except Exception:
-            return 3
+            return DEFAULT_FLOW_MAX_RETRIES
 
     def set_flow_max_retries(self, retries: int):
         """Set flow max retries"""
@@ -150,7 +151,7 @@ class Config:
         try:
             normalized = max(1, int(retries))
         except Exception:
-            normalized = 3
+            normalized = DEFAULT_FLOW_MAX_RETRIES
         self._config["flow"]["max_retries"] = normalized
 
     @property

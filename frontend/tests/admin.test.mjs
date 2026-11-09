@@ -254,6 +254,17 @@ test('release information is local on load and checks online versions only on re
     assert.deepEqual(plain(s.matchingCards.value.map((card) => card.id)), ['release'])
 })
 
+test('generation attempts default to twenty without replacing an explicitly saved value', async () => {
+    const fixture = view('Settings', { api: {
+        get: async (path) => path === '/api/config/generation'
+            ? { config: { image_timeout: 300, video_timeout: 1500, max_retries: 3 } }
+            : path === '/api/admin/release' ? { version: 'fixture' } : { config: {} },
+    } })
+    assert.equal(fixture.state.generation.max_retries, 20)
+    await fixture.state.readSettings()
+    assert.equal(fixture.state.generation.max_retries, 3)
+})
+
 test('account error policy loads separately and is searchable without losing rule drafts', async () => {
     const fixture = view('Settings', {
         api: {
@@ -1847,6 +1858,45 @@ test('account overview gives priority to paused, identity and Profile failures i
     assert.equal(s.vidsAttention({ enabled: true, ready: true, identity_verified: false }), true)
     assert.equal(s.sessionLabel({ browser_profile_error: 'Profile needs attention' }), '需要关注')
     assert.equal(s.profileLabel('ready'), '已就绪')
+})
+
+test('account protection exposes exact local unlock time and a bounded shared-clock countdown', () => {
+    const { state: s } = view('Accounts')
+    const until = '2026-11-11T01:02:03+08:00'
+    const value = { action: 'LIMIT', status: 'cooldown', until, reason: 'RESOURCE_EXHAUSTED' }
+    s.protectionNow.value = Date.parse(until) - (25 * 3600 + 61) * 1000
+    const local = new Date(until)
+    const pad = (part) => String(part).padStart(2, '0')
+    assert.equal(s.protectionUnlockAt(value), `${local.getFullYear()}-${pad(local.getMonth() + 1)}-${pad(local.getDate())} ${pad(local.getHours())}:${pad(local.getMinutes())}:${pad(local.getSeconds())}`)
+    assert.equal(s.protectionLabel(value), 'LIMIT · 冷却中')
+    assert.equal(s.protectionRemaining(value), '剩余 25 小时 1 分 1 秒')
+    s.protectionNow.value = Date.parse(until) + 1
+    assert.equal(s.protectionRemaining(value), '已到解锁时间，等待状态同步')
+    assert.equal(s.protectionRemaining({ action: 'LIMIT', until: 'invalid' }), '等待同步解锁时间')
+    assert.equal(s.protectionUnlockAt({ action: 'LIMIT' }), '时间待同步')
+})
+
+test('Flow and Vids protection stay separate from account enable and LIMIT filter uses both providers', () => {
+    const { state: s } = view('Accounts')
+    const limit = { action: 'LIMIT', status: 'cooldown', until: '2026-11-11T01:02:03Z' }
+    const abnormal = { action: 'DEACTIVE', status: 'abnormal' }
+    s.accounts.value = [
+        { id: 1, is_active: false, generation_protection: limit },
+        { id: 2, is_active: true },
+        { id: 3, is_active: true, generation_protection: abnormal },
+    ]
+    s.vids.value = [{ token_id: 2, enabled: false, protection: limit }]
+    assert.equal(s.protectionEntries(s.rows.value[0])[0].paused, true)
+    assert.equal(s.protectionEntries(s.rows.value[1])[0].provider, 'Vids')
+    assert.equal(s.protectionEntries(s.rows.value[1])[0].paused, true)
+    assert.equal(s.protectionEntries(s.rows.value[0])[0].provider, 'Flow')
+    assert.equal(s.protectionLabel(abnormal), '生成异常')
+    assert.equal(s.protectionLabel({ action: 'DISABLE' }), '规则停用')
+    s.state.value = 'limited'
+    assert.deepEqual(plain(s.filtered.value.map((row) => row.id)), [1, 2])
+    assert.equal(s.accounts.value[0].is_active, false)
+    s.state.value = 'attention'
+    assert.deepEqual(plain(s.filtered.value.map((row) => row.id)), [1, 3])
 })
 
 test('manual Vids quota refresh immediately preserves failed observations and reports the reason', async () => {

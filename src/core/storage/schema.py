@@ -6,7 +6,7 @@ Schema statements and their transaction boundaries remain in execution order.
 
 from typing import TYPE_CHECKING
 
-from ..config import REMOTE_BROWSER_BASE_URL, UNCONFIGURED_API_KEY
+from ..config import DEFAULT_FLOW_MAX_RETRIES, REMOTE_BROWSER_BASE_URL, UNCONFIGURED_API_KEY
 
 if TYPE_CHECKING:
     from ..database import Database
@@ -88,19 +88,19 @@ class SchemaManager:
         if count[0] == 0:
             image_timeout = 300
             video_timeout = 1500
-            max_retries = 3
+            max_retries = DEFAULT_FLOW_MAX_RETRIES
 
             if config_dict:
                 generation_config = config_dict.get("generation", {})
                 flow_config = config_dict.get("flow", {})
                 image_timeout = generation_config.get("image_timeout", 300)
                 video_timeout = generation_config.get("video_timeout", 1500)
-                max_retries = flow_config.get("max_retries", 3)
+                max_retries = flow_config.get("max_retries", DEFAULT_FLOW_MAX_RETRIES)
 
             try:
                 max_retries = max(1, int(max_retries))
             except Exception:
-                max_retries = 3
+                max_retries = DEFAULT_FLOW_MAX_RETRIES
 
             await db.execute(
                 """
@@ -412,7 +412,7 @@ class SchemaManager:
             # Check and add missing columns to generation_config table
             if await self._database._table_exists(db, "generation_config"):
                 generation_columns_to_add = [
-                    ("max_retries", "INTEGER DEFAULT 3"),
+                    ("max_retries", f"INTEGER DEFAULT {DEFAULT_FLOW_MAX_RETRIES}"),
                 ]
 
                 for col_name, col_type in generation_columns_to_add:
@@ -715,7 +715,7 @@ class SchemaManager:
                     id INTEGER PRIMARY KEY DEFAULT 1,
                     image_timeout INTEGER DEFAULT 300,
                     video_timeout INTEGER DEFAULT 1500,
-                    max_retries INTEGER DEFAULT 3,
+                    max_retries INTEGER DEFAULT 20,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)

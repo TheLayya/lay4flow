@@ -5,7 +5,7 @@ from typing import Any, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict
 
-from .config import REMOTE_BROWSER_BASE_URL
+from .config import DEFAULT_FLOW_MAX_RETRIES, REMOTE_BROWSER_BASE_URL
 
 
 class Token(BaseModel):
@@ -195,7 +195,7 @@ class GenerationConfig(BaseModel):
     id: int = 1
     image_timeout: int = 300  # seconds
     video_timeout: int = 1500  # seconds
-    max_retries: int = 3  # 请求最大重试次数
+    max_retries: int = DEFAULT_FLOW_MAX_RETRIES  # 每份作品最大尝试次数（含首次）
 
 
 class CallLogicConfig(BaseModel):

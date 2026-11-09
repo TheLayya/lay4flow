@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Optional
 
 import aiosqlite
 
-from ..config import REMOTE_BROWSER_BASE_URL
+from ..config import DEFAULT_FLOW_MAX_RETRIES, REMOTE_BROWSER_BASE_URL
 from ..models import (
     AdminConfig,
     CacheConfig,
@@ -311,10 +311,10 @@ class SettingsRepository:
                 normalized_max_retries = (
                     max(1, int(max_retries))
                     if max_retries is not None
-                    else max(1, int(current.get("max_retries", 3)))
+                    else max(1, int(current.get("max_retries", DEFAULT_FLOW_MAX_RETRIES)))
                 )
             except Exception:
-                normalized_max_retries = 3
+                normalized_max_retries = DEFAULT_FLOW_MAX_RETRIES
 
             if row:
                 await db.execute(

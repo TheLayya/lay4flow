@@ -71,6 +71,7 @@ const accounts=Array.from({length:28},(_,i)=>({
     last_refresh_at:date,next_refresh_at:'2026-11-09T02:30:00Z',created_at:'2026-11-01T02:00:00Z',last_used_at:date,
     current_project_id:`demo-project-${i+1}`, current_project_name:'演示项目',proxy_pool_id:i+1,
     proxy_url:`socks5h://exit-${String(i+1).padStart(2,'0')}.example.test:1080`,submission_proxy_mode:'fixed',
+    generation_protection:i===0?{action:'LIMIT',status:'cooldown',until:new Date(Date.now()+24*60*60*1000).toISOString(),reason:'PUBLIC_ERROR_USER_QUOTA_REACHED'}:null,
 }))
 const proxies=accounts.map((a,i)=>({id:a.id,proxy_url:a.proxy_url,note:`创作出口 ${String(i+1).padStart(2,'0')}`,enabled:i!==5,
     bound_account_count:1,last_check_ok:i!==7,last_check_at:date,circuit_state:i===7?'cooling':'ready',inflight:i%4,
@@ -107,7 +108,7 @@ await context.route('**/*',async route=>{
         '/api/admin/studio/models':{data:Object.entries(catalog).map(([id,spec])=>({id,...spec}))},
         '/api/admin/studio/jobs':{jobs:[]},
         '/api/admin/config':{admin_username:'演示管理员',api_key:'',error_ban_threshold:3,debug_enabled:false},
-        '/api/config/generation':{config:{image_timeout:300,video_timeout:1500,max_retries:3}},
+        '/api/config/generation':{config:{image_timeout:300,video_timeout:1500,max_retries:20}},
         '/api/account-error-policy':{success:true,config:{rules,consecutive_failure_threshold:3,failure_cooldown_seconds:300,max_account_attempts:3}},
         '/api/admin/vids/config':{config:{keepalive_enabled:true,keepalive_interval_minutes:10,repair_cooldown_seconds:300,consecutive_failure_threshold:3,failure_cooldown_seconds:300,rules:''}},
         '/api/call-logic/config':{config:{call_mode:'default'}},

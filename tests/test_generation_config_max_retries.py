@@ -1,8 +1,28 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from src.core.config import config
+from src.core.config import DEFAULT_FLOW_MAX_RETRIES, Config, config
 from src.core.database import Database
+from src.core.models import GenerationConfig
+
+
+class GenerationAttemptsDefaultTests(unittest.TestCase):
+    def test_model_and_runtime_missing_or_invalid_default_to_twenty(self):
+        self.assertEqual(DEFAULT_FLOW_MAX_RETRIES, 20)
+        self.assertEqual(GenerationConfig().max_retries, 20)
+        with patch.object(Config, "_load_config", return_value={}):
+            settings = Config()
+        self.assertEqual(settings.flow_max_retries, 20)
+        for invalid in (None, "invalid"):
+            settings._config = {"flow": {"max_retries": invalid}}
+            self.assertEqual(settings.flow_max_retries, 20)
+            settings.set_flow_max_retries(invalid)
+            self.assertEqual(settings.flow_max_retries, 20)
+        settings.set_flow_max_retries(3)
+        self.assertEqual(settings.flow_max_retries, 3)
+        settings.set_flow_max_retries(0)
+        self.assertEqual(settings.flow_max_retries, 1)
 
 
 class GenerationConfigMaxRetriesTests(unittest.IsolatedAsyncioTestCase):
@@ -40,6 +60,38 @@ class GenerationConfigMaxRetriesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generation_config.image_timeout, 321)
         self.assertEqual(generation_config.video_timeout, 654)
         self.assertEqual(generation_config.max_retries, 7)
+
+    async def test_empty_initial_configuration_defaults_to_twenty_and_reloads(self):
+        await self.db.init_config_from_toml({}, is_first_startup=True)
+        self.assertEqual((await self.db.get_generation_config()).max_retries, 20)
+        await self.db.reload_config_to_memory()
+        self.assertEqual(config.flow_max_retries, 20)
+
+    async def test_invalid_initial_configuration_uses_twenty(self):
+        await self.db.init_config_from_toml(
+            {"flow": {"max_retries": "invalid"}}, is_first_startup=True
+        )
+        self.assertEqual((await self.db.get_generation_config()).max_retries, 20)
+
+    async def test_fresh_sql_default_and_legacy_missing_column_use_twenty(self):
+        async with self.db._connect(write=True) as connection:
+            await connection.execute("INSERT INTO generation_config (id) VALUES (1)")
+            await connection.commit()
+        self.assertEqual((await self.db.get_generation_config()).max_retries, 20)
+        async with self.db._connect(write=True) as connection:
+            await connection.execute("ALTER TABLE generation_config DROP COLUMN max_retries")
+            await connection.commit()
+        await self.db.check_and_migrate_db({"flow": {"max_retries": 3}})
+        self.assertEqual((await self.db.get_generation_config()).max_retries, 20)
+
+    async def test_existing_explicit_three_survives_new_defaults_and_reload(self):
+        await self.db.init_config_from_toml({"flow": {"max_retries": 3}}, is_first_startup=True)
+        await self.db.check_and_migrate_db({"flow": {"max_retries": 20}})
+        await self.db.reload_config_to_memory()
+        self.assertEqual((await self.db.get_generation_config()).max_retries, 3)
+        self.assertEqual(config.flow_max_retries, 3)
+        await self.db.update_generation_config(image_timeout=450)
+        self.assertEqual((await self.db.get_generation_config()).max_retries, 3)
 
     async def test_reload_config_to_memory_syncs_max_retries(self):
         await self.db.init_config_from_toml(

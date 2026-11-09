@@ -33,6 +33,8 @@ const search = ref('')
 const route = useRoute()
 const platform = ref(route.query.platform === 'vids' ? 'vids' : 'all')
 const state = ref('all')
+const protectionNow = ref(Date.now())
+let protectionClock
 const plan = ref('all')
 const selected = ref([])
 const accountsTable = ref(null)
@@ -843,7 +845,9 @@ const filtered = computed(() =>
                     ? row.is_active
                     : state.value === 'inactive'
                       ? !row.is_active
-                      : row.at_expired ||
+                      : state.value === 'limited'
+                        ? protectionEntries(row).some((item) => item.value.action === 'LIMIT')
+                        : row.generation_protection || row.at_expired ||
                         ['failed', 'login_required', 'config_error', 'retrying'].includes(row.refresh_status) ||
                         row.refresh_error ||
                         (row.vids?.enabled && (vidsAttention(row.vids) || quotaInfo(row).error || quotaInfo(row).stale))))
@@ -876,6 +880,41 @@ const metrics = computed(() => [
     },
 ])
 const date = (value) => (value ? parseDate(value).toLocaleString('zh-CN', { hour12: false }) : '暂无')
+function protectionEntries(row) {
+    return [
+        !row.vidsOnly && row.generation_protection
+            ? { provider: 'Flow', value: row.generation_protection, paused: !row.is_active }
+            : null,
+        row.vids?.protection
+            ? { provider: 'Vids', value: row.vids.protection, paused: !row.is_active || row.vids.enabled === false }
+            : null,
+    ].filter(Boolean)
+}
+function protectionDeadline(value) {
+    const timestamp = value?.until ? parseDate(value.until).getTime() : NaN
+    return Number.isFinite(timestamp) ? timestamp : null
+}
+function protectionUnlockAt(value) {
+    const timestamp = protectionDeadline(value)
+    if (timestamp === null) return '时间待同步'
+    const local = new Date(timestamp)
+    const pad = (part) => String(part).padStart(2, '0')
+    return `${local.getFullYear()}-${pad(local.getMonth() + 1)}-${pad(local.getDate())} ${pad(local.getHours())}:${pad(local.getMinutes())}:${pad(local.getSeconds())}`
+}
+function protectionRemaining(value) {
+    const deadline = protectionDeadline(value)
+    if (deadline === null) return '等待同步解锁时间'
+    const seconds = Math.max(0, Math.ceil((deadline - protectionNow.value) / 1000))
+    if (!seconds) return '已到解锁时间，等待状态同步'
+    const hours = Math.floor(seconds / 3600)
+    const minutes = Math.floor((seconds % 3600) / 60)
+    const rest = seconds % 60
+    return `剩余 ${hours ? `${hours} 小时 ` : ''}${minutes ? `${minutes} 分 ` : ''}${rest} 秒`
+}
+function protectionLabel(value) {
+    if (value?.action === 'LIMIT') return 'LIMIT · 冷却中'
+    return value?.action === 'DISABLE' || value?.status === 'disabled' ? '规则停用' : '生成异常'
+}
 const quotaNumber = (value) =>
     ['number', 'string'].includes(typeof value) &&
     String(value).trim() !== '' &&
@@ -1016,6 +1055,7 @@ const profileLabel = (value) =>
     '未初始化'
 const flowAttention = (row) =>
     !!(
+        row.generation_protection ||
         row.at_expired ||
         row.refresh_error ||
         row.browser_profile_error ||
@@ -1912,6 +1952,9 @@ async function cancelLogin() {
     }
 }
 onMounted(() => {
+    protectionClock = setInterval(() => {
+        if (!document.hidden) protectionNow.value = Date.now()
+    }, 1000)
     detectNativePresentation()
     load()
     refreshImportJobs()
@@ -1965,6 +2008,7 @@ onMounted(() => {
     }, 30000)
 })
 onUnmounted(() => {
+    clearInterval(protectionClock)
     stopExtensionDetection()
     finishDesktopLoginBrowser()
     disposed = true
@@ -2146,6 +2190,7 @@ onUnmounted(() => {
                         <el-option label="所有状态" value="all" />
                         <el-option label="已启用" value="active" />
                         <el-option label="已暂停" value="inactive" />
+                        <el-option label="LIMIT 冷却" value="limited" />
                         <el-option label="需要关注" value="attention" />
                     </el-select>
                     <el-select v-model="plan" aria-label="筛选套餐">
@@ -2328,6 +2373,44 @@ onUnmounted(() => {
                         />
                     </template>
                 </el-table-column>
+                <el-table-column label="生成保护 / 解锁时间" width="258" class-name="account-protection-column">
+                    <template #default="{ row }">
+                        <div v-if="protectionEntries(row).length" class="account-protections">
+                            <div
+                                v-for="item in protectionEntries(row)"
+                                :key="item.provider"
+                                class="account-protection"
+                                :class="{ limited: item.value.action === 'LIMIT' }"
+                                :aria-label="`${row.email || row.id} ${item.provider} 生成保护`"
+                            >
+                                <div class="protection-heading">
+                                    <b>{{ item.provider }}</b>
+                                    <span class="protection-badge" :class="{ limited: item.value.action === 'LIMIT' }">
+                                        {{ protectionLabel(item.value) }}
+                                    </span>
+                                    <el-button
+                                        text size="small"
+                                        :loading="busy.has(`${row.id}:clear-${item.provider === 'Flow' ? 'generation' : 'vids'}-protection`)"
+                                        :aria-label="`解除 ${row.email || row.id} 的 ${item.provider} 生成保护`"
+                                        @click="item.provider === 'Flow' ? clearGenerationProtection(row) : clearVidsProtection(row)"
+                                    >解除</el-button>
+                                </div>
+                                <template v-if="item.value.action === 'LIMIT'">
+                                    <time class="protection-unlock" :datetime="item.value.until || undefined">
+                                        解锁 {{ protectionUnlockAt(item.value) }}
+                                    </time>
+                                    <small class="protection-countdown">{{ protectionRemaining(item.value) }}</small>
+                                    <small v-if="item.paused" class="protection-paused">账号已暂停，到期后仍需手动启用</small>
+                                </template>
+                                <small v-else class="protection-manual">
+                                    {{ item.value.action === 'DISABLE' ? '解除保护后需手动启用' : '需处理异常后手动解除' }}
+                                </small>
+                                <small v-if="item.value.reason" class="protection-reason" :title="item.value.reason">{{ item.value.reason }}</small>
+                            </div>
+                        </div>
+                        <span v-else class="muted">—</span>
+                    </template>
+                </el-table-column>
                 <el-table-column label="Flow 积分" width="114" sortable="custom" prop="credits" align="right">
                     <template #default="{ row }">
                         <div v-if="!row.vidsOnly" class="account-number-cell">
@@ -2424,14 +2507,6 @@ onUnmounted(() => {
                             </span>
                             <span class="session-status" :class="{ attention: row.vids && vidsAttention(row.vids), unlinked: !row.vids }" :title="vidsSessionTitle(row.vids)">
                                 <i class="status-dot" /><b>Vids</b>{{ vidsState(row.vids) }}
-                            </span>
-                            <span v-if="row.generation_protection" class="health-inline-error" :title="row.generation_protection.reason + (row.generation_protection.until ? ' · 恢复于 ' + date(row.generation_protection.until) : '')">
-                                生成保护
-                                <el-button text size="small" @click="clearGenerationProtection(row)">解除保护</el-button>
-                            </span>
-                            <span v-if="row.vids?.protection" class="health-inline-error" :title="vidsProtectionTitle(row.vids.protection)">
-                                Vids {{ row.vids.protection.reason || vidsProtectionLabel(row.vids.protection) }}
-                                <el-button text size="small" :loading="busy.has(row.id + ':clear-vids-protection')" @click="clearVidsProtection(row)">解除 Vids 保护</el-button>
                             </span>
                         </div>
                     </template>
@@ -4570,6 +4645,21 @@ html.dark .quota-error {
 .accounts-table .health-inline-error {
     margin: 0;
 }
+.account-protections { display: grid; gap: 5px; }
+.account-protection { display: grid; gap: 2px; padding: 5px 7px; border-left: 3px solid var(--danger, #d85861); border-radius: 4px; background: var(--surface-soft, #fff5f6); line-height: 17px; }
+.account-protection.limited { border-left-color: #cf8b20; background: #fff8e9; }
+.protection-heading { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.protection-heading b { font-size: 11px; }
+.protection-badge { display: inline-block; padding: 1px 5px; border-radius: 4px; border: 1px solid #e6adb4; background: #fff0f1; color: #b33748; font-size: 11px; font-weight: 600; line-height: 18px; }
+.protection-badge.limited { border-color: #e5bf72; background: #ffedc1; color: #8a580d; }
+.protection-heading .el-button { margin-left: auto; min-height: 20px; padding: 0; }
+.protection-unlock { display: block; color: var(--ink); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.protection-countdown, .protection-paused, .protection-manual { display: block; font-size: 11px; }
+.protection-countdown { color: #906015; font-variant-numeric: tabular-nums; }
+.protection-paused, .protection-manual { color: var(--muted); }
+.protection-reason { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+html.dark .account-protection.limited { background: #392e1c; }
+html.dark .protection-countdown { color: #e2bb72; }
 .account-last-used {
     display: block;
     max-width: 110px;

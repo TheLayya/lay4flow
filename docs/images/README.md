@@ -4,7 +4,7 @@
 
 | 图片 | 内容 |
 |---|---|
-| `accounts-overview.png` / `release-accounts.webp` | 紧凑账号表格、Free／Plus／Pro／Ultra 套餐、额度与会话状态 |
+| `accounts-overview.png` / `release-accounts.webp` | 紧凑账号表格、套餐、LIMIT 保护、可见解锁时间和剩余等待 |
 | `proxy-pool-overview.png` | 代理池绑定、连接状态、成功率、连续失败与冷却 |
 | `request-logs-overview.png` | 请求列表的尝试次数、重试次数与账号数 |
 | `request-attempts.png` / `release-logs.webp` | 逐次验证码／生成失败、命中规则、换号与成功记录 |
