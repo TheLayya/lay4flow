@@ -1,6 +1,6 @@
 # WINDOWS-EXE-1.6.1
 
-- State: in_review
+- State: done
 - Owner: Codex
 - Requirement: build the updated Windows EXE installer, then commit and push the completed public changes from this checkout.
 - Scope: version 1.6.1 includes the existing Flow submission/transport corrections, account submission-proxy settings and Vids automatic pool dispatch/diagnostics. No new provider behavior is introduced by packaging.
@@ -24,3 +24,11 @@
 - Required offline gate after the test-only correction: 1967 Python tests passed (1 skip), Ruff/import/format/generated-contract checks passed, JavaScript contract checks passed, and first-start/cold-restart package smokes passed with zero guarded network attempts. The affected cancellation module separately passed all 22 tests.
 - Candidate setup EXE compiled with Inno Setup 6.7.3 and installed successfully into a separate empty directory. Actual HTTP checks passed for health/version 1.6.1, remote_browser captcha mode, synthetic admin login, release metadata, empty Vids accounts and rebuilt Studio assets. All 309 installed public runtime files match the candidate archive. Native shutdown passed and the isolated database contains zero accounts.
 - No real login, generation or captcha was requested. Private command logs, the original failed run and successful rerun remain under the ignored evidence directory; no active-checkout service or previous release asset was replaced.
+
+## Final delivery
+
+- Canonical source: `63de7fc50c5f041478ab6712f6ae091bfef4e20e`, pushed normally to `origin/main`. Final assets were generated from that clean commit; the desktop FileVersion is `1.6.1.0` and ProductVersion contains the same source commit. This completion record is documentation-only and is outside the runtime allowlist.
+- Final local outputs: `dist/1.6.1/` contains the public runtime archive, complete Windows ZIP, setup EXE, `SHA256SUMS`, `build-manifest.json` and release notes. All three asset digests match the checksum list and build manifest; ZIP CRC and nested runtime hash validation passed. All 309 public runtime files match source.
+- Final setup EXE was separately installed and exercised in another empty isolated directory: installer exit 0, health/version 1.6.1, remote_browser mode, synthetic admin login, release metadata, empty Vids accounts and Studio asset HTTP 200. Installed public files have zero mismatches, shutdown succeeded and the database contains zero accounts. Evidence: `tmp/exe-package-161-20261111/final-exe-result.json` and `canonical-audit.json`.
+- Setup EXE SHA-256: `26fad224f2715ffd6bf0af69e8c16d41581f227c2dd37df6eacf75a20afb2a81`.
+- Delivery is local assets plus pushed public source, not a GitHub Release: no tag, Release or binary upload was created. The setup remains unsigned. No real Google login, paid generation or captcha acceptance was performed.
