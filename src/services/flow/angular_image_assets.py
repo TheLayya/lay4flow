@@ -1,9 +1,9 @@
 """Pure UploadImage/UpsampleImage JSON-proto contracts from Flow's frontend.
 
-The public 2026-10-21 wO1vlb.js registers both RPCs and builds their requests
-(vbb/Dbb, lines 870/878). XRV0Af.js lines 2506/2517 maps 2K -> 1, 4K -> 2
-and downloads UpsampleImage response field2 as bytes. It does not use its
-optional field1 media URL for that download.
+Rechecked against the public 2026-11-05 frontend: UploadImage's esb caller
+requests UPLOAD_IMAGE captcha and ssb requests IMAGE_GENERATION for upsample.
+The download UI maps 2K -> 1, 4K -> 2 and reads response field2 as bytes,
+rather than the optional field1 media URL.
 """
 
 import base64
@@ -42,13 +42,7 @@ def build_upload_image_request(
     captcha_token: str | None = None,
 ) -> list:
     """Build a plain upload, omitting optional crop/hidden/destination fields."""
-    if not isinstance(image_bytes, (bytes, bytearray)) or not image_bytes:
-        raise ValueError("Flow image upload bytes are missing")
-    if not isinstance(mime_type, str) or any(character.isspace() for character in mime_type):
-        raise ValueError("Flow image upload MIME type is invalid")
-    mime_type = _string(mime_type, "MIME type")
-    if not mime_type.startswith("image/"):
-        raise ValueError("Flow image upload MIME type is invalid")
+    validate_upload_image_inputs(project_id, image_bytes, mime_type, file_name)
     return [
         _context(project_id, captcha_token),
         base64.b64encode(image_bytes).decode("ascii"),
@@ -60,6 +54,21 @@ def build_upload_image_request(
         None,
         _string(file_name, "file name"),
     ]
+
+
+def validate_upload_image_inputs(
+    project_id: str, image_bytes: bytes, mime_type: str, file_name: str
+) -> None:
+    """Reject invalid input before acquiring a short-lived remote captcha."""
+    _string(project_id, "project")
+    _string(file_name, "file name")
+    if not isinstance(image_bytes, (bytes, bytearray)) or not image_bytes:
+        raise ValueError("Flow image upload bytes are missing")
+    if not isinstance(mime_type, str) or any(character.isspace() for character in mime_type):
+        raise ValueError("Flow image upload MIME type is invalid")
+    mime_type = _string(mime_type, "MIME type")
+    if not mime_type.startswith("image/"):
+        raise ValueError("Flow image upload MIME type is invalid")
 
 
 def parse_upload_image_response(payload: Any) -> str:
@@ -74,13 +83,20 @@ def build_upsample_image_request(
     project_id: str, media_id: str, target_resolution: str, captcha_token: str
 ) -> list:
     """Build the download upsampler request, using its distinct resolution enum."""
-    if not isinstance(target_resolution, str) or target_resolution not in _RESOLUTIONS:
-        raise ValueError("Flow image upsample resolution is invalid")
+    validate_upsample_image_inputs(project_id, media_id, target_resolution)
     return [
         _string(media_id, "upsample media"),
         _RESOLUTIONS[target_resolution],
         _context(project_id, _string(captcha_token, "captcha")),
     ]
+
+
+def validate_upsample_image_inputs(project_id: str, media_id: str, target_resolution: str) -> None:
+    """Validate protected download inputs without consuming a remote solve."""
+    _string(project_id, "project")
+    _string(media_id, "upsample media")
+    if not isinstance(target_resolution, str) or target_resolution not in _RESOLUTIONS:
+        raise ValueError("Flow image upsample resolution is invalid")
 
 
 def parse_upsample_image_response(payload: Any) -> str:

@@ -535,7 +535,12 @@ SPEECH_REQUEST = {
     "required": ["model", "input", "voice", "response_format"],
     "properties": {
         "model": {"type": "string", "enum": ["vids-speech"]},
-        "input": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "input": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Vids upstream currently accepts English speech text only; other languages return LANGUAGE_NOT_SUPPORTED.",
+        },
         "voice": {"type": "string", "enum": list(PRESET_VOICES)},
         "response_format": {"type": "string", "enum": ["wav"]},
     },

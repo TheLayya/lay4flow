@@ -1,6 +1,6 @@
 # Windows 安装与使用
 
-适用 Windows 10 / 11 x64。下载 [Releases](https://github.com/TheLayya/lay4flow/releases) 中的 `lay4flow-remote-1.6.0-windows-x64-setup.exe`，双击后按向导安装，完成后打开桌面上的 **lay4flow-remote**。也可下载同版本 ZIP，完整解压后运行 `install.cmd`。
+适用 Windows 10 / 11 x64。下载 [Releases](https://github.com/TheLayya/lay4flow/releases) 中的 `lay4flow-remote-1.6.1-windows-x64-setup.exe`，双击后按向导安装，完成后打开桌面上的 **lay4flow-remote**。也可下载同版本 ZIP，完整解压后运行 `install.cmd`。
 
 安装包自带原生后台、Python 运行时、依赖和 Cloak 浏览器，**无需安装 Docker、Python、Node、Git 或 .NET**。应用自身依赖已打包；桌面界面使用 Microsoft Edge WebView2，缺失时安装器会运行微软官方安装程序，此步骤需要联网。生成内容还需要可访问 Google 和远程打码服务的网络。
 

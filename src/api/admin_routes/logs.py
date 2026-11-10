@@ -163,12 +163,25 @@ def _extract_attempt_history(payload: Any) -> dict | None:
                 pass
         for name, maximum in (
             ("duration_ms", 604_800_000),
+            ("captcha_ms", 604_800_000),
+            ("captcha_to_submit_ms", 604_800_000),
+            ("submit_ms", 604_800_000),
             ("delay_seconds", 604_800),
             ("rule_seconds", 604_800),
         ):
             value = record.get(name)
-            if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= maximum:
+            if type(value) in (int, float) and 0 <= value <= maximum and math.isfinite(value):
                 row[name] = value
+        for name, minimum in (("rpc_code", 0), ("http_status", 100)):
+            value = record.get(name)
+            if type(value) is int and minimum <= value <= 599:
+                row[name] = value
+        count = record.get("submission_count")
+        if type(count) is int and 0 <= count <= 100:
+            row["submission_count"] = count
+        state = record.get("submission_state")
+        if isinstance(state, str) and state in {"not_submitted", "unknown", "rejected", "accepted"}:
+            row["submission_state"] = state
         attempts.append(row)
     result["attempts"] = attempts
     if len(history["attempts"]) > 100:

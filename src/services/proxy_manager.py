@@ -134,10 +134,7 @@ class ProxyManager:
 
     async def acquire_submission_proxy(self, token) -> SubmissionProxyLease:
         """Reserve one exit for a whole generation task; login bindings stay unchanged."""
-        if (
-            getattr(token, "submission_proxy_mode", "fixed") != "pool_random"
-            or getattr(token, "browser_profile_source", "") == "cloak"
-        ):
+        if getattr(token, "submission_proxy_mode", "fixed") != "pool_random":
             proxy = await self.resolve_account_proxy(token)
             entry_id = getattr(token, "proxy_pool_id", None)
             async with self._submission_lock:

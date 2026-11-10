@@ -1,4 +1,4 @@
-"""Flow HTTP sessions bound to a persisted Profile identity and account exit."""
+"""Flow HTTP sessions using persisted Profile identity on the caller-selected exit."""
 
 import json
 from contextlib import asynccontextmanager

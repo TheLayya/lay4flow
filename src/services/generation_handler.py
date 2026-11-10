@@ -104,7 +104,7 @@ class GenerationHandler:
     async def _account_generation_pipeline(self, pipeline, token, proxy_url=None):
         """Scope each advance/close, so proxy ContextVar tokens never span a yield."""
         factory = getattr(self.flow_client, "generation_session", None)
-        session = factory(token) if factory is not None else nullcontext()
+        session = factory(token, proxy_url=proxy_url) if factory is not None else nullcontext()
         async with session as generation:
 
             def generation_context():
@@ -423,7 +423,8 @@ class GenerationHandler:
                 finally:
                     CURRENT_ATTEMPTS.reset(marker)
         yield self._create_error_response(
-            f"生成失败，已达到最大尝试次数（含首次）{attempts.limit} 次：{last_error}", status_code=503
+            f"生成失败，已达到最大尝试次数（含首次）{attempts.limit} 次：{last_error}",
+            status_code=503,
         )
 
     async def _handle_generation_once(
@@ -759,9 +760,7 @@ class GenerationHandler:
                 submission_lease = await acquire_proxy(token)
                 account_proxy = submission_lease.proxy_url
                 perf_trace["submission_proxy"] = {
-                    "mode": "fixed"
-                    if getattr(token, "browser_profile_source", "") == "cloak"
-                    else getattr(token, "submission_proxy_mode", "fixed"),
+                    "mode": getattr(token, "submission_proxy_mode", "fixed"),
                     "pool_id": submission_lease.entry_id,
                 }
             with self._account_proxy_context(token, account_proxy):

@@ -1,5 +1,6 @@
 """Provider policy and dispatcher share mocked sessions without touching Flow state."""
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ from fastapi import FastAPI
 from src.api.admin_routes.vids import create_vids_admin_router
 from src.core.database import Database
 from src.core.models import Token
+from src.core.config import config
 from src.services.vids.account_policy import VidsAccountPolicy
 from src.services.vids.client import VidsProtocolError, VidsTransportError
 from src.services.vids.dispatcher import VidsPoolDispatcher, VidsProviderDispatcher
@@ -96,6 +98,38 @@ class VidsSecondIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.policy.clear(self.identifier)
         self.assertFalse((await self.db.get_token(self.identifier)).is_active)
         self.upstream.generate_speech.assert_awaited_once()
+
+    @patch.dict(config._config, {"flow": {**config._config.get("flow", {}), "max_retries": 20}})
+    async def test_pool_fallback_records_each_physical_receipt_without_implicit_protection(self):
+        second_id = await self.db.add_token(
+            Token(st="synthetic-session-2", email="synthetic2@example.invalid")
+        )
+        upstream = client()
+        upstream.flags["docs-hue"] = "synthetic-second"
+        gateway = VidsGateway(upstream, self.root / "fallback-second")
+        await gateway.start()
+        self.addAsyncCleanup(gateway.close)
+        self.dispatcher.register(
+            dispatcher_fixtures.VidsDispatcherTests.binding(second_id, gateway)
+        )
+        self.upstream.generate_speech.side_effect = VidsProtocolError("generate", 403)
+        result = await self.pool.generate(0, self.body, "fallback-policy")
+        self.assertEqual(result["status"], "completed")
+        base_id = "vids_" + hashlib.sha256(b"fallback-policy").hexdigest()
+        self.assertEqual(self.gateway.get(base_id)["status"], "failed")
+        self.assertEqual(gateway.get(result["id"])["status"], "completed")
+        first_stats = await self.policy.account_stats(self.identifier)
+        second_stats = await self.policy.account_stats(second_id)
+        self.assertEqual(
+            (first_stats["error_count"], first_stats["consecutive_error_count"]), (1, 1)
+        )
+        self.assertEqual(second_stats["success_count"], 1)
+        self.assertEqual(await self.policy.public_states(), {})
+        self.assertTrue((await self.db.get_token(self.identifier)).is_active)
+        self.assertTrue((await self.db.get_token(second_id)).is_active)
+        logs = await self.db.get_logs(include_payload=True)
+        self.assertEqual(len(logs), 2)
+        self.assertNotIn(self.body["prompt"], json.dumps(logs))
 
     async def test_config_api_requires_auth_and_reports_safe_provider_diagnostics(self):
         app = FastAPI()

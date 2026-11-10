@@ -166,7 +166,10 @@ class StudioMediaArchive:
                     if manager and hasattr(manager, "resolve_account_proxy")
                     else getattr(token, "proxy_url", None)
                 )
-                with self.handler._account_proxy_context(token, proxy_url):
+                with (
+                    self.handler._account_proxy_context(token, proxy_url),
+                    self.handler._account_token_context(token),
+                ):
                     remote = await self.handler.flow_client.get_media_url_redirect(
                         token.st, media_name, media_url_type="MEDIA_URL_TYPE_FULL_MEDIA"
                     )

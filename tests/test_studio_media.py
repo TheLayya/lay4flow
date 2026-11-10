@@ -4,7 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -15,7 +15,10 @@ from starlette.responses import StreamingResponse
 
 from src.api import admin, routes
 from src.api.admin_routes.studio import create_studio_router
+from src.core.models import Token
 from src.services.file_cache import FileCache
+from src.services.flow_client import FlowClient
+from src.services.generation_handler import GenerationHandler
 from src.services.studio_media import StudioMediaArchive, StudioMediaError
 
 
@@ -37,6 +40,7 @@ class StudioMediaTests(unittest.IsolatedAsyncioTestCase):
             file_cache=self.cache,
             flow_client=SimpleNamespace(get_media_url_redirect=AsyncMock()),
             _account_proxy_context=Mock(return_value=nullcontext()),
+            _account_token_context=Mock(return_value=nullcontext()),
         )
         self.archive = StudioMediaArchive(self.handler)
         self.name = "a" * 32 + ".jpg"
@@ -112,6 +116,141 @@ class StudioMediaTests(unittest.IsolatedAsyncioTestCase):
             "synthetic-session", "original-media", media_url_type="MEDIA_URL_TYPE_FULL_MEDIA"
         )
         self.assertEqual(self.cache.download_and_cache.await_args.args[1], "video")
+
+    async def test_cloak_video_recovery_uses_modern_get_media_and_restores_account_contexts(self):
+        proxy = "http://original-proxy.invalid:8080"
+        token = Token(
+            id=7,
+            st="profile-session:synthetic",
+            email="original@example.invalid",
+            browser_profile_source="cloak",
+            browser_profile_epoch="synthetic-epoch",
+            proxy_url=proxy,
+            current_project_id="original-project",
+        )
+        self.database.get_token.return_value = token
+        manager = SimpleNamespace(
+            db=self.database,
+            resolve_account_proxy=AsyncMock(return_value=proxy),
+            is_profile_validation_recent=Mock(return_value=True),
+        )
+        client = FlowClient(proxy_manager=None)
+        client.token_manager = manager
+        handler = GenerationHandler.__new__(GenerationHandler)
+        handler.db, handler.file_cache = self.database, self.cache
+        handler.flow_client, handler.token_manager = client, manager
+        archive = StudioMediaArchive(handler)
+        outer_token = SimpleNamespace(id=99, browser_profile_source="cookies")
+        outer_proxy = "http://outer-proxy.invalid:8080"
+        context = object()
+        closed = Mock()
+
+        @asynccontextmanager
+        async def account_http_session(tokens, account, fixed_proxy):
+            self.assertIs(tokens, manager)
+            self.assertIs(account, token)
+            self.assertEqual(fixed_proxy, proxy)
+            self.assertIs(client._account_token_ctx.get(), token)
+            self.assertEqual(client._account_proxy_ctx.get(), proxy)
+            try:
+                yield context
+            finally:
+                closed()
+
+        for outcome in ("success", "lookup_failure", "invalid_url"):
+            with self.subTest(outcome=outcome):
+                self.source = "/tmp/" + "c" * 32 + ".mp4"
+                self.log(
+                    {
+                        "type": "video",
+                        "mediaName": "original-media",
+                        "final_video_url": self.source,
+                    }
+                )
+                remote = (
+                    "file:///synthetic.mp4"
+                    if outcome == "invalid_url"
+                    else "https://storage.googleapis.com/original.mp4?signature=synthetic"
+                )
+
+                async def rpc(current, rpcid, payload, **kwargs):
+                    self.assertIs(current, context)
+                    self.assertEqual(rpcid, "as29s")
+                    self.assertEqual(payload, ["original-media"])
+                    self.assertEqual(kwargs["expected_email"], token.email)
+                    self.assertEqual(kwargs["network_step"], "flow_get_media")
+                    self.assertIs(client._account_token_ctx.get(), token)
+                    self.assertEqual(client._account_proxy_ctx.get(), proxy)
+                    if outcome == "lookup_failure":
+                        raise RuntimeError("synthetic upstream failure")
+                    video = [None] * 8 + [remote]
+                    return [
+                        "original-media",
+                        "original-project",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        [video],
+                    ]
+
+                async def download(url, kind):
+                    self.assertEqual((url, kind), (remote, "video"))
+                    self.assertIs(client._account_token_ctx.get(), outer_token)
+                    self.assertEqual(client._account_proxy_ctx.get(), outer_proxy)
+                    return self.local("d" * 32 + ".mp4", b"synthetic mp4").name
+
+                self.cache.download_and_cache.reset_mock()
+                self.cache.download_and_cache.side_effect = download
+                closed.reset_mock()
+                with (
+                    patch(
+                        "src.services.browser.flow_generation.account_http_session",
+                        account_http_session,
+                    ),
+                    patch(
+                        "src.services.browser.flow_generation.flow_rpc", side_effect=rpc
+                    ) as modern,
+                    patch(
+                        "src.services.flow_client.AsyncSession",
+                        side_effect=AssertionError("legacy Labs media resolver forbidden"),
+                    ) as legacy,
+                    patch(
+                        "src.services.browser.flow_generation.FlowProfileGeneration.generate_video",
+                        side_effect=AssertionError("recovery must not regenerate"),
+                    ) as generate,
+                    patch.object(
+                        client,
+                        "_get_recaptcha_token",
+                        side_effect=AssertionError("recovery must not acquire captcha"),
+                    ) as captcha,
+                    client.account_request_token(outer_token),
+                    client.account_request_proxy(outer_proxy),
+                ):
+                    if outcome == "success":
+                        result = await archive.archive(self.source)
+                        self.assertEqual(result["kind"], "video")
+                        path, _ = archive.content(result["id"])
+                        self.assertEqual(path.read_bytes(), b"synthetic mp4")
+                        self.cache.download_and_cache.assert_awaited_once_with(remote, "video")
+                    else:
+                        with self.assertRaises(StudioMediaError):
+                            await archive._recover(self.source)
+                        self.cache.download_and_cache.assert_not_awaited()
+                    self.assertIs(client._account_token_ctx.get(), outer_token)
+                    self.assertEqual(client._account_proxy_ctx.get(), outer_proxy)
+                    modern.assert_awaited_once()
+                    legacy.assert_not_called()
+                    generate.assert_not_awaited()
+                    captcha.assert_not_awaited()
+                self.assertIsNone(client._account_token_ctx.get())
+                self.assertIsNone(client._account_proxy_ctx.get())
+                closed.assert_called_once()
+        self.assertTrue(all(call.args == (7,) for call in self.database.get_token.await_args_list))
+        self.assertTrue(
+            all(call.args == (token,) for call in manager.resolve_account_proxy.await_args_list)
+        )
 
     async def test_unmatched_url_path_traversal_and_missing_account_never_download(self):
         for url in (

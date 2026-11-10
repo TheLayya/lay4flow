@@ -134,13 +134,15 @@ class FlowClient:
         await modern.admit_video_stages(stages)
 
     @asynccontextmanager
-    async def generation_session(self, token):
+    async def generation_session(self, token, *, proxy_url=None):
         if getattr(token, "browser_profile_source", "") != "cloak":
             yield None
             return
         from .browser.flow_generation import FlowProfileGeneration
 
-        async with FlowProfileGeneration(self, self.token_manager, token).session() as generation:
+        async with FlowProfileGeneration(self, self.token_manager, token).session(
+            proxy_url=proxy_url
+        ) as generation:
             yield generation
 
     @contextmanager

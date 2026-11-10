@@ -198,20 +198,29 @@ try {
     assert.ok(await editor.getByLabel('Session Token', { exact: true }).isVisible())
     assert.equal(await editor.getByLabel('账号代理', { exact: true }).getAttribute('readonly'), '')
     record('One click opens all account settings without tabs and retains the fixed proxy field')
+    const { submission_proxy_mode, remark: originalRemark, video_enabled, ...fixedIdentity } = accounts[0]
+    await editor.locator('.el-select').filter({
+        has: page.getByRole('combobox', { name: '生成提交出口', exact: true }),
+    }).click()
+    const randomOption = page.getByRole('option', { name: '代理池随机（每次生成取健康出口）', exact: true })
+    assert.equal(await randomOption.isDisabled(), false)
+    await randomOption.click()
     await editor.getByLabel('账号备注', { exact: true }).fill('Edited in one form')
     await editor.getByRole('switch', { name: '视频创作', exact: true }).locator('..').click()
     await editor.getByRole('button', { name: '保存账号配置', exact: true }).click()
     await editor.waitFor({ state: 'hidden' })
     assert.equal(writes.length, 1)
-    assert.equal(writes[0].path, '/api/tokens/41')
-    assert.equal(writes[0].body.remark, 'Edited in one form')
-    assert.equal(writes[0].body.refresh_interval_minutes, undefined)
-    assert.equal(writes[0].body.auto_refresh_enabled, true)
-    assert.equal(writes[0].body.video_enabled, false)
-    assert.equal(writes[0].body.st, undefined)
-    assert.equal(writes[0].body.proxy_pool_id, undefined)
+    assert.deepEqual(writes[0], {
+        path: '/api/tokens/41',
+        body: { remark: 'Edited in one form', video_enabled: false, submission_proxy_mode: 'pool_random' },
+    })
+    const { submission_proxy_mode: savedMode, remark: savedRemark, video_enabled: savedVideo, ...savedIdentity } = accounts[0]
+    assert.equal(savedMode, 'pool_random')
+    assert.deepEqual(savedIdentity, fixedIdentity)
+    assert.match(await table.locator('.el-table__row').filter({ hasText: 'first@example.test' })
+        .locator('.account-proxy-trigger').innerText(), /生成 · 代理池随机 · 登录 #7/)
     assert.equal(accounts[1].remark, 'Keep second account')
-    record('One save updates only the chosen account and retains its login and fixed proxy')
+    record('Full Cloak edit enables random generation egress, writes only changed fields and retains fixed binding, Cookie and Profile')
     await page.setViewportSize({ width: 390, height: 844 })
     const mobile = page.locator('.accounts-table .el-table__row').filter({ hasText: 'second@example.test' })
     await mobile.getByRole('switch', { name: 'second@example.test 自动刷新', exact: true }).locator('..').click()
@@ -246,6 +255,11 @@ try {
     await editor.waitFor()
     await settleEditor()
     await page.screenshot({ path: resolve(output, 'desktop.png') })
+    const beforeUnchanged = writes.length
+    await editor.getByRole('button', { name: '保存账号配置', exact: true }).click()
+    await editor.waitFor({ state: 'hidden' })
+    assert.equal(writes.length, beforeUnchanged)
+    record('Saving an unchanged full editor skips the account write')
     record('Mobile editing also opens in one click and keeps every setting in one responsive form')
     assert.deepEqual(errors, [])
     await writeFile(resolve(output, 'verification.json'), JSON.stringify({ checks, errors, writes }, null, 2))

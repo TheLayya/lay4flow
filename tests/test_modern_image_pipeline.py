@@ -88,6 +88,7 @@ class ModernImagePipelineTests(unittest.IsolatedAsyncioTestCase):
             return [[["media-id", None, "workflow-id", None, None, None, [generated]]]]
 
         with (
+            patch("src.services.browser.flow_generation.prepare_flow_rpc", AsyncMock()),
             patch("src.services.browser.flow_generation.account_http_session", request_context),
             patch("src.services.browser.flow_generation.flow_rpc", side_effect=rpc),
             patch(

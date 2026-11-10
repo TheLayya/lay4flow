@@ -38,6 +38,7 @@ from ..core.models import (
     GeminiGenerateContentRequest,
 )
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
+from ..services.cache.rules import build_download_headers
 from .openai_common import OpenAIRoute, safe_error
 from .openai_responses import create_responses_router
 from ..services.model_gateway import ModelGateway
@@ -358,14 +359,9 @@ async def retrieve_image_data(url: str) -> Optional[bytes]:
                 url,
                 timeout=60,
                 proxies={"http": proxy_url, "https": proxy_url} if proxy_url else None,
-                headers={
-                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                    "Accept-Encoding": "gzip, deflate, br",
-                    "Connection": "keep-alive",
-                    "Referer": "https://labs.google/",
-                },
+                headers=build_download_headers("image"),
                 impersonate="chrome120",
+                default_headers=False,
                 verify=False,
             )
             if response.status_code == 200 and response.content:

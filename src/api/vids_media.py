@@ -10,7 +10,7 @@ from starlette.datastructures import UploadFile
 from ..core.auth import verify_openai_api_key
 from ..services.vids.client import PRESET_VOICES, VidsProtocolError, VidsTransportError
 from ..services.vids.dispatcher import VidsPoolDispatcher
-from ..services.vids.gateway import GatewayError, VidsGateway
+from ..services.vids.gateway import GatewayError, VidsGateway, upstream_failure_text
 from ..services.vids.media_cleanup import (
     MediaBusyError,
     VidsFileResponse as FileResponse,
@@ -56,6 +56,9 @@ CONSOLE_PREFIX = "/api/admin/vids"
 def speech_error_response(record, message):
     """Attach only public receipt facts to the existing speech error envelope."""
     pending = record["status"] in {"generating", "received", "unknown"}
+    detail = upstream_failure_text(record)
+    if detail:
+        message = f"{message}；上游原因：{detail}"
     response = api_error_response(
         APIError(
             409 if pending else 502, message, "speech_not_ready" if pending else "speech_failed"
@@ -475,9 +478,11 @@ def create_vids_media_router(
                 "image_not_ready",
             )
         if record["status"] != "completed":
-            raise APIError(
-                502, f"Image request {record['id']} ended with {record['status']}", "image_failed"
-            )
+            message = f"Image request {record['id']} ended with {record['status']}"
+            detail = upstream_failure_text(record)
+            if detail:
+                message += f"；上游原因：{detail}"
+            raise APIError(502, message, "image_failed")
         items = []
         for index in range(body.get("n", 1)):
             path, mime = content(token_id, record["id"], index)

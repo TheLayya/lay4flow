@@ -62,7 +62,7 @@ Chrome 的省略端口匹配模式覆盖所有端口，见 [Chrome 官方匹配�
 ## 管理员打包
 
 ```powershell
-python scripts/build_account_import_extension.py --origin http://127.0.0.1:38001 --output dist/1.6.0/lay4flow-remote-login-extension-1.8.4-38001.zip
+python scripts/build_account_import_extension.py --origin http://127.0.0.1:38001 --output dist/1.6.1/lay4flow-remote-login-extension-1.8.4-38001.zip
 ```
 
 输出使用显式文件清单：`manifest.json`、三个脚本、说明、`LICENSE` 和 `NOTICE`；不包含 Cookie、账号导出、数据库、Profile 或本地配置。扩展没有独立的 Windows 安装步骤；EXE 安装后台后，仍从对应管理页下载扩展并在 Chrome／Edge 加载。

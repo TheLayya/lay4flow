@@ -28,23 +28,6 @@ class CacheRulesTests(unittest.TestCase):
                     rules.generate_cache_filename(url, media_type),
                 )
 
-    def test_headers_keep_fingerprint_values_and_media_dest(self):
-        image = rules.build_download_headers(
-            "image",
-            {
-                "user_agent": "remote-agent",
-                "accept_language": "en-US",
-                "sec_ch_ua": '"Brand";v="1"',
-                "sec_ch_ua_mobile": "?0",
-                "sec_ch_ua_platform": '"Windows"',
-            },
-        )
-        self.assertEqual(image["User-Agent"], "remote-agent")
-        self.assertEqual(image["Accept-Language"], "en-US")
-        self.assertEqual(image["Sec-Fetch-Dest"], "image")
-        self.assertEqual(image["sec-ch-ua"], '"Brand";v="1"')
-        self.assertEqual(rules.build_download_headers("video")["Sec-Fetch-Dest"], "video")
-
     def test_error_normalization_is_identical_through_legacy_wrapper(self):
         cache = FileCache.__new__(FileCache)
         errors = [

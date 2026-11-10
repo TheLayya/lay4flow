@@ -17,7 +17,7 @@ except ImportError:
 
 from src.api.vids import create_vids_app
 from src.services.vids.client import VidsProtocolError, VidsTransportError
-from src.services.vids.gateway import VidsGateway
+from src.services.vids.gateway import SPEECH_LANGUAGE_HINT, VidsGateway
 from tests.test_vids_gateway import KEY, client as mock_client
 
 BODY = {"model": "vids-image", "prompt": "\n A blue boat. \t"}
@@ -484,6 +484,27 @@ class VidsImagesAPITests(unittest.IsolatedAsyncioTestCase):
         self.upstream.generate_image.assert_not_awaited()
         self.upstream.download_image.assert_not_awaited()
         self.assertEqual(list(self.gateway.root.glob("vids_*.json")), [])
+
+    async def test_known_upstream_reason_is_explained_without_raw_provider_content(self):
+        self.upstream.generate_image.side_effect = VidsProtocolError(
+            "generate",
+            400,
+            upstream_status="INVALID_ARGUMENT",
+            upstream_reason="LANGUAGE_NOT_SUPPORTED",
+        )
+        response = await self.image("image-language-reason")
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("LANGUAGE_NOT_SUPPORTED", response.json()["error"]["message"])
+        self.assertNotIn(SPEECH_LANGUAGE_HINT, response.json()["error"]["message"])
+        self.assertNotIn("private", response.text)
+        receipt = (
+            await self.http.get("/v1/vids/generations/" + identifier("image-language-reason"))
+        ).json()
+        self.assertEqual(
+            receipt["upstream_error"],
+            {"status": "INVALID_ARGUMENT", "reason": "LANGUAGE_NOT_SUPPORTED"},
+        )
+        self.upstream.generate_image.assert_awaited_once()
 
     async def test_unknown_and_failed_acceptance_remain_replayable_without_submission(self):
         for index, error in enumerate(

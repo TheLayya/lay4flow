@@ -1,5 +1,8 @@
 """Synthetic contract tests for FlowProfileGeneration; no real browser/network."""
 
+import asyncio
+import json
+import time
 import unittest
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -12,6 +15,9 @@ from src.services.flow.remote_captcha import RemoteCaptchaError
 
 class FlowProfileGenerationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        self.prepare = self.enterContext(
+            patch("src.services.browser.flow_generation.prepare_flow_rpc", AsyncMock())
+        )
         self.token = SimpleNamespace(
             id=7,
             email="user@example.com",
@@ -25,10 +31,11 @@ class FlowProfileGenerationTests(unittest.IsolatedAsyncioTestCase):
             ban_reason=None,
         )
         self.context = object()
+        self.expected_proxy = "http://proxy.invalid:8080"
 
         @asynccontextmanager
         async def request_context(tokens, token, proxy):
-            self.assertEqual(proxy, "http://proxy.invalid:8080")
+            self.assertEqual(proxy, self.expected_proxy)
             try:
                 yield self.context
             finally:
@@ -185,9 +192,12 @@ class FlowProfileGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.reason, "account_changed")
         self.client._get_recaptcha_token.assert_not_awaited()
 
-    async def test_cas_recheck_after_captcha_blocks_submission_and_finishes_browser(self):
+    async def test_cas_recheck_after_captcha_blocks_submission_and_releases_browser_without_success(
+        self,
+    ):
         changed = SimpleNamespace(**{**self.current.__dict__, "browser_profile_epoch": 2})
-        self.db.get_token.side_effect = [self.current, self.current, changed]
+        self.db.get_token.side_effect = [self.current, self.current, self.current, changed]
+        self.expected_proxy = "http://generation.invalid:8080"
 
         async def rpc(context, rpcid, payload, **kwargs):
             if rpcid == "HTrJv":
@@ -206,15 +216,18 @@ class FlowProfileGenerationTests(unittest.IsolatedAsyncioTestCase):
                 "src.services.browser.flow_generation.resolve_image_usage", return_value="GEM_PIX_2"
             ),
         ):
-            with self.assertRaises(FlowRPCError) as caught:
-                await self.generation().generate_image(
-                    "project/1", "prompt", "GEM_PIX_2", "16:9", [], None
-                )
+            generation = self.generation()
+            async with generation.session(proxy_url=self.expected_proxy):
+                with self.assertRaises(FlowRPCError) as caught:
+                    await generation.generate_image(
+                        "project/1", "prompt", "GEM_PIX_2", "16:9", [], None
+                    )
         self.assertEqual(caught.exception.reason, "account_changed")
         self.assertEqual([entry.args[1] for entry in call.await_args_list], ["HTrJv", "nzlxg"])
-        self.client._notify_browser_captcha_request_finished.assert_awaited_once_with(
-            "browser-fixture"
+        self.client._notify_browser_captcha_error.assert_awaited_once_with(
+            "browser-fixture", error_reason="not_submitted"
         )
+        self.client._notify_browser_captcha_request_finished.assert_not_awaited()
         self.owned_closed.assert_called_once()
 
     async def test_service_tier_comes_from_field4_not_paygate_field2(self):
@@ -272,7 +285,9 @@ class FlowProfileGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trace["final_success_attempt"], 2)
         self.assertEqual(self.client._get_recaptcha_token.await_count, 2)
         self.assertEqual(calls, ["HTrJv", "nzlxg", "ogiZ0b"])
-        self.client._notify_browser_captcha_request_finished.assert_any_await("browser-1")
+        self.client._notify_browser_captcha_error.assert_any_await(
+            "browser-1", error_reason="not_submitted"
+        )
         self.client._notify_browser_captcha_request_finished.assert_any_await("browser-2")
 
     async def test_upload_uses_same_verified_context_and_returns_official_media_name(self):
@@ -293,9 +308,28 @@ class FlowProfileGenerationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(rpc.call_args.args[0], self.context)
         self.assertEqual(rpc.call_args.args[1], "maseQ")
-        self.assertEqual(rpc.call_args.args[2][0], [None, 22, None, None, None, "project/1"])
-        self.client._get_recaptcha_token.assert_not_awaited()
-        self.client._notify_browser_captcha_request_finished.assert_not_awaited()
+        self.assertEqual(
+            rpc.call_args.args[2][0],
+            [
+                None,
+                22,
+                None,
+                None,
+                None,
+                "project/1",
+                None,
+                None,
+                None,
+                None,
+                ["captcha-fixture", 1],
+            ],
+        )
+        self.client._get_recaptcha_token.assert_awaited_once_with(
+            "project/1", action="UPLOAD_IMAGE", token_id=7
+        )
+        self.client._notify_browser_captcha_request_finished.assert_awaited_once_with(
+            "browser-fixture"
+        )
         self.owned_closed.assert_called_once()
 
     async def test_upsample_uses_fresh_captcha_and_returns_base64_bytes(self):
@@ -334,6 +368,245 @@ class FlowProfileGenerationTests(unittest.IsolatedAsyncioTestCase):
         rpc.assert_not_awaited()
         self.client._get_recaptcha_token.assert_not_awaited()
         self.client._notify_browser_captcha_request_finished.assert_not_awaited()
+
+    async def test_image_assets_prepare_project_before_solving_and_posting(self):
+        self.client._detect_image_mime_type = Mock(return_value="image/png")
+        events = []
+
+        async def prepared(*args, **kwargs):
+            events.append("prepare")
+            self.assertEqual(kwargs["source_path"], "/project/project-fixture")
+            self.assertEqual(kwargs["expected_email"], self.token.email)
+
+        async def solve(*args, **kwargs):
+            events.append(kwargs["action"])
+            return "captcha-fixture", "browser-fixture"
+
+        async def rpc(context, rpcid, payload, **kwargs):
+            events.append(rpcid)
+            return [["media/uploaded"]] if rpcid == "maseQ" else [None, "aW1hZ2U="]
+
+        self.prepare.side_effect = prepared
+        self.client._get_recaptcha_token.side_effect = solve
+        with (
+            patch(
+                "src.services.browser.token_account_probe.read_flow_session",
+                AsyncMock(return_value={"email": self.token.email, "credits": 1}),
+            ),
+            patch("src.services.browser.flow_generation.flow_rpc", side_effect=rpc),
+        ):
+            await self.generation().upload_image("project-fixture", b"image")
+            await self.generation().upsample_image("project-fixture", "media/a", "2K")
+        self.assertEqual(
+            events,
+            ["prepare", "UPLOAD_IMAGE", "maseQ", "prepare", "IMAGE_GENERATION", "SPrCad"],
+        )
+
+    async def test_image_asset_bootstrap_failure_does_not_solve_or_submit(self):
+        self.client._detect_image_mime_type = Mock(return_value="image/png")
+        self.prepare.side_effect = FlowRPCError("identity_mismatch", "flow_bootstrap")
+        with (
+            patch(
+                "src.services.browser.token_account_probe.read_flow_session",
+                AsyncMock(return_value={"email": self.token.email, "credits": 1}),
+            ),
+            patch("src.services.browser.flow_generation.flow_rpc", AsyncMock()) as rpc,
+        ):
+            for operation in ("upload", "upsample"):
+                with self.subTest(operation=operation), self.assertRaises(FlowRPCError):
+                    if operation == "upload":
+                        await self.generation().upload_image("project-fixture", b"image")
+                    else:
+                        await self.generation().upsample_image("project-fixture", "media/a", "2K")
+        rpc.assert_not_awaited()
+        self.client._get_recaptcha_token.assert_not_awaited()
+
+    async def test_invalid_upsample_does_not_solve_or_submit(self):
+        with (
+            patch(
+                "src.services.browser.token_account_probe.read_flow_session",
+                AsyncMock(return_value={"email": self.token.email, "credits": 1}),
+            ),
+            patch("src.services.browser.flow_generation.flow_rpc", AsyncMock()) as rpc,
+        ):
+            with self.assertRaises(ValueError):
+                await self.generation().upsample_image("project-fixture", "media/a", "INVALID")
+        rpc.assert_not_awaited()
+        self.prepare.assert_not_awaited()
+        self.client._get_recaptcha_token.assert_not_awaited()
+
+    async def test_image_assets_release_rejected_unknown_and_cancelled_once(self):
+        self.client._detect_image_mime_type = Mock(return_value="image/png")
+        for operation in ("upload", "upsample"):
+            for outcome in ("rejected", "unknown", "cancelled", "malformed"):
+                with self.subTest(operation=operation, outcome=outcome):
+                    self.client._notify_browser_captcha_error.reset_mock()
+                    self.client._notify_browser_captcha_request_finished.reset_mock()
+                    self.client._get_recaptcha_token.reset_mock()
+                    self.current = SimpleNamespace(**self.token.__dict__)
+                    self.db.get_token.return_value = self.current
+
+                    async def rpc(context, rpcid, payload, **kwargs):
+                        kwargs["submit_observer"]("started", 10.0)
+                        if outcome == "cancelled":
+                            raise asyncio.CancelledError()
+                        kwargs["submit_observer"]("finished", 11.0, 200)
+                        if outcome == "malformed":
+                            return []
+                        error = FlowRPCError(
+                            "transient_error",
+                            "flow_upload_image" if operation == "upload" else "flow_upsample_image",
+                        )
+                        if outcome == "rejected":
+                            error.submission_rejected = True
+                        raise error
+
+                    expected = (
+                        asyncio.CancelledError
+                        if outcome == "cancelled"
+                        else ValueError
+                        if outcome == "malformed"
+                        else FlowRPCError
+                    )
+                    with (
+                        patch(
+                            "src.services.browser.token_account_probe.read_flow_session",
+                            AsyncMock(return_value={"email": self.token.email, "credits": 1}),
+                        ),
+                        patch(
+                            "src.services.browser.flow_generation.flow_rpc", side_effect=rpc
+                        ) as call,
+                        self.assertRaises(expected),
+                    ):
+                        if operation == "upload":
+                            await self.generation().upload_image("project-fixture", b"image")
+                        else:
+                            await self.generation().upsample_image(
+                                "project-fixture", "media/a", "2K"
+                            )
+                    self.assertEqual(call.await_count, 1)
+                    self.assertEqual(self.client._get_recaptcha_token.await_count, 1)
+                    self.client._notify_browser_captcha_request_finished.assert_not_awaited()
+                    self.client._notify_browser_captcha_error.assert_awaited_once_with(
+                        "browser-fixture",
+                        error_reason="upstream_rejected"
+                        if outcome == "rejected"
+                        else "submission_unknown",
+                    )
+
+    async def test_asset_http_denials_use_real_decoder_without_retrying_generation(self):
+        from src.services.flow.flow_rpc import FLOW_ORIGIN, _bootstrap, prepare_flow_rpc
+        from src.services.generation_attempts import is_confirmed_flow_rejection
+
+        metadata = {
+            "oPEP7c": self.token.email,
+            "SNlM0e": "synthetic-xsrf",
+            "cfb2h": "synthetic-build",
+            "FdrFJe": "synthetic-session",
+            "eptZe": "/_/AiSandboxAngularFrontend/",
+        }
+        self.client._detect_image_mime_type = Mock(return_value="image/png")
+        for operation in ("upload", "upsample"):
+            for status in (403, 429):
+                with self.subTest(operation=operation, status=status):
+                    self.client._notify_browser_captcha_error.reset_mock()
+                    self.client._notify_browser_captcha_request_finished.reset_mock()
+                    self.client._get_recaptcha_token.reset_mock()
+                    self.context = SimpleNamespace(
+                        request=SimpleNamespace(
+                            get=AsyncMock(),
+                            post=AsyncMock(
+                                return_value=SimpleNamespace(
+                                    status=status,
+                                    url=FLOW_ORIGIN
+                                    + "/_/AiSandboxAngularFrontend/data/batchexecute",
+                                    headers={},
+                                )
+                            ),
+                        ),
+                        flow_bootstrap_cache={
+                            "/project/project-fixture": (
+                                time.monotonic(),
+                                _bootstrap("WIZ_global_data=" + json.dumps(metadata)),
+                            )
+                        },
+                    )
+                    with (
+                        patch.object(FlowProfileGeneration, "_verified", AsyncMock()),
+                        patch(
+                            "src.services.browser.flow_generation.prepare_flow_rpc",
+                            prepare_flow_rpc,
+                        ),
+                        self.assertRaises(FlowRPCError) as caught,
+                    ):
+                        if operation == "upload":
+                            await self.generation().upload_image("project-fixture", b"image")
+                        else:
+                            await self.generation().upsample_image(
+                                "project-fixture", "media/a", "2K"
+                            )
+                    self.assertTrue(caught.exception.submission_rejected)
+                    self.assertFalse(is_confirmed_flow_rejection(caught.exception))
+                    self.context.request.post.assert_awaited_once()
+                    self.client._get_recaptcha_token.assert_awaited_once()
+                    self.client._notify_browser_captcha_error.assert_awaited_once_with(
+                        "browser-fixture", error_reason="upstream_rejected"
+                    )
+                    self.client._notify_browser_captcha_request_finished.assert_not_awaited()
+
+    async def test_image_asset_binding_change_after_solve_releases_unsubmitted_lease(self):
+        self.client._detect_image_mime_type = Mock(return_value="image/png")
+        for operation in ("upload", "upsample"):
+            with self.subTest(operation=operation):
+                self.client._notify_browser_captcha_error.reset_mock()
+                changed = SimpleNamespace(**{**self.current.__dict__, "browser_profile_epoch": 2})
+                self.db.get_token.side_effect = [self.current, self.current, changed]
+                with (
+                    patch(
+                        "src.services.browser.token_account_probe.read_flow_session",
+                        AsyncMock(return_value={"email": self.token.email, "credits": 1}),
+                    ),
+                    patch("src.services.browser.flow_generation.flow_rpc", AsyncMock()) as rpc,
+                    self.assertRaises(FlowRPCError),
+                ):
+                    if operation == "upload":
+                        await self.generation().upload_image("project-fixture", b"image")
+                    else:
+                        await self.generation().upsample_image("project-fixture", "media/a", "2K")
+                rpc.assert_not_awaited()
+                self.client._notify_browser_captcha_error.assert_awaited_once_with(
+                    "browser-fixture", error_reason="not_submitted"
+                )
+
+    async def test_image_assets_do_not_overwrite_previous_generation_diagnostics(self):
+        from src.services.generation_attempts import CURRENT_ATTEMPTS, GenerationAttempts
+
+        budget = GenerationAttempts(limit=20)
+        budget.select_account(self.token)
+        budget.take()
+        budget.finish("failed", RuntimeError("previous account"))
+        previous = dict(budget.history[-1])
+        budget.select_account(self.token)
+        active = CURRENT_ATTEMPTS.set(budget)
+        self.addCleanup(CURRENT_ATTEMPTS.reset, active)
+        self.client._detect_image_mime_type = Mock(return_value="image/png")
+
+        async def rpc(context, rpcid, payload, **kwargs):
+            kwargs["submit_observer"]("started", 10.0)
+            kwargs["submit_observer"]("finished", 11.0, 200)
+            return [["media/uploaded"]] if rpcid == "maseQ" else [None, "aW1hZ2U="]
+
+        with (
+            patch(
+                "src.services.browser.token_account_probe.read_flow_session",
+                AsyncMock(return_value={"email": self.token.email, "credits": 1}),
+            ),
+            patch("src.services.browser.flow_generation.flow_rpc", side_effect=rpc),
+        ):
+            await self.generation().upload_image("project-fixture", b"image")
+            await self.generation().upsample_image("project-fixture", "media/a", "2K")
+        self.assertEqual(budget.history, [previous])
+        self.assertEqual(budget.used, 1)
 
     async def test_video_retries_temporary_acquisition_then_submits_once(self):
         self.client._get_video_submit_timeout = Mock(return_value=90)
@@ -518,6 +791,46 @@ class FlowProfileGenerationTests(unittest.IsolatedAsyncioTestCase):
             sum(c.kwargs["network_step"] == "flow_generate_video" for c in call.await_args_list), 1
         )
         sleep.assert_awaited_once_with(1)
+
+    async def test_video_poll_uses_project_bootstrap_and_referer_without_solving(self):
+        from test_flow_rpc import CONFIG, bootstrap, rpc
+
+        from src.services.flow.flow_rpc import prepare_flow_rpc
+
+        project = "project-fixture"
+        media = ["media-pending", None, None, None, None, [None] * 8 + [[2]]]
+        self.context = SimpleNamespace(
+            request=SimpleNamespace(
+                get=AsyncMock(return_value=bootstrap({**CONFIG, "oPEP7c": self.token.email})),
+                post=AsyncMock(return_value=rpc("jwpduf", [None, 90, [media]])),
+            ),
+            flow_bootstrap_cache={},
+        )
+        await prepare_flow_rpc(
+            self.context,
+            source_path=f"/project/{project}",
+            expected_email=self.token.email,
+        )
+        self.context.request.post.assert_not_awaited()
+        result = await self.generation().check_video_status(
+            [{"mediaName": "media-pending", "projectId": project}]
+        )
+        self.assertEqual(result["operations"][0]["projectId"], project)
+        self.assertEqual(result["operations"][0]["status"], "MEDIA_GENERATION_STATUS_PENDING")
+        self.context.request.get.assert_awaited_once_with(
+            f"https://flow.google.com/project/{project}",
+            timeout=20000,
+            max_redirects=0,
+        )
+        submitted = self.context.request.post.await_args.kwargs
+        self.assertEqual(submitted["params"]["source-path"], f"/project/{project}")
+        self.assertEqual(
+            submitted["headers"]["Referer"], f"https://flow.google.com/project/{project}"
+        )
+        wire = json.loads(submitted["form"]["f.req"])[0][0]
+        self.assertEqual(wire[0], "jwpduf")
+        self.assertEqual(json.loads(wire[1]), [None, None, [["media-pending"]]])
+        self.client._get_recaptcha_token.assert_not_awaited()
 
     async def test_video_auth_failure_stops_before_submission_and_unknown_write_is_not_replayed(
         self,

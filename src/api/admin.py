@@ -359,6 +359,7 @@ _ROUTE_ORDER = (
     "change_password",
     "get_tokens",
     "add_token",
+    "batch_submission_proxy",
     "update_token",
     "delete_token",
     "enable_token",

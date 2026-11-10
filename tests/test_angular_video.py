@@ -68,6 +68,13 @@ class AngularVideoTests(unittest.TestCase):
             with self.subTest(key=key, options=options), self.assertRaises(ValueError):
                 resolve_video_usage(self.models(), key, aspect, tier, **options)
 
+    def test_present_pricing_without_price_is_enabled(self):
+        models = self.models()
+        models[0][4][0][1][0][4][0][1] = []
+        self.assertEqual(
+            resolve_video_usage(models, "veo_3_1_t2v_fast", "16:9", 2), "veo_3_1_t2v_fast"
+        )
+
     def test_all_video_mode_payloads_have_verified_slots(self):
         kwargs = dict(
             project_id="p",

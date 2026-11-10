@@ -43,20 +43,12 @@ def guess_extension(url: str, media_type: str) -> str:
 def build_download_headers(
     media_type: str, fingerprint: Optional[Dict[str, Any]] = None
 ) -> Dict[str, str]:
-    """Build media download headers while preserving the current fingerprint."""
+    """Build credential-free fetch headers without inventing page metadata."""
     headers = {
-        "Accept": (
-            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
-            if media_type == "image"
-            else "*/*"
-        ),
+        "Accept": "*/*",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
-        "Referer": "https://labs.google/",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Dest": "image" if media_type == "image" else "video",
     }
     if isinstance(fingerprint, dict):
         for source, target in (

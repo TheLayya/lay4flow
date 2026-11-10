@@ -68,6 +68,11 @@ class UpdateTokenRequest(BaseModel):
     browser_profile_source: Optional[str] = None
 
 
+class SubmissionProxyBatchRequest(BaseModel):
+    ids: List[Annotated[int, Field(gt=0, strict=True)]] = Field(min_length=1, max_length=500)
+    submission_proxy_mode: Literal["fixed", "pool_random"]
+
+
 class ProxyConfigRequest(BaseModel):
     proxy_enabled: bool
     proxy_url: Optional[str] = None

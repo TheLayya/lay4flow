@@ -191,8 +191,8 @@ const optionLabel = (row) =>
                 <p class="quick-hint quick-strategy-hint">
                     {{
                         draft.submission_proxy_mode === 'pool_random'
-                            ? '每份 Flow 生成任务随机取一个可用出口，整份任务保持同一出口。Cloak 登录和续期仍使用下方绑定。'
-                            : 'Flow 生成任务使用下方账号绑定的固定出口。'
+                            ? '每份新 Flow 任务随机取一个可用出口，整份任务保持同一出口；已开始的任务不变。登录、刷新与 Profile 仍使用下方固定绑定。'
+                            : '每份新 Flow 任务使用下方账号绑定的固定出口；已开始的任务不变。登录、刷新与 Profile 绑定不变。'
                     }}
                 </p>
                 <label class="quick-strategy-label" :for="`account-proxy-${account.id}`">账号绑定出口</label>

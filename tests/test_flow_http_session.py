@@ -32,6 +32,9 @@ def cookie(name, value):
 
 class FlowHTTPSessionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.enterContext(
+            patch("src.services.browser.flow_generation.prepare_flow_rpc", AsyncMock())
+        )
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -64,6 +67,7 @@ class FlowHTTPSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.token = await self.db.get_token(token_id)
         self.opened = self.closed = self.active = self.peak = 0
+        self.expected_proxy = ""
 
         @asynccontextmanager
         async def snapshot(rows, identity, proxy):
@@ -71,7 +75,7 @@ class FlowHTTPSessionTests(unittest.IsolatedAsyncioTestCase):
             self.active += 1
             self.peak = max(self.peak, self.active)
             self.assertEqual(identity["user_agent"], "Chrome/150.0.0.0")
-            self.assertEqual(proxy, "")
+            self.assertEqual(proxy, self.expected_proxy)
             context = SimpleNamespace(
                 cookies=AsyncMock(return_value=GoogleCookieJar(rows).export())
             )
@@ -173,10 +177,22 @@ class FlowHTTPSessionTests(unittest.IsolatedAsyncioTestCase):
             await generation._check_binding("", read_only=True)
         self.assertEqual(caught.exception.reason, "account_changed")
 
-    async def test_i2v_collects_successful_media_after_background_cookie_and_status_update(self):
+    async def test_random_i2v_keeps_task_exit_after_strategy_cookie_and_status_changes(self):
         handler = GenerationHandler.__new__(GenerationHandler)
         handler.flow_client = self.client
         handler.db = SimpleNamespace(create_task=AsyncMock(), update_task=AsyncMock())
+        fixed = "http://login.invalid:8080"
+        selected = "http://generation.invalid:8080"
+        login_id = await self.proxy.add_proxy_pool_entry(fixed)
+        await self.proxy.add_proxy_pool_entry(selected)
+        await self.db.update_token(
+            self.token.id,
+            proxy_url=fixed,
+            proxy_pool_id=login_id,
+            submission_proxy_mode="pool_random",
+        )
+        self.token = await self.db.get_token(self.token.id)
+        self.expected_proxy = selected
         handler._update_request_log_progress = AsyncMock()
         self.client._get_recaptcha_token = AsyncMock(return_value=("captcha", "remote-lease"))
         self.client._notify_browser_captcha_request_finished = AsyncMock()
@@ -236,12 +252,13 @@ class FlowHTTPSessionTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             chunks = []
-            async for chunk in handler._account_generation_pipeline(pipeline, self.token, ""):
+            async for chunk in handler._account_generation_pipeline(pipeline, self.token, selected):
                 chunks.append(chunk)
                 if "0%" in chunk:
                     await self.db.update_token(
                         self.token.id,
                         google_cookies=json.dumps([cookie("SID", "rotated")]),
+                        submission_proxy_mode="fixed",
                         is_active=False,
                         ban_reason="refresh_failed",
                         refresh_status="retrying",
@@ -249,12 +266,30 @@ class FlowHTTPSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(generation_result["success"], "".join(chunks))
         self.assertEqual(response_state["url"], "https://media.example.invalid/video.mp4")
         self.assertEqual(rpcids.count("as29s"), 1)
-        self.client._get_recaptcha_token.assert_awaited_once_with(
+        self.assertEqual(self.client._get_recaptcha_token.await_count, 2)
+        self.client._get_recaptcha_token.assert_any_await(
+            "project", action="UPLOAD_IMAGE", token_id=self.token.id
+        )
+        self.client._get_recaptcha_token.assert_any_await(
             "project", action="VIDEO_GENERATION", token_id=self.token.id
         )
         self.assertEqual((self.opened, self.closed), (1, 1))
         self.browser_open.assert_not_called()
         self.assertEqual((await self.db.get_token(self.token.id)).ban_reason, "refresh_failed")
+        saved = await self.db.get_token(self.token.id)
+        self.assertEqual((saved.proxy_pool_id, saved.proxy_url), (login_id, fixed))
+        self.assertEqual(await self.tokens.resolve_account_proxy(saved), fixed)
+        self.assertEqual(saved.submission_proxy_mode, "fixed")
+        self.assertIn("rotated", saved.google_cookies)
+        self.expected_proxy = fixed
+        with patch(
+            "src.services.browser.token_account_probe.read_flow_session",
+            AsyncMock(return_value={"email": saved.email, "credits": 9}),
+        ):
+            result = await self.refresher.refresh(saved)
+        self.assertEqual(result["_validated_session"]["credits"], 9)
+        self.assertEqual((self.opened, self.closed), (2, 2))
+        self.browser_open.assert_not_called()
 
     async def test_refresh_prefers_http_and_does_not_launch_for_network_or_identity_error(self):
         with patch(

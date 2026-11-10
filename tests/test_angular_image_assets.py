@@ -48,6 +48,17 @@ class AngularImageAssetTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(request[1]), b"\x00\x00\xff")
         self.assertEqual(request[8], "灯笼.webp")
 
+    def test_protected_upload_includes_action_token_without_extra_media_seeds(self):
+        request = build_upload_image_request(
+            "project", b"image", "image/png", "fixture.png", "upload-captcha"
+        )
+        self.assertEqual(
+            request[0],
+            [None, 22, None, None, None, "project", None, None, None, None, ["upload-captcha", 1]],
+        )
+        self.assertEqual(len(request), 9)
+        self.assertEqual(base64.b64decode(request[1]), b"image")
+
     def test_invalid_upload_does_not_build_a_guessed_request(self):
         args = dict(
             project_id="project", image_bytes=b"synthetic", mime_type="image/png", file_name="f.png"

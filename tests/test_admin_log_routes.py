@@ -113,6 +113,12 @@ class AdminLogRouteTests(unittest.TestCase):
                     "status": "failed",
                     "started_at": "2026-11-09T12:00:00+00:00",
                     "duration_ms": 1200,
+                    "captcha_ms": 600,
+                    "captcha_to_submit_ms": 200,
+                    "submit_ms": 400,
+                    "submission_count": 1,
+                    "http_status": 200,
+                    "rpc_code": 8,
                     "error": "PUBLIC_ERROR_USER_QUOTA_REACHED",
                     "error_code": "rpc_rejected",
                     "rule_action": "LIMIT",
@@ -189,6 +195,50 @@ class AdminLogRouteTests(unittest.TestCase):
         self.assertIsNone(
             _extract_attempt_history({"attempt_history": {"version": True, "attempts": []}})
         )
+
+    def test_attempt_diagnostics_keep_only_recorded_bounded_numeric_evidence(self):
+        valid = {
+            "attempt": 1,
+            "captcha_ms": 123.5,
+            "captcha_to_submit_ms": 0,
+            "submit_ms": 456,
+            "rpc_code": 8,
+            "http_status": 200,
+            "submission_count": 1,
+            "submission_state": "rejected",
+        }
+        result = _extract_attempt_history({"attempt_history": {"version": 2, "attempts": [valid]}})
+        self.assertEqual(result["attempts"], [valid])
+        for invalid in (True, "12", -1, float("nan"), float("inf"), 604_800_001, 10**1000):
+            record = {
+                "attempt": 1,
+                "captcha_ms": invalid,
+                "captcha_to_submit_ms": invalid,
+                "submit_ms": invalid,
+                "http_status": invalid,
+                "rpc_code": invalid,
+                "submission_count": invalid,
+                "submission_state": "private-session",
+                "token": "synthetic-secret",
+            }
+            result = _extract_attempt_history(
+                {"attempt_history": {"version": 2, "attempts": [record]}}
+            )
+            self.assertEqual(result["attempts"], [{"attempt": 1}])
+        legacy = _extract_attempt_history(
+            {"attempt_history": {"version": 1, "attempts": [{"attempt": 1}]}}
+        )
+        self.assertEqual(legacy["attempts"], [{"attempt": 1}])
+        for invalid in ([], {}, True, "__proto__", "private-session"):
+            malformed = _extract_attempt_history(
+                {
+                    "attempt_history": {
+                        "version": 2,
+                        "attempts": [{"attempt": 1, "submission_state": invalid}],
+                    }
+                }
+            )
+            self.assertEqual(malformed["attempts"], [{"attempt": 1}])
 
     def test_attempt_history_redacts_proxy_and_opaque_credentials_but_keeps_public_error(self):
         public_error = "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC_PLEASE_TRY_AGAIN_LATER"

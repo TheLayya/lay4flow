@@ -171,6 +171,11 @@ class AngularImageTests(unittest.TestCase):
             self.assertEqual(resolve_image_usage(payload, name, "16:9", 2), "GEM_PIX_2")
         self.assertEqual(resolve_image_usage(payload, "GEM_PIX_2", "1:1", 2, True), "GEM_PIX_2")
 
+    def test_present_pricing_without_price_is_enabled(self):
+        payload = model_config()
+        payload[0][5][0][1][0][4][0][1] = []
+        self.assertEqual(resolve_image_usage(payload, "GEM_PIX_2", "16:9", 2), "GEM_PIX_2")
+
     def test_absent_disabled_or_wrong_tier_model_never_falls_back(self):
         for payload, model, tier in (
             (model_config(), "IMAGEN_3_5", 2),

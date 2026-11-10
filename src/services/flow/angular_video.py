@@ -115,7 +115,7 @@ def resolve_video_usage(
                 ),
                 None,
             )
-            if not isinstance(entry, list) or not entry or entry[0] is None:
+            if not isinstance(entry, list) or (len(entry) > 1 and entry[1] is not None):
                 continue
             if variable_duration and (key.startswith("macaron_cookie_") or duration is not None):
                 # The zero base price is not permission for every edit length.

@@ -252,10 +252,12 @@ class GenerationAttemptLogTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(
                 anext(self.handler.handle_generation("video-test", "prompt"))
             )
-            await asyncio.wait_for(delaying.wait(), 1)
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
+            try:
+                await asyncio.wait_for(delaying.wait(), 10)
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
         log, history = await self.final_log()
         self.assertEqual(log["status_code"], 499)
         self.assertEqual(history["attempts"][0]["status"], "failed")
@@ -302,6 +304,83 @@ class GenerationAttemptLogTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AttemptLedgerTests(unittest.TestCase):
+    def test_numeric_diagnostics_follow_attempt_without_creating_or_spending_one(self):
+        budget = GenerationAttempts(2)
+        token = SimpleNamespace(id=7, email="synthetic@example.invalid")
+        budget.select_account(token)
+        budget.diagnostics(captcha_ms=12)
+        self.assertEqual(budget.history, [])
+        self.assertEqual(budget.used, 0)
+        budget.take()
+        budget.diagnostics(
+            captcha_ms=123.5,
+            captcha_to_submit_ms=0,
+            submit_ms=456,
+            submission_count=1,
+            submission_state="rejected",
+        )
+        error = FlowRPCError(
+            "transient_error",
+            "flow_generate_video",
+            200,
+            rpc_code=8,
+            public_error="PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC",
+        )
+        budget.finish("failed", error, next_action="stop")
+        budget.finalize("failed", error)
+        row = budget.snapshot()["attempts"][0]
+        self.assertEqual(
+            {
+                key: row[key]
+                for key in (
+                    "captcha_ms",
+                    "captcha_to_submit_ms",
+                    "submit_ms",
+                    "submission_count",
+                    "rpc_code",
+                    "http_status",
+                )
+            },
+            {
+                "captcha_ms": 123.5,
+                "captcha_to_submit_ms": 0,
+                "submit_ms": 456,
+                "submission_count": 1,
+                "rpc_code": 8,
+                "http_status": 200,
+            },
+        )
+        self.assertEqual(budget.used, 1)
+        self.assertEqual(row["submission_state"], "rejected")
+        self.assertEqual(len(budget.history), 1)
+        budget.select_account(SimpleNamespace(id=8, email="other@example.invalid"))
+        budget.diagnostics(captcha_ms=999)
+        self.assertEqual(budget.history[0]["captcha_ms"], 123.5)
+
+    def test_diagnostics_reject_private_or_invalid_values_without_overwriting_evidence(self):
+        budget = GenerationAttempts(1)
+        budget.select_account(SimpleNamespace(id=7, email="synthetic@example.invalid"))
+        budget.take()
+        budget.diagnostics(captcha_ms=3, rpc_code=0, http_status=200, submission_count=1)
+        for invalid in (True, "12", -1, float("nan"), float("inf"), 604_800_001, 10**1000):
+            budget.diagnostics(captcha_ms=invalid, captcha_to_submit_ms=invalid, submit_ms=invalid)
+        for invalid in (True, "8", -1, 8.5, 600):
+            budget.diagnostics(rpc_code=invalid, http_status=invalid)
+        for invalid in (True, "1", -1, 1.5, 101):
+            budget.diagnostics(submission_count=invalid)
+        budget.diagnostics(
+            token="synthetic-secret", cookies="synthetic-cookie", project_id="synthetic-project"
+        )
+        budget.diagnostics(submission_state="private-session")
+        row = budget.snapshot()["attempts"][0]
+        self.assertEqual(row["captcha_ms"], 3)
+        self.assertNotIn("captcha_to_submit_ms", row)
+        self.assertEqual(row["rpc_code"], 0)
+        self.assertEqual(row["http_status"], 200)
+        self.assertEqual(row["submission_count"], 1)
+        self.assertNotIn("submission_state", row)
+        self.assertFalse(any(key in row for key in ("token", "cookies", "project_id")))
+
     def test_rule_duration_and_actual_retry_account_are_retained(self):
         budget = GenerationAttempts(3)
         first = SimpleNamespace(id=7, email="first@example.invalid")

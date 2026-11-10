@@ -263,9 +263,9 @@ class AccountProxyPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((lease.entry_id, lease.proxy_url), (first, fixed.proxy_url))
         await self.manager.release_submission_proxy(lease, success=True)
 
-    async def test_cloak_generation_keeps_profile_exit_even_with_saved_pool_random_setting(self):
+    async def test_cloak_pool_random_leases_preserve_fixed_binding_and_resolver(self):
         fixed_id = await self.manager.add_proxy_pool_entry("http://fixed.invalid:8080")
-        await self.manager.add_proxy_pool_entry("http://other.invalid:8080")
+        other_id = await self.manager.add_proxy_pool_entry("http://other.invalid:8080")
         token = Token(
             st="profile-fixture",
             email="profile@example.test",
@@ -274,8 +274,30 @@ class AccountProxyPoolTests(unittest.IsolatedAsyncioTestCase):
             proxy_pool_id=fixed_id,
             submission_proxy_mode="pool_random",
         )
-        lease = await self.manager.acquire_submission_proxy(token)
-        self.assertEqual((lease.entry_id, lease.proxy_url), (fixed_id, token.proxy_url))
+        token_id = await self.db.add_token(token)
+        leases = [await self.manager.acquire_submission_proxy(token) for _ in range(2)]
+        self.assertEqual(
+            {(lease.entry_id, lease.proxy_url) for lease in leases},
+            {
+                (fixed_id, "http://fixed.invalid:8080"),
+                (other_id, "http://other.invalid:8080"),
+            },
+        )
+        for lease in leases:
+            await self.manager.release_submission_proxy(lease, success=True)
+        saved = await self.db.get_token(token_id)
+        for account in (token, saved):
+            self.assertEqual(
+                (account.proxy_pool_id, account.proxy_url, account.submission_proxy_mode),
+                (fixed_id, "http://fixed.invalid:8080", "pool_random"),
+            )
+            self.assertEqual(
+                await self.manager.resolve_account_proxy(account), "http://fixed.invalid:8080"
+            )
+        await self.db.update_token(token_id, submission_proxy_mode="fixed")
+        fixed = await self.db.get_token(token_id)
+        lease = await self.manager.acquire_submission_proxy(fixed)
+        self.assertEqual((lease.entry_id, lease.proxy_url), (fixed_id, fixed.proxy_url))
         await self.manager.release_submission_proxy(lease, success=True)
 
     async def test_submission_transport_failure_cools_after_three_and_probe_recovers(self):

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 const root = fileURLToPath(new URL('../..', import.meta.url))
 const output = resolve(root, 'tmp/quick-binding-review')
 const base = process.env.FRONTEND_PREVIEW_URL || 'http://127.0.0.1:38127'
+const entryPath = process.env.FRONTEND_PREVIEW_PATH || '/login'
 const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_BROWSER_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe',
     headless: true,
@@ -110,6 +111,19 @@ await context.route('**/*', async (route) => {
         return route.abort()
     }
     if (!url.pathname.startsWith('/api/') && url.pathname !== '/health') return route.continue()
+    if (request.method() === 'POST' && url.pathname === '/api/tokens/submission-proxy/batch') {
+        const { ids, submission_proxy_mode: mode } = request.postDataJSON()
+        const results = ids.map((id) => {
+            writes.push({ id, body: { submission_proxy_mode: mode } })
+            if (id === 12 && rejectRetry)
+                return { id, success: false, status: 'failed', message: '模拟保存失败，请重试' }
+            const account = accounts.find((row) => row.id === id)
+            const status = account.submission_proxy_mode === mode ? 'unchanged' : 'updated'
+            account.submission_proxy_mode = mode
+            return { id, success: true, status, submission_proxy_mode: mode }
+        })
+        return json(route, { success: true, results })
+    }
     if (request.method() === 'PUT' && /^\/api\/tokens\/\d+$/.test(url.pathname)) {
         const id = Number(url.pathname.split('/').at(-1)),
             body = request.postDataJSON()
@@ -150,8 +164,9 @@ await context.route('**/*', async (route) => {
             })),
         })
     if (url.pathname === '/api/token-refresh/config') return json(route, { config: { protocol_refresh_enabled: true } })
-    if (url.pathname === '/api/admin/vids/accounts/detail' || url.pathname === '/api/admin/vids/onboard/candidates')
-        return json(route, { accounts: [] })
+    if (url.pathname === '/api/admin/vids/accounts/detail')
+        return json(route, { accounts: [{ token_id: 99, email: 'vids-only@example.test', enabled: true }] })
+    if (url.pathname === '/api/admin/vids/onboard/candidates') return json(route, { accounts: [] })
     unexpected.push(`GET ${url.pathname}`)
     return json(route, {}, 404)
 })
@@ -162,8 +177,9 @@ const record = (message) => {
 const visible = (selector) => page.locator(selector + ':visible')
 const noOverflow = async () =>
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
+const accountBindings = () => accounts.map(({ submission_proxy_mode, ...account }) => ({ ...account }))
 try {
-    await page.goto(`${base}/login#/proxies`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${base}${entryPath}#/proxies`, { waitUntil: 'domcontentloaded' })
     await visible('.pool-bind-trigger').filter({ hasText: '绑定 0' }).first().click()
     const panel = visible('.proxy-inline-editor')
     await panel.waitFor()
@@ -230,7 +246,7 @@ try {
     await noOverflow()
     await page.screenshot({ path: resolve(output, 'proxy-binding-1600.png'), animations: 'disabled' })
     record('Bound account expands in place for plain credentials, copying and changed-fields-only settings')
-    await page.goto(`${base}/login#/accounts`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${base}${entryPath}#/accounts`, { waitUntil: 'domcontentloaded' })
     const row = page.locator('.accounts-table .el-table__row').filter({ hasText: 'free@example.test' })
     await row.locator('.account-proxy-trigger').click()
     const quick = visible('.account-quick-panel[data-account-id="11"]')
@@ -259,6 +275,99 @@ try {
     await page.locator('.el-message').last().waitFor({ state: 'hidden' })
     await quick.screenshot({ path: resolve(output, 'submission-strategy-1600.png'), animations: 'disabled' })
     record('Submission strategy saves separately and the account retains its fixed login exit')
+    const cloakRow = page.locator('.accounts-table .el-table__row').filter({ hasText: 'cloak@example.test' })
+    await cloakRow.locator('.account-proxy-trigger').click()
+    const cloakQuick = visible('.account-quick-panel[data-account-id="13"]')
+    await cloakQuick.waitFor()
+    const beforeIndividual = accountBindings()
+    await cloakQuick.locator('.quick-submission-picker .el-select').click()
+    await page.getByRole('option', { name: '代理池随机（每次生成取健康出口）', exact: true }).click()
+    assert.match(await cloakQuick.locator('.quick-strategy-hint').innerText(), /登录、刷新与 Profile.*固定绑定/)
+    await cloakQuick.getByRole('button', { name: '保存策略', exact: true }).click()
+    await cloakQuick.getByRole('status').filter({ hasText: '生成出口已设置为代理池随机' }).waitFor()
+    assert.deepEqual(writes.at(-1), { id: 13, body: { submission_proxy_mode: 'pool_random' } })
+    assert.deepEqual(accountBindings(), beforeIndividual)
+    assert.match(await cloakRow.locator('.account-proxy-trigger').innerText(), /生成 · 代理池随机 · 登录 #2/)
+    assert.equal(await cloakQuick.getByRole('button', { name: '保存策略', exact: true }).isDisabled(), true)
+    assert.equal(await confirmation.isVisible(), false)
+    record('Cloak individual random strategy saves only generation egress, displays the actual strategy and retains binding, Cookie and Profile')
+    const selectAccount = async (email) => page.locator('.accounts-table .el-table__row')
+        .filter({ hasText: email }).locator('.el-checkbox').first().check()
+    const showBulk = async () => {
+        await page.getByRole('button', { name: '批量修改提交代理', exact: true }).click()
+        const dialog = page.getByRole('dialog', { name: '批量修改提交代理', exact: true })
+        await dialog.waitFor()
+        return dialog
+    }
+    await selectAccount('free@example.test')
+    await selectAccount('retry@example.test')
+    await selectAccount('cloak@example.test')
+    await selectAccount('vids-only@example.test')
+    const bindings = accountBindings()
+    let dialog = await showBulk()
+    assert.match(await dialog.innerText(), /可设置 3 个[\s\S]*跳过 1 个/)
+    const beforeBulk = writes.length
+    await dialog.getByRole('button', { name: '取消', exact: true }).click()
+    await dialog.waitFor({ state: 'hidden' })
+    assert.equal(writes.length, beforeBulk)
+    dialog = await showBulk()
+    await dialog.getByRole('button', { name: '应用到 3 个账号', exact: true }).click()
+    await dialog.waitFor({ state: 'hidden' })
+    await page.getByRole('alert').filter({ hasText: '提交代理：已修改 2 个，已是目标策略 1 个，跳过 1 个，失败 0 个' }).waitFor()
+    assert.equal(accounts[0].submission_proxy_mode, 'fixed')
+    assert.equal(accounts[1].submission_proxy_mode, 'fixed')
+    assert.equal(accounts[2].submission_proxy_mode, 'fixed')
+    assert.deepEqual(writes.slice(beforeBulk), [
+        { id: 11, body: { submission_proxy_mode: 'fixed' } },
+        { id: 13, body: { submission_proxy_mode: 'fixed' } },
+    ])
+    assert.deepEqual(accountBindings(), bindings)
+    record('Bulk fixed strategy includes Cloak, skips only Vids-only and unchanged accounts, and cancel writes nothing')
+    rejectRetry = true
+    dialog = await showBulk()
+    await dialog.locator('.el-select').click()
+    await page.getByRole('option', { name: '代理池随机（每次生成取健康出口）', exact: true }).click()
+    assert.match(await dialog.innerText(), /可设置 3 个[\s\S]*跳过 1 个/)
+    await dialog.screenshot({ path: resolve(output, 'bulk-submission-strategy-1600.png'), animations: 'disabled' })
+    const beforeRandom = writes.length
+    await dialog.getByRole('button', { name: '应用到 3 个账号', exact: true }).click()
+    const failure = page.getByRole('dialog', { name: '部分账号操作未完成', exact: true })
+    await failure.waitFor()
+    assert.match(await failure.innerText(), /retry@example\.test: 模拟保存失败/)
+    assert.equal(accounts[0].submission_proxy_mode, 'pool_random')
+    assert.equal(accounts[1].submission_proxy_mode, 'fixed')
+    assert.equal(accounts[2].submission_proxy_mode, 'pool_random')
+    assert.deepEqual(writes.slice(beforeRandom), [
+        { id: 11, body: { submission_proxy_mode: 'pool_random' } },
+        { id: 12, body: { submission_proxy_mode: 'pool_random' } },
+        { id: 13, body: { submission_proxy_mode: 'pool_random' } },
+    ])
+    assert.deepEqual(accountBindings(), bindings)
+    assert.match(await quick.locator('.quick-submission-picker').innerText(), /代理池随机/)
+    await failure.getByRole('button', { name: '知道了', exact: true }).click()
+    await failure.waitFor({ state: 'hidden' })
+    rejectRetry = false
+    const beforeBulkRetry = writes.length
+    dialog = await showBulk()
+    await page.setViewportSize({ width: 390, height: 844 })
+    await noOverflow()
+    await dialog.screenshot({ path: resolve(output, 'bulk-submission-strategy-390.png'), animations: 'disabled' })
+    await dialog.getByRole('button', { name: '应用到 3 个账号', exact: true }).click()
+    await dialog.waitFor({ state: 'hidden' })
+    await page.getByRole('alert').filter({ hasText: '提交代理：已修改 1 个，已是目标策略 2 个，跳过 1 个，失败 0 个' }).waitFor()
+    assert.equal(writes.length, beforeBulkRetry + 1)
+    assert.equal(accounts[1].submission_proxy_mode, 'pool_random')
+    assert.deepEqual(writes.slice(beforeBulkRetry), [
+        { id: 12, body: { submission_proxy_mode: 'pool_random' } },
+    ])
+    assert.deepEqual(accountBindings(), bindings)
+    record('Bulk random strategy includes Cloak, skips only Vids-only, exposes per-account failure and retries only unsaved accounts without changing bindings, Cookie or Profile')
+    for (const email of ['free@example.test', 'retry@example.test', 'cloak@example.test'])
+        await page.locator('.accounts-table .el-table__row').filter({ hasText: email })
+            .locator('.el-checkbox').first().uncheck()
+    assert.equal(await page.getByRole('button', { name: '批量修改提交代理', exact: true }).count(), 0)
+    assert.equal(writes.length, beforeBulkRetry + 1)
+    record('Vids-only selection hides the Flow strategy action and cannot submit')
     await page.setViewportSize({ width: 1440, height: 900 })
     await noOverflow()
     await visible('.account-quick-panel[data-account-id="11"]').screenshot({
@@ -272,7 +381,7 @@ try {
         path: resolve(output, 'account-binding-390.png'),
         animations: 'disabled',
     })
-    await page.goto(`${base}/login#/proxies`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${base}${entryPath}#/proxies`, { waitUntil: 'domcontentloaded' })
     await visible('.pool-bind-trigger').first().click()
     await visible('.proxy-inline-editor').waitFor()
     await noOverflow()

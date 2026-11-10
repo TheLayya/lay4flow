@@ -1,13 +1,18 @@
 """Exercise extracted account/config routes through the existing authenticated router."""
 
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.api import admin
+from src.core.database import Database
+from src.core.models import Token
 
 
 class AdminAccountConfigRouteTests(unittest.TestCase):
@@ -214,4 +219,102 @@ class AdminAccountConfigRouteTests(unittest.TestCase):
                 },
             ).status_code,
             400,
+        )
+
+
+class SubmissionProxyBatchTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.db = Database(str(Path(directory.name) / "accounts.db"))
+        await self.db.init_db()
+        self.ids = []
+        for source, mode in (("cloak", "fixed"), ("cookies", "pool_random")):
+            self.ids.append(
+                await self.db.add_token(
+                    Token(
+                        st=f"synthetic-{source}",
+                        email=f"{source}@example.invalid",
+                        google_cookies='{"SID":"synthetic-cookie"}',
+                        login_account=f"{source}@example.invalid",
+                        login_password="synthetic-password",
+                        proxy_url="http://fixed.invalid:8080",
+                        browser_profile_source=source,
+                        browser_profile_epoch="preserved-epoch",
+                        submission_proxy_mode=mode,
+                        is_active=False,
+                        ban_reason="429_rate_limit",
+                        at_expires="2099-01-01T00:00:00Z",
+                        refresh_status="retrying",
+                        refresh_failures=2,
+                        auto_refresh_enabled=False,
+                    )
+                )
+            )
+        self.enterContext(
+            patch.multiple(admin, db=self.db, active_admin_tokens={"synthetic-admin-session"})
+        )
+        app = FastAPI()
+        app.include_router(admin.router)
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+            base_url="http://testserver",
+        )
+        self.addAsyncCleanup(self.client.aclose)
+        self.path = "/api/tokens/submission-proxy/batch"
+
+    async def test_authenticated_batch_deduplicates_missing_and_unchanged_without_identity_changes(
+        self,
+    ):
+        before = [await self.db.get_token(token_id) for token_id in self.ids]
+        payload = {"ids": [*self.ids, self.ids[0], 9999], "submission_proxy_mode": "pool_random"}
+        self.assertEqual((await self.client.post(self.path, json=payload)).status_code, 401)
+        self.client.cookies.set(admin.ADMIN_SESSION_COOKIE_NAME, "synthetic-admin-session")
+        invalid = [
+            {**payload, "submission_proxy_mode": "rotate"},
+            *({**payload, "ids": ids} for ids in ([], [True], [0], ["1"], list(range(1, 502)))),
+        ]
+        for body in invalid:
+            self.assertEqual((await self.client.post(self.path, json=body)).status_code, 422)
+        self.assertEqual([await self.db.get_token(token_id) for token_id in self.ids], before)
+        response = await self.client.post(self.path, json=payload)
+        self.assertEqual(response.status_code, 200)
+        results = response.json()["results"]
+        self.assertEqual([row["id"] for row in results], [*self.ids, 9999])
+        self.assertEqual([row["status"] for row in results], ["updated", "unchanged", "failed"])
+        self.assertFalse(results[-1]["success"])
+        for mode in ("pool_random", "fixed"):
+            if mode == "fixed":
+                response = await self.client.post(
+                    self.path, json={**payload, "submission_proxy_mode": mode}
+                )
+                self.assertEqual(response.status_code, 200)
+            for old in before:
+                saved = await self.db.get_token(old.id)
+                self.assertEqual(saved.submission_proxy_mode, mode)
+                self.assertEqual(
+                    saved.model_dump(exclude={"submission_proxy_mode"}),
+                    old.model_dump(exclude={"submission_proxy_mode"}),
+                )
+
+    async def test_failed_transaction_rolls_back_all_accounts_and_can_be_retried(self):
+        await self.db.update_token(self.ids[0], submission_proxy_mode="pool_random")
+        async with self.db._connect(write=True) as connection:
+            await connection.execute(
+                "CREATE TRIGGER reject_strategy BEFORE UPDATE ON tokens "
+                f"WHEN old.id={self.ids[1]} BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END"
+            )
+            await connection.commit()
+        self.client.cookies.set(admin.ADMIN_SESSION_COOKIE_NAME, "synthetic-admin-session")
+        before = [await self.db.get_token(token_id) for token_id in self.ids]
+        payload = {"ids": self.ids, "submission_proxy_mode": "fixed"}
+        self.assertEqual((await self.client.post(self.path, json=payload)).status_code, 500)
+        self.assertEqual([await self.db.get_token(token_id) for token_id in self.ids], before)
+        async with self.db._connect(write=True) as connection:
+            await connection.execute("DROP TRIGGER reject_strategy")
+            await connection.commit()
+        self.assertEqual((await self.client.post(self.path, json=payload)).status_code, 200)
+        self.assertEqual(
+            [(await self.db.get_token(token_id)).submission_proxy_mode for token_id in self.ids],
+            ["fixed", "fixed"],
         )

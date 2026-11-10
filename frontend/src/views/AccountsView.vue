@@ -37,6 +37,9 @@ const protectionNow = ref(Date.now())
 let protectionClock
 const plan = ref('all')
 const selected = ref([])
+const bulkProxyOpen = ref(false)
+const bulkProxyMode = ref('fixed')
+const bulkProxyTargets = computed(() => selected.value.filter((row) => !row.vidsOnly))
 const accountsTable = ref(null)
 const page = ref(1)
 const pageSize = ref(50)
@@ -303,7 +306,7 @@ function accountProxy(row) {
     return proxyPool.value.find((proxy) => proxy.id === row.proxy_pool_id)
 }
 function accountProxySummary(row) {
-    if (row.browser_profile_source !== 'cloak' && row.submission_proxy_mode === 'pool_random')
+    if (row.submission_proxy_mode === 'pool_random')
         return `生成 · 代理池随机${row.proxy_pool_id ? ` · 登录 #${row.proxy_pool_id}` : ''}`
     const url = accountProxy(row)?.proxy_url || row.proxy_url
     const prefix = row.proxy_pool_id ? `代理 #${row.proxy_pool_id}` : url ? '固定代理' : '绑定代理'
@@ -365,10 +368,6 @@ async function saveQuickAccount(row, kind = 'proxy') {
         selectedProxy = { ...target }
         body = { proxy_pool_id: target.id }
     } else if (kind === 'strategy') {
-        if (row.browser_profile_source === 'cloak' && draft.submission_proxy_mode !== 'fixed') {
-            quickErrors[row.id] = 'Cloak 生成使用 Profile 固定出口'
-            return
-        }
         if (!['fixed', 'pool_random'].includes(draft.submission_proxy_mode)) {
             quickErrors[row.id] = '请选择生成提交出口'
             return
@@ -775,6 +774,7 @@ let quotaVersion = 0
 let nextQuotaRefreshAt = Date.now() + 15 * 60 * 1000
 let disposed = false
 const form = reactive({})
+const editorBaseline = ref({})
 const defaults = () => ({
     st: '',
     remark: '',
@@ -1184,7 +1184,7 @@ function refreshVisible() {
         refreshImportJobs()
         refreshExtensionJobs()
     }
-    if (!document.hidden && !editorOpen.value && quickSavingId.value === null) {
+    if (!document.hidden && !editorOpen.value && !bulkProxyOpen.value && quickSavingId.value === null) {
         refreshVidsQuota()
         return load(true)
     }
@@ -1199,6 +1199,7 @@ function openEditor(row) {
         proxy_url: row.proxy_url || '',
         login_password: '',
     })
+    editorBaseline.value = { ...form }
     editorOpen.value = true
 }
 function openDetail(row) {
@@ -1298,13 +1299,16 @@ async function saveAccount() {
     if (!(await formRef.value.validate().catch(() => false))) return
     saving.value = true
     try {
-        const body = Object.fromEntries(Object.keys(defaults()).map((key) => [key, form[key]]))
-        // Maintenance cadence belongs to Settings. Editing another account
-        // field must not overwrite a newer cadence with this drawer snapshot.
-        delete body.refresh_interval_minutes
-        if (body.st === editing.value.st) delete body.st
+        // Maintenance cadence belongs to Settings; unchanged credentials and
+        // bindings must not be resubmitted when only generation egress changes.
+        const body = Object.fromEntries(Object.keys(defaults())
+            .filter((key) => key !== 'refresh_interval_minutes' && form[key] !== editorBaseline.value[key])
+            .map((key) => [key, form[key]]))
         if (!body.login_password) delete body.login_password
-        if (body.proxy_pool_id === (editing.value.proxy_pool_id ?? null)) delete body.proxy_pool_id
+        if (!Object.keys(body).length) {
+            editorOpen.value = false
+            return
+        }
         ensure(await api.put(`/api/tokens/${editing.value.id}`, body))
         ElMessage.success('账号配置已保存')
         editorOpen.value = false
@@ -1398,9 +1402,66 @@ async function clearVidsProtection(row) {
         busy.delete(key)
     }
 }
+async function saveBulkSubmissionProxy() {
+    if (!bulkProxyTargets.value.length || busy.has('bulk')) return
+    const mode = bulkProxyMode.value
+    if (!['fixed', 'pool_random'].includes(mode)) return
+    const targets = [...bulkProxyTargets.value]
+    const skipped = selected.value.length - targets.length
+    const current = new Map(accounts.value.map((row) => [row.id, row]))
+    const pending = targets.filter((row) => (current.get(row.id)?.submission_proxy_mode || 'fixed') !== mode || !current.has(row.id))
+    const unchanged = targets.length - pending.length
+    busy.add('bulk')
+    accountMutationVersion++
+    try {
+        const response = pending.length
+            ? ensure(await api.post('/api/tokens/submission-proxy/batch', {
+                ids: pending.map((row) => row.id),
+                submission_proxy_mode: mode,
+            }))
+            : { results: [] }
+        accountMutationVersion++
+        const results = new Map(response.results.map((result) => [result.id, result]))
+        const saved = new Set()
+        const errors = []
+        let updated = 0
+        let already = unchanged
+        for (const row of pending) {
+            const result = results.get(row.id)
+            if (result?.success) {
+                saved.add(row.id)
+                if (result.status === 'unchanged') already++
+                else updated++
+                if (quickDrafts[row.id]) {
+                    quickDrafts[row.id].submission_proxy_mode = mode
+                    quickBaselines[row.id].submission_proxy_mode = mode
+                }
+                quickErrors[row.id] = ''
+            } else {
+                const message = result?.message || '未收到保存结果，请重试'
+                errors.push(`${row.email || '#' + row.id}: ${message}`)
+                quickErrors[row.id] = message
+            }
+        }
+        accounts.value = accounts.value.map((row) => saved.has(row.id) ? { ...row, submission_proxy_mode: mode } : row)
+        bulkProxyOpen.value = false
+        ElMessage({
+            type: errors.length ? 'warning' : 'success',
+            message: `提交代理：已修改 ${updated} 个，已是目标策略 ${already} 个，跳过 ${skipped} 个，失败 ${errors.length} 个`,
+        })
+        if (errors.length) ElMessageBox.alert(errors.join('\n'), '部分账号操作未完成', {
+            confirmButtonText: '知道了',
+            customClass: 'multiline-message',
+        })
+    } catch (error) {
+        notifyError(error)
+    } finally {
+        busy.delete('bulk')
+    }
+}
 async function bulk(type) {
     if (!selected.value.length || busy.has('bulk')) return
-    const targets = type === 'delete' ? selected.value : selected.value.filter((row) => !row.vidsOnly)
+    const targets = [...(type === 'delete' ? selected.value : selected.value.filter((row) => !row.vidsOnly))]
     if (!targets.length) return
     if (type === 'delete') {
         try {
@@ -1425,7 +1486,7 @@ async function bulk(type) {
             )
             ok++
         } catch (error) {
-            errors.push(`${row.email}: ${error.message}`)
+            errors.push(`${row.email || '#' + row.id}: ${error.message}`)
         }
     }
     busy.delete('bulk')
@@ -2288,6 +2349,14 @@ onUnmounted(() => {
                 <el-button
                     v-if="selected.some((row) => !row.vidsOnly)"
                     size="small"
+                    :disabled="busy.size > 0 || saving || editorOpen || quickSavingId !== null"
+                    @click="bulkProxyOpen = true"
+                >
+                    批量修改提交代理
+                </el-button>
+                <el-button
+                    v-if="selected.some((row) => !row.vidsOnly)"
+                    size="small"
                     :loading="busy.has('bulk')"
                     @click="bulk('enable')"
                 >
@@ -2995,7 +3064,7 @@ onUnmounted(() => {
                         <el-form-item label="账号代理">
                             <template v-if="editing?.browser_profile_source === 'cloak'">
                                 <el-input :model-value="currentProxyLabel" readonly />
-                                <span class="field-note">登录、刷新和生成沿用此固定出口。</span>
+                                <span class="field-note">登录、刷新与 Profile 绑定保持此固定出口；生成提交出口单独设置。</span>
                             </template>
                             <el-select v-else v-model="form.proxy_pool_id" placeholder="请选择固定出口" filterable>
                                 <el-option
@@ -3013,10 +3082,9 @@ onUnmounted(() => {
                                 <el-option
                                     label="代理池随机（每次生成取健康出口）"
                                     value="pool_random"
-                                    :disabled="editing?.browser_profile_source === 'cloak'"
                                 />
                             </el-select>
-                            <span class="field-note">Cloak 账号保持固定代理；媒体下载独立分配。</span>
+                            <span class="field-note">每份新 Flow 任务按策略选择一个出口，整份任务保持同一出口；已开始的任务不变。不会更换登录、刷新与 Profile 的绑定；媒体下载独立分配。</span>
                         </el-form-item>
                     </div>
                     <div class="form-grid editor-capabilities">
@@ -3144,6 +3212,49 @@ onUnmounted(() => {
         </el-drawer>
 
         <el-dialog
+            v-model="bulkProxyOpen"
+            title="批量修改提交代理"
+            width="min(560px, calc(100vw - 32px))"
+            :show-close="!busy.has('bulk')"
+            :close-on-click-modal="!busy.has('bulk')"
+            :close-on-press-escape="!busy.has('bulk')"
+        >
+            <p class="dialog-note">
+                已选择 {{ selected.length }} 个账号，可设置 {{ bulkProxyTargets.length }} 个，
+                跳过 {{ selected.length - bulkProxyTargets.length }} 个。
+            </p>
+            <el-form label-position="top">
+                <el-form-item label="生成提交出口">
+                    <el-select v-model="bulkProxyMode" aria-label="批量生成提交出口" :disabled="busy.has('bulk')">
+                        <el-option label="账号固定代理" value="fixed" />
+                        <el-option label="代理池随机（每次生成取健康出口）" value="pool_random" />
+                    </el-select>
+                </el-form-item>
+            </el-form>
+            <p class="dialog-note">
+                仅修改 Flow 生成提交策略，不更换账号绑定出口、Cookie 或 Profile。
+                代理池随机会为每份新任务选择一个健康出口，整份任务保持同一出口；已开始的任务不变。
+            </p>
+            <el-alert
+                title="Cloak 与 Cookie 账号均可设置；登录、刷新与 Profile 仍使用账号固定绑定。仅 Vids 账号不参与设置。"
+                type="info"
+                :closable="false"
+                show-icon
+            />
+            <template #footer>
+                <el-button :disabled="busy.has('bulk')" @click="bulkProxyOpen = false">取消</el-button>
+                <el-button
+                    type="primary"
+                    :loading="busy.has('bulk')"
+                    :disabled="busy.has('bulk') || !bulkProxyTargets.length"
+                    @click="saveBulkSubmissionProxy"
+                >
+                    应用到 {{ bulkProxyTargets.length }} 个账号
+                </el-button>
+            </template>
+        </el-dialog>
+
+        <el-dialog
             v-model="loginOpen"
             title="Cloak 登录账号"
             width="min(560px, calc(100vw - 32px))"
@@ -3177,7 +3288,7 @@ onUnmounted(() => {
                         />
                     </el-select>
                     <span class="field-note">
-                        先选择登录代理，再打开 Cloak；留空时自动分配。登录、刷新与 API 共用选定出口。
+                        先选择登录代理，再打开 Cloak；留空时自动分配。登录、刷新与 Profile 保持此固定绑定；Flow 生成出口可单独设置。
                     </span>
                     <span class="field-note">住宅代理可先加入代理池，再在这里选择对应线路。</span>
                     <router-link to="/proxies">管理代理池</router-link>

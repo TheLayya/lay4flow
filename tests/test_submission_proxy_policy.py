@@ -43,15 +43,11 @@ class SubmissionProxyPolicyTests(unittest.IsolatedAsyncioTestCase):
             [one.entry_id, two.entry_id, three.entry_id],
             [self.first, self.second, self.first],
         )
-        self.assertEqual(
-            [entry.inflight for entry in await self.manager.list_proxy_pool()], [2, 1]
-        )
+        self.assertEqual([entry.inflight for entry in await self.manager.list_proxy_pool()], [2, 1])
         await self.manager.release_submission_proxy(one)
         await self.manager.release_submission_proxy(two)
         await self.manager.release_submission_proxy(three)
-        self.assertEqual(
-            [entry.inflight for entry in await self.manager.list_proxy_pool()], [0, 0]
-        )
+        self.assertEqual([entry.inflight for entry in await self.manager.list_proxy_pool()], [0, 0])
 
     async def test_non_transport_errors_and_duplicate_release_leave_health_unchanged(self):
         for error in (
@@ -109,7 +105,9 @@ class SubmissionProxyPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.failure_count, 0)
         self.assertIsNone(saved.last_check_ok)
 
-    async def test_probe_treats_rest_policy_status_as_connected_and_transport_failure_as_failed(self):
+    async def test_probe_treats_rest_policy_status_as_connected_and_transport_failure_as_failed(
+        self,
+    ):
         session = MagicMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=False)
@@ -118,7 +116,9 @@ class SubmissionProxyPolicyTests(unittest.IsolatedAsyncioTestCase):
             for status in (200, 401, 403, 404, 429):
                 session.get.return_value = SimpleNamespace(status_code=status)
                 self.assertTrue(await self.manager.check_proxy_pool_entry(self.first))
-                self.assertEqual(session.get.call_args.args[0], "https://aisandbox-pa.googleapis.com/v1/credits")
+                self.assertEqual(
+                    session.get.call_args.args[0], "https://aisandbox-pa.googleapis.com/v1/credits"
+                )
             session.get.side_effect = RuntimeError("curl: (97) proxy closed connection")
             self.assertFalse(await self.manager.check_proxy_pool_entry(self.first))
         saved = await self.db.get_proxy_pool_entry(self.first)

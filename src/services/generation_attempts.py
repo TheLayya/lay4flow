@@ -1,5 +1,6 @@
 """Request-local generation bounds and failed-account exclusions."""
 
+import math
 import re
 import time
 import uuid
@@ -97,6 +98,26 @@ class GenerationAttempts:
         if self.history and self.history[-1]["status"] == "in_progress":
             self.history[-1]["stage"] = stage
 
+    def diagnostics(self, **values):
+        """Attach only bounded evidence to an existing current attempt."""
+        if len(self.history) <= self.account_attempt_start:
+            return
+        row = self.history[-1]
+        for name in ("captcha_ms", "captcha_to_submit_ms", "submit_ms"):
+            value = values.get(name)
+            if type(value) in (int, float) and 0 <= value <= 604_800_000 and math.isfinite(value):
+                row[name] = value
+        for name, minimum in (("rpc_code", 0), ("http_status", 100)):
+            value = values.get(name)
+            if type(value) is int and minimum <= value <= 599:
+                row[name] = value
+        count = values.get("submission_count")
+        if type(count) is int and 0 <= count <= 100:
+            row["submission_count"] = count
+        state = values.get("submission_state")
+        if isinstance(state, str) and state in {"not_submitted", "unknown", "rejected", "accepted"}:
+            row["submission_state"] = state
+
     def finish(self, status, error=None, *, next_action=None, delay_seconds=None):
         row = (
             self.history[-1]
@@ -114,6 +135,10 @@ class GenerationAttempts:
             row["error"] = safe_attempt_text(error)
             row["error_code"] = safe_attempt_text(
                 getattr(error, "public_error", None) or getattr(error, "reason", ""), 120
+            )
+            self.diagnostics(
+                rpc_code=getattr(error, "rpc_code", None),
+                http_status=getattr(error, "http_status", None),
             )
         if next_action is not None:
             row["next_action"] = next_action

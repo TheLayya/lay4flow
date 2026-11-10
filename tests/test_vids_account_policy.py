@@ -143,7 +143,12 @@ class VidsAccountPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.policy.account_stats(self.token_id))["error_count"], 1)
         log = (await self.db.get_logs(include_payload=True))[0]
         self.assertNotIn("private", log["response_body"])
-        self.assertNotIn("SYNTHETIC_DENIED", log["response_body"])
+        self.assertIn("SYNTHETIC_DENIED", log["response_body"])
+        payload = json.loads(log["response_body"])
+        self.assertEqual(
+            payload["upstream_error"],
+            {"status": "INVALID_ARGUMENT", "reason": "SYNTHETIC_DENIED"},
+        )
         self.assertTrue((await self.db.get_token(self.token_id)).is_active)
         await self.policy.clear(self.token_id)
         self.assertEqual(await self.policy.public_states(), {})
@@ -221,6 +226,35 @@ class VidsAccountPolicyTests(unittest.IsolatedAsyncioTestCase):
         stats = await self.policy.account_stats(self.token_id)
         self.assertEqual((stats["error_count"], stats["consecutive_error_count"]), (6, 0))
         self.assertEqual(await self.policy.public_states(), {})
+
+    async def test_cross_product_reason_uses_existing_threshold_and_editable_rule_only(self):
+        reason = {"status": "PERMISSION_DENIED", "reason": "CROSS_PRODUCT_SHARING_DISABLED"}
+
+        def receipt(key):
+            return self.receipt(key, upstream_error=reason)
+
+        await self.policy.save_config({"consecutive_failure_threshold": 3, "rules": ""})
+        await self.policy.observe(self.token_id, receipt("cp1"), request_summary={})
+        await self.policy.observe(self.token_id, receipt("cp2"), request_summary={})
+        # A single known 403 reason never becomes an implicit permanent disable.
+        self.assertEqual(await self.policy.public_states(), {})
+        self.assertEqual(
+            (await self.policy.account_stats(self.token_id))["consecutive_error_count"], 2
+        )
+        await self.policy.observe(self.token_id, receipt("cp3"), request_summary={})
+        state = (await self.policy.public_states())[self.token_id]
+        self.assertEqual(state["status"], "cooldown")
+        # An explicit editable rule can still classify the same safe reason.
+        await self.policy.clear(self.token_id)
+        await self.policy.save_config(
+            {
+                "rules": "CROSS_PRODUCT_SHARING_DISABLED|LIMIT|5m",
+                "consecutive_failure_threshold": 99,
+            }
+        )
+        await self.policy.observe(self.token_id, receipt("cp4"), request_summary={})
+        state = (await self.policy.public_states())[self.token_id]
+        self.assertEqual((state["action"], state["reason"]), ("LIMIT", reason["reason"]))
 
 
 if __name__ == "__main__":

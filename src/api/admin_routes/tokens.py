@@ -10,7 +10,13 @@ from ...core.account_identity import same_google_identity
 from ...services.flow.google_cookies import extract_flow_cookie_combo
 from ...services.proxy_manager import ProxyManager
 from ...services.vids.gateway import GatewayError
-from ..admin_schemas import AddTokenRequest, ImportTokensRequest, ST2ATRequest, UpdateTokenRequest
+from ..admin_schemas import (
+    AddTokenRequest,
+    ImportTokensRequest,
+    ST2ATRequest,
+    SubmissionProxyBatchRequest,
+    UpdateTokenRequest,
+)
 
 
 def create_token_router(
@@ -21,6 +27,16 @@ def create_token_router(
 ):
     """Keep account identity checks in this group; resolve services at call time."""
     router = APIRouter()
+
+    @router.post("/api/tokens/submission-proxy/batch")
+    async def batch_submission_proxy(
+        request: SubmissionProxyBatchRequest, token: str = Depends(verify_token)
+    ):
+        """Change generation policy in one transaction; never refresh account identity."""
+        results = await get_database().update_submission_proxy_modes(
+            request.ids, request.submission_proxy_mode
+        )
+        return {"success": True, "results": results}
 
     @router.get("/api/tokens")
     async def get_tokens(token: str = Depends(verify_token)):

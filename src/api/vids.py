@@ -12,6 +12,7 @@ from ..services.vids.gateway import (
     KINDS,
     GatewayError,
     VidsGateway,
+    upstream_failure_text,
 )
 from ..services.vids.media_cleanup import VidsFileResponse as FileResponse
 from .openai_common import APIError, OpenAIRoute, read_json_body
@@ -274,7 +275,11 @@ def create_vids_app(gateway: VidsGateway, api_key: str) -> FastAPI:
                 "image_not_ready",
             )
         if status != "completed":
-            raise APIError(502, f"Image request {record['id']} ended with {status}", "image_failed")
+            message = f"Image request {record['id']} ended with {status}"
+            detail = upstream_failure_text(record)
+            if detail:
+                message += f"；上游原因：{detail}"
+            raise APIError(502, message, "image_failed")
         items = []
         for index in range(body.get("n", 1)):
             path, mime = invoke_sync(gateway.content, record["id"], index)

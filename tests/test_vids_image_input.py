@@ -105,7 +105,7 @@ class VidsImageInputTests(unittest.IsolatedAsyncioTestCase):
             self.upstream.edit_document_image.assert_awaited_once()
         self.assertEqual(list(self.setup.gateways[2].root.glob("vids_*.json")), [])
 
-    async def test_parallel_same_key_and_other_requests_cannot_interleave_upload_and_generation(
+    async def test_parallel_same_key_serializes_and_other_requests_cannot_interleave_upload(
         self,
     ):
         entered, release = asyncio.Event(), asyncio.Event()
@@ -118,13 +118,15 @@ class VidsImageInputTests(unittest.IsolatedAsyncioTestCase):
         self.upstream.insert_document_image.side_effect = pending_insert
         first = asyncio.create_task(self.pool.generate(0, self.body, "parallel-edit"))
         await entered.wait()
-        replay = await self.pool.generate(0, self.body, "parallel-edit")
-        self.assertEqual(replay["status"], "generating")
+        replay = asyncio.create_task(self.pool.generate(0, self.body, "parallel-edit"))
+        await asyncio.sleep(0)
         with self.assertRaises(GatewayError) as caught:
             await self.setup.dispatcher.generate(1, self.body, "other-edit")
         self.assertEqual(caught.exception.code, "busy")
         release.set()
-        self.assertEqual((await first)["status"], "completed")
+        original, duplicate = await asyncio.gather(first, replay)
+        self.assertEqual(original, duplicate)
+        self.assertEqual(original["status"], "completed")
         self.upstream.insert_document_image.assert_awaited_once()
         self.upstream.edit_document_image.assert_awaited_once()
 

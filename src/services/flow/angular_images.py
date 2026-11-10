@@ -212,12 +212,8 @@ def resolve_image_usage(
         price = next(
             (_field(entry, 2) for entry in pricing if _field(entry, 1) == service_tier), None
         )
-        # t7a field2 is a disabled marker; field1 supplies enabled pricing.
-        if (
-            not isinstance(price, list)
-            or _field(price, 2) is not None
-            or not isinstance(_field(price, 1), list)
-        ):
+        # A present pricing message defaults to zero unless field2 disables it.
+        if not isinstance(price, list) or _field(price, 2) is not None:
             continue
         if aspect in aspects and any(
             isinstance(parts := _field(mode, 1), list) and set(parts) - {0} == required

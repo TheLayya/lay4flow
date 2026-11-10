@@ -13,7 +13,7 @@ python scripts/check.py
 docker build -t lay4flow-remote:ci .
 docker run --rm --network none lay4flow-remote:ci python scripts/smoke_package.py
 python scripts/package_release.py /path/to/lay4flow-remote-runtime.tar.gz
-python scripts/build_release.py dist/1.6.0
+python scripts/build_release.py dist/1.6.1
 ```
 
 运行包使用固定文件清单与公开源码/静态资源扩展名白名单。包含 `src/`、`static/`、启动脚本、示例配置、运行文档、README 引用的演示截图及许可证；前端源码与完整开发测试留在源码仓库。截图仅含合成数据，逐文件加入公开清单。压缩包不包含私有 TOML、`.env`、`data/`、`tmp/`、本地账号 JSON、日志、证据目录、密钥或 Python 缓存。
@@ -37,8 +37,8 @@ Windows 桌面采用 WinForms + WebView2，安装器使用 Inno Setup；构建�
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_desktop.ps1
-python scripts/build_release.py dist/1.6.0 --desktop-runtime desktop/runtime/windows-x64 --backend-runtime desktop/runtime/backend/windows-x64
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_setup.ps1 -BundleZip dist/1.6.0/lay4flow-remote-1.6.0-windows-x64.zip -OutputDir dist/1.6.0
+python scripts/build_release.py dist/1.6.1 --desktop-runtime desktop/runtime/windows-x64 --backend-runtime desktop/runtime/backend/windows-x64
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_setup.ps1 -BundleZip dist/1.6.1/lay4flow-remote-1.6.1-windows-x64.zip -OutputDir dist/1.6.1
 ```
 
 不传 `--desktop-runtime` 的 ZIP 是源码启动包，供 Linux CI 校验运行文件；正式 Windows 安装 EXE 要求包含已构建桌面程序，缺失时构建直接退出。

@@ -250,6 +250,7 @@ class FileCache:
                         proxy=network_proxy,
                         headers=headers,
                         impersonate=resolve_browser_impersonate(headers.get("User-Agent", "")),
+                        default_headers=False,
                         verify=False,
                     )
 
@@ -281,7 +282,6 @@ class FileCache:
                     f"--header=Accept: {headers.get('Accept', '*/*')}",
                     f"--header=Accept-Language: {headers.get('Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8')}",
                     f"--header=Connection: {headers.get('Connection', 'keep-alive')}",
-                    f"--header=Referer: {headers.get('Referer', 'https://labs.google/')}",
                 ]
 
                 if "sec-ch-ua" in headers:
@@ -344,8 +344,6 @@ class FileCache:
                     f"Accept-Language: {headers.get('Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8')}",
                     "-H",
                     f"Connection: {headers.get('Connection', 'keep-alive')}",
-                    "-H",
-                    f"Referer: {headers.get('Referer', 'https://labs.google/')}",
                     "-A",
                     headers.get("User-Agent", ""),
                 ]

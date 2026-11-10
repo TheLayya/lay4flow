@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from starlette.datastructures import UploadFile
 
-from ..services.vids.gateway import GatewayError
+from ..services.vids.gateway import GatewayError, upstream_failure_text
 from ..services.vids.media_cleanup import VidsFileResponse as FileResponse
 from .openai_common import APIError, OpenAIRoute, limit_request_body, read_json_body
 from .openai_images import image_dimensions
@@ -150,6 +150,9 @@ def public_video(record):
         if status == "unknown"
         else ERRORS.get(code, "Video generation failed.")
     )
+    detail = upstream_failure_text(record)
+    if detail and status != "unknown":
+        message = f"{message} 上游原因：{detail}"
     return {
         "id": identifier,
         "object": "video",

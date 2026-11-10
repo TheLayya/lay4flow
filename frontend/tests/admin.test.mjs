@@ -1169,7 +1169,7 @@ test('editing an account preserves unchanged ST and blank password, and keeps re
     assert.equal(writes[0].path, '/api/tokens/4')
     assert.equal('st' in writes[0].body, false)
     assert.equal('login_password' in writes[0].body, false)
-    assert.equal(writes[0].body.project_id, 'project-4')
+    assert.deepEqual(writes[0].body, { remark: 'Updated note' })
     s.openEditor(account)
     s.form.st = 'different-identity-st'
     fixture.api.put = async () => {
@@ -1499,7 +1499,7 @@ test('account polling updates untouched quick fields while retaining pending edi
     assert.equal(s.quickDraft(s.accounts.value[0]).remark, 'pending edit')
 })
 
-test('cookie account submission strategy saves independently of the login binding and retains failed choices', async () => {
+for (const source of ['cookies', 'cloak']) test(`${source} account submission strategy saves independently of the login binding and retains failed choices`, async () => {
     let fail = true
     const writes = [],
         confirmations = []
@@ -1515,9 +1515,11 @@ test('cookie account submission strategy saves independently of the login bindin
     })
     const row = {
         id: 13,
-        browser_profile_source: 'cookies',
+        browser_profile_source: source,
         proxy_pool_id: 2,
         proxy_url: 'socks5h://fixed:password@login.fixture:1080',
+        google_cookies: 'synthetic-cookie-jar',
+        browser_profile_status: 'ready',
     }
     s.accounts.value = [row]
     s.proxyPool.value = [{ id: 2, enabled: true, proxy_url: row.proxy_url, bound_account_count: 1 }]
@@ -1540,6 +1542,10 @@ test('cookie account submission strategy saves independently of the login bindin
     assert.equal(confirmations.length, 0)
     assert.match(s.accountProxySummary(s.accounts.value[0]), /生成 · 代理池随机 · 登录 #2/)
     assert.match(s.quickSaved[13], /代理池随机/)
+    assert.deepEqual(plain(s.accounts.value[0]), { ...row, submission_proxy_mode: 'pool_random' })
+    const savedWrites = writes.length
+    await s.saveQuickAccount(s.accounts.value[0], 'strategy')
+    assert.equal(writes.length, savedWrites)
 })
 
 test('polling synchronizes an untouched strategy without discarding an unsaved strategy choice', async () => {
@@ -1631,6 +1637,69 @@ test('accounts sort the full filtered pool before slicing pages and bulk ignores
         writes.map((row) => row.path),
         ['/api/tokens/1/disable', '/api/tokens/6/disable'],
     )
+})
+
+test('batch strategy commits while an older poll hangs, preserves failures and retries only unsaved accounts', async () => {
+    const oldRead = deferred()
+    const write = deferred()
+    const calls = []
+    const alerts = []
+    const before = [1, 2, 3].map((id) => ({
+        id, email: `batch-${id}@example.invalid`, submission_proxy_mode: id === 3 ? 'pool_random' : 'fixed',
+        proxy_pool_id: id, proxy_url: `http://fixed-${id}.invalid:8080`,
+        browser_profile_source: 'cloak', google_cookies: 'synthetic-cookies', browser_profile_epoch: 'epoch',
+    }))
+    const { state: s } = view('Accounts', {
+        context: { ElMessageBox: { alert: async (message) => alerts.push(message) } },
+        api: {
+            get: async () => oldRead.promise,
+            post: async (path, body) => { calls.push({ path, body: plain(body) }); return write.promise },
+        },
+    })
+    s.accounts.value = before.map((row) => ({ ...row }))
+    s.selected.value = [...s.accounts.value, { id: 'v4', vidsOnly: true }]
+    s.quickDraft(s.accounts.value[0])
+    s.bulkProxyMode.value = 'pool_random'
+    s.bulkProxyOpen.value = true
+    const poll = s.load(true)
+    const saving = s.saveBulkSubmissionProxy()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(calls, [{
+        path: '/api/tokens/submission-proxy/batch', body: { ids: [1, 2], submission_proxy_mode: 'pool_random' },
+    }])
+    assert.equal(s.busy.has('bulk'), true)
+    write.resolve({ success: true, results: [
+        { id: 1, success: true, status: 'updated', submission_proxy_mode: 'pool_random' },
+        { id: 2, success: false, status: 'failed', message: '账号不存在' },
+    ] })
+    await saving
+    assert.equal(s.bulkProxyOpen.value, false)
+    assert.equal(s.busy.has('bulk'), false)
+    assert.deepEqual(plain(s.accounts.value), [{ ...before[0], submission_proxy_mode: 'pool_random' }, before[1], before[2]])
+    assert.equal(s.quickDrafts[1].submission_proxy_mode, 'pool_random')
+    assert.equal(s.quickErrors[2], '账号不存在')
+    assert.match(alerts[0], /batch-2@example.invalid: 账号不存在/)
+    oldRead.resolve(before)
+    await poll
+    assert.equal(s.accounts.value[0].submission_proxy_mode, 'pool_random', 'late poll cannot undo the committed batch')
+    await s.saveBulkSubmissionProxy()
+    assert.deepEqual(calls[1].body.ids, [2])
+})
+
+test('batch transport errors preserve policies and keep the dialog retryable', async () => {
+    const row = { id: 1, submission_proxy_mode: 'fixed' }
+    const { state: s, errors } = view('Accounts', { api: {
+        post: async () => { throw new Error('连接中断') },
+    } })
+    s.accounts.value = [row]
+    s.selected.value = [row]
+    s.bulkProxyMode.value = 'pool_random'
+    s.bulkProxyOpen.value = true
+    await s.saveBulkSubmissionProxy()
+    assert.equal(s.bulkProxyOpen.value, true)
+    assert.equal(s.busy.has('bulk'), false)
+    assert.deepEqual(plain(s.accounts.value), [row])
+    assert.equal(errors[0].message, '连接中断')
 })
 
 test('overlapping account polls share requests and a mutation reload waits for fresh state', async () => {

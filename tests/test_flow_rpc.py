@@ -11,6 +11,7 @@ from src.services.flow.flow_rpc import (
     IDENTITY_RPC,
     FlowRPCError,
     flow_rpc,
+    prepare_flow_rpc,
     read_flow_session,
 )
 
@@ -51,6 +52,125 @@ def rpc(rpcid, payload, *, framed=True):
 
 
 class FlowRPCTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rpc_envelope_matches_current_frontend_locale_request_id_and_form_headers(self):
+        context = self.context()
+        context.flow_bootstrap_cache = {}
+        context.request.get.return_value = response(
+            '<html lang="zh-CN">' + await bootstrap().text()
+        )
+        context.request.post.side_effect = [rpc("ogiZ0b", ["done"]), rpc("ogiZ0b", ["done"])]
+        await flow_rpc(
+            context, "ogiZ0b", ["synthetic"], source_path="/project/p", expected_email=EMAIL
+        )
+        await flow_rpc(
+            context, "ogiZ0b", ["synthetic"], source_path="/project/p", expected_email=EMAIL
+        )
+        calls = context.request.post.await_args_list
+        for call in calls:
+            self.assertEqual(call.kwargs["params"]["hl"], "zh-CN")
+            self.assertRegex(call.kwargs["params"]["_reqid"], r"^[1-9][0-9]{4,}$")
+            self.assertEqual(call.kwargs["headers"]["Accept"], "*/*")
+            self.assertEqual(
+                call.kwargs["headers"]["Content-Type"],
+                "application/x-www-form-urlencoded;charset=utf-8",
+            )
+            self.assertEqual(call.kwargs["headers"]["Referer"], "https://flow.google.com/project/p")
+        self.assertEqual(json.loads(calls[0].kwargs["form"]["f.req"])[0][0][1], '["synthetic"]')
+        self.assertEqual(
+            int(calls[1].kwargs["params"]["_reqid"]) - int(calls[0].kwargs["params"]["_reqid"]),
+            100_000,
+        )
+
+    async def test_project_prepare_is_read_only_and_submit_observer_has_no_request_data(self):
+        events = []
+        context = self.context()
+        context.flow_bootstrap_cache = {}
+
+        async def get(*args, **kwargs):
+            events.append("project_get")
+            return bootstrap()
+
+        async def post(*args, **kwargs):
+            events.append("post")
+            return rpc("ogiZ0b", ["done"])
+
+        def observe(event, moment, http_status):
+            self.assertIn(event, {"started", "finished"})
+            self.assertIsInstance(moment, (int, float))
+            self.assertEqual(http_status, 200 if event == "finished" else None)
+            events.append(event)
+
+        context.request.get.side_effect = get
+        context.request.post.side_effect = post
+        await prepare_flow_rpc(context, source_path="/project/p", expected_email=EMAIL)
+        context.request.post.assert_not_awaited()
+        value = await flow_rpc(
+            context,
+            "ogiZ0b",
+            ["private-captcha"],
+            source_path="/project/p",
+            expected_email=EMAIL,
+            submit_observer=observe,
+        )
+        self.assertEqual(value, ["done"])
+        self.assertEqual(events, ["project_get", "started", "post", "finished"])
+        self.assertEqual(context.request.get.await_count, 1)
+
+    async def test_submit_observer_cannot_change_result_and_finishes_on_transport_failure(self):
+        context = self.context()
+        context.request.post.side_effect = None
+        context.request.post.return_value = rpc("ogiZ0b", ["accepted"])
+
+        def broken(*args):
+            raise RuntimeError("diagnostics unavailable")
+
+        self.assertEqual(
+            await flow_rpc(context, "ogiZ0b", [], submit_observer=broken), ["accepted"]
+        )
+        events = []
+        context.request.post.side_effect = TimeoutError("private response")
+        with self.assertRaises(FlowRPCError):
+            await flow_rpc(
+                context,
+                "ogiZ0b",
+                [],
+                submit_observer=lambda event, moment, status: events.append(event),
+            )
+        self.assertEqual(events, ["started", "finished"])
+
+    async def test_definite_xsrf_retry_observes_both_actual_posts_only(self):
+        context = self.context()
+        context.request.post.side_effect = [
+            response(json.dumps([["xsrf", "rotated-private-at"]]), url=RPC_URL),
+            rpc("ogiZ0b", ["done"]),
+        ]
+        events = []
+        self.assertEqual(
+            await flow_rpc(
+                context,
+                "ogiZ0b",
+                [],
+                submit_observer=lambda event, moment, status: events.append(event),
+            ),
+            ["done"],
+        )
+        self.assertEqual(events, ["started", "finished", "started", "finished"])
+
+    async def test_prepared_project_cache_expires_without_sending_before_new_identity_check(self):
+        context = self.context()
+        context.flow_bootstrap_cache = {}
+        with patch("src.services.flow.flow_rpc.time.monotonic", return_value=100):
+            await prepare_flow_rpc(context, source_path="/project/p", expected_email=EMAIL)
+        context.request.get.return_value = bootstrap({**CONFIG, "oPEP7c": "other@gmail.com"})
+        with patch("src.services.flow.flow_rpc.time.monotonic", return_value=161):
+            with self.assertRaises(FlowRPCError) as caught:
+                await flow_rpc(
+                    context, "ogiZ0b", [], source_path="/project/p", expected_email=EMAIL
+                )
+        self.assertEqual(caught.exception.reason, "identity_mismatch")
+        self.assertEqual(context.request.get.await_count, 2)
+        context.request.post.assert_not_awaited()
+
     async def test_http_session_reuses_bootstrap_per_path_with_bounded_lifetime(self):
         context = self.context()
         context.flow_bootstrap_cache = {}
@@ -315,6 +435,15 @@ class FlowRPCTests(unittest.IsolatedAsyncioTestCase):
                     "flow_credits",
                 )
 
+    async def test_omitted_zero_credit_field_matches_current_official_proto_getter(self):
+        result = await read_flow_session(self.context(credits=rpc(CREDITS_RPC, [None, 1, 2, 2])))
+        self.assertEqual(result["credits"], 0)
+        self.assertEqual(result["user_paygate_tier"], "PAYGATE_TIER_ONE")
+        for malformed in ([None, True], [None, "1"], [None, 999]):
+            await self.error(
+                self.context(credits=rpc(CREDITS_RPC, malformed)), "credits_invalid", "flow_credits"
+            )
+
     async def test_rpc_error_payloads_and_malformed_data_are_bounded(self):
         for code in (7, 16, 13):
             text = json.dumps(
@@ -401,14 +530,54 @@ class FlowRPCTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.kwargs["params"], second.kwargs["params"])
 
     async def test_xsrf_sidechannel_with_error_frame_and_no_payload_can_retry(self):
-        body = [["er", None, None, None, None, 400], ["xsrf", "rotated-private-at"]]
-        context = self.context()
-        context.request.post.side_effect = [
-            response(json.dumps(body), url=RPC_URL),
-            rpc("ogiZ0b", ["done"]),
-        ]
-        self.assertEqual(await flow_rpc(context, "ogiZ0b", []), ["done"])
-        self.assertEqual(context.request.post.await_count, 2)
+        for error_row in (
+            ["er", None, None, None, None, 400],
+            ["wrb.fr", "ogiZ0b", None, None, None, [13]],
+        ):
+            with self.subTest(error_row=error_row):
+                body = [error_row, ["xsrf", "rotated-private-at"]]
+                context = self.context()
+                context.request.post.side_effect = [
+                    response(json.dumps(body), url=RPC_URL),
+                    rpc("ogiZ0b", ["done"]),
+                ]
+                self.assertEqual(await flow_rpc(context, "ogiZ0b", []), ["done"])
+                self.assertEqual(context.request.post.await_count, 2)
+                first, second = context.request.post.await_args_list
+                self.assertEqual(first.kwargs["form"]["at"], CONFIG["SNlM0e"])
+                self.assertEqual(second.kwargs["form"]["at"], "rotated-private-at")
+                self.assertEqual(first.kwargs["form"]["f.req"], second.kwargs["form"]["f.req"])
+                self.assertEqual(first.kwargs["params"], second.kwargs["params"])
+
+    async def test_payload_with_error_and_xsrf_does_not_replay_or_confirm_rejection(self):
+        payload = json.dumps([["synthetic-media"]])
+        for rows, code, reason in (
+            ([["wrb.fr", "YhhmEf", payload, None, None, [13]]], 13, "transient_error"),
+            ([["wrb.fr", "YhhmEf", payload, None, None, [401]]], 401, "login_required"),
+            (
+                [
+                    ["wrb.fr", "YhhmEf", None, None, None, [13]],
+                    ["wrb.fr", "YhhmEf", payload],
+                ],
+                13,
+                "transient_error",
+            ),
+        ):
+            with self.subTest(rows=rows):
+                context = self.context()
+                context.request.post.side_effect = [
+                    response(json.dumps([*rows, ["xsrf", "synthetic-new-token"]]), url=RPC_URL),
+                    rpc("YhhmEf", [["replayed-media"]]),
+                ]
+                with self.assertRaises(FlowRPCError) as caught:
+                    await flow_rpc(context, "YhhmEf", [], network_step="flow_generate_image")
+                self.assertEqual(caught.exception.reason, reason)
+                self.assertEqual(caught.exception.rpc_code, code)
+                self.assertFalse(caught.exception.submission_rejected)
+                context.request.post.assert_awaited_once()
+                self.assertEqual(
+                    context.request.post.await_args.kwargs["form"]["at"], CONFIG["SNlM0e"]
+                )
 
     async def test_xsrf_rotation_does_not_repeat_a_successful_or_unknown_outcome(self):
         for text in (

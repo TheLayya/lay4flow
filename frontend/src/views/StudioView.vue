@@ -338,6 +338,25 @@ const taskStatusNames = {
     no_result: '上游未返回成品',
     specification_mismatch: '输出规格校验未通过',
 }
+const commonUpstreamReasonLabels = {
+    CROSS_PRODUCT_SHARING_DISABLED: '账号当前缺少跨产品共享权限，具体限制需在账号侧核查',
+}
+const speechUpstreamReasonLabels = {
+    LANGUAGE_NOT_SUPPORTED: 'Vids 语音上游当前仅支持英文输入',
+}
+function upstreamReasonSuffix(data) {
+    const reason = data?.upstream_error?.reason
+    if (typeof reason !== 'string' || !/^[A-Z][A-Z0-9_]{1,63}$/.test(reason)) return ''
+    const labels = data?.kind === 'speech'
+        ? { ...commonUpstreamReasonLabels, ...speechUpstreamReasonLabels }
+        : commonUpstreamReasonLabels
+    const label = labels[reason]
+    const poolHelp =
+        reason === 'CROSS_PRODUCT_SHARING_DISABLED'
+            ? '；如可用账号均返回该限制，请到账号页维护 Vids 账号授权'
+            : ''
+    return `；上游原因：${reason}${label ? `（${label}）` : ''}${poolHelp}`
+}
 const examples = computed(() =>
     kind.value === 'image'
         ? [
@@ -546,7 +565,7 @@ async function loadCatalog() {
                 throw settled[0].reason
             }
             if (settled[1].status === 'fulfilled') vidsModels.value = settled[1].value.data || []
-            catalogMessage.value = `${readyCount.value} 个就绪账号 · ${recoverableCount.value} 个可恢复会话`
+            catalogMessage.value = `${readyCount.value} 个就绪账号 · ${recoverableCount.value} 个可恢复会话 · 提交时自动选择可用账号`
         }
         if (!models.value.some((item) => item.id === selectedId.value)) {
             selectedId.value = models.value[0]?.id || ''
@@ -1259,7 +1278,7 @@ function applyReceipt(current, data, fromJob = false) {
     current.message = mediaExpired
         ? '服务端成品已按缓存保留时间清理，生成收据仍保留；可尝试恢复原结果下载。'
         : data.error
-        ? `服务端状态：${status} · ${typeof data.error === 'string' ? data.error : data.error.code || ''}`
+        ? `服务端状态：${status} · ${typeof data.error === 'string' ? data.error : data.error.code || ''}${upstreamReasonSuffix(data)}`
         : status === 'completed'
           ? '作品生成完成，正在读取成品。'
           : status === 'unknown'

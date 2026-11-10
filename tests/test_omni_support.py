@@ -94,7 +94,9 @@ class OmniSupportTests(unittest.TestCase):
         evidence = Path(__file__).resolve().parents[1] / "tests/fixtures/flow-model-catalog.json"
         live = json.loads(evidence.read_text(encoding="utf-8-sig"))
         video_keys = {model["key"] for group in live["video"] for model in group["models"]}
-        current = json.loads((Path(__file__).parent / "fixtures/flow_omni12_models.json").read_text())
+        current = json.loads(
+            (Path(__file__).parent / "fixtures/flow_omni12_models.json").read_text()
+        )
         video_keys.update(usage[0] for family in current[0][4] for usage in family[1])
         image_keys = {key for group in live["image"] for key in group["keys"]}
         for model_id, cfg in MODEL_CONFIG.items():

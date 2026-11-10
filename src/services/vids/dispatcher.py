@@ -12,12 +12,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ...core.config import config
 from ...core.logger import debug_logger
 from ..proxy_health import bound_proxy_unavailable, proxy_pool_snapshot
 from .client import VidsProtocolError, VidsTransportError, video_feature
 from .gateway import GatewayError, VidsGateway
 
 QUOTA_FRESHNESS_SECONDS = 15 * 60
+POOL_SUCCESSOR_FIELD = "pool_successor"
+POOL_CHAIN_MAX_ATTEMPTS = 1000
+_POOL_FAILOVER_ERRORS = frozenset({"upstream_http_401", "upstream_http_403", "upstream_http_429"})
 
 
 class VidsDispatchError(GatewayError):
@@ -61,6 +65,8 @@ class VidsProviderDispatcher:
         # Routing observations belong to this binding, never to Flow credits.
         self._quota_observations: dict[tuple[int, str], QuotaObservation] = {}
         self._quota_reads: dict[tuple[int, str], object] = {}
+        # One logical pool key at a time; accounts and other keys stay concurrent.
+        self._pool_key_locks: dict[str, asyncio.Lock] = {}
         self.account_policy = None
 
     async def _observe_receipt(self, token_id, gateway, identifier, *, body=None, started_at=None):
@@ -569,11 +575,15 @@ class VidsProviderDispatcher:
 
 
 class VidsPoolDispatcher:
-    """Select one eligible account once, then preserve that receipt affinity.
+    """Select eligible accounts automatically and preserve every physical receipt.
 
-    New requests rotate eligible accounts independently for each media kind.
-    Public and admin routers share the rotation. Once claimed, a receipt
-    remains on its original account, including failed and unknown results.
+    A new unbound pool request may move to another eligible account only after
+    a confirmed generate-side 401/403/429 refusal. Each attempt remains a real
+    receipt on the account that sent it; the rejected receipt stores a bounded
+    internal successor link so the original key can replay the final attempt.
+
+    Public/admin routers share this wrapper. Explicit account routes and
+    provider-resource-bound source operations stay on their original account.
     """
 
     def __init__(self, dispatcher: VidsProviderDispatcher):
@@ -587,7 +597,174 @@ class VidsPoolDispatcher:
             )
         return owners[0] if owners else None
 
-    async def _eligible(self, kind):
+    def _receipt_record(self, token_id, identifier):
+        if token_id in self.dispatcher._accounts:
+            return self.dispatcher._account(token_id).gateway.get(identifier)
+        root = self.dispatcher.unavailable_receipt_roots.get(token_id)
+        if root is None:
+            raise VidsDispatchError(404, "not_found", "Generation not found")
+        return VidsGateway(None, root).get(identifier)
+
+    @staticmethod
+    def _successor_key(base_id, attempt):
+        base_hash = base_id.removeprefix("vids_")
+        return "vids-pool-" + hashlib.sha256((base_hash + ":" + str(attempt)).encode()).hexdigest()
+
+    @staticmethod
+    def _receipt_id(idempotency_key):
+        return "vids_" + hashlib.sha256(idempotency_key.encode()).hexdigest()
+
+    @staticmethod
+    def _max_attempts():
+        return max(1, min(int(config.flow_max_retries), POOL_CHAIN_MAX_ATTEMPTS))
+
+    @staticmethod
+    def _can_failover(record):
+        if not isinstance(record, dict) or record.get("status") != "failed":
+            return False
+        if record.get("error_operation") != "generate":
+            return False
+        if record.get("error") not in _POOL_FAILOVER_ERRORS:
+            return False
+        upstream = record.get("upstream_error")
+        return not (
+            isinstance(upstream, dict) and upstream.get("reason") == "LANGUAGE_NOT_SUPPORTED"
+        )
+
+    def _validate_request_hash(self, owner, record, body):
+        expected = record.get("request_hash")
+        if not isinstance(expected, str):
+            if record.get(POOL_SUCCESSOR_FIELD) is not None:
+                raise VidsDispatchError(
+                    409, "receipt_chain_invalid", "Vids receipt chain cannot be verified"
+                )
+            return
+        account = self.dispatcher._accounts.get(owner)
+        if account is not None:
+            normalized = account.gateway.normalize(body)
+        else:
+            root = self.dispatcher.unavailable_receipt_roots.get(owner)
+            if root is None:
+                raise VidsDispatchError(404, "not_found", "Generation not found")
+            normalized = VidsGateway(None, root).normalize(body)
+        digest = hashlib.sha256(json.dumps(normalized, sort_keys=True).encode()).hexdigest()
+        if digest != expected:
+            raise VidsDispatchError(
+                409, "idempotency_conflict", "Idempotency-Key has different parameters"
+            )
+
+    def _successor(self, record, base_id, base_key, current_owner, attempted, expected_attempt):
+        link = record.get(POOL_SUCCESSOR_FIELD)
+        if link is None:
+            return None
+        if not isinstance(link, dict) or set(link) != {
+            "attempt",
+            "base_receipt_id",
+            "token_id",
+            "idempotency_key",
+            "receipt_id",
+        }:
+            raise VidsDispatchError(409, "receipt_chain_invalid", "Vids receipt chain is invalid")
+        attempt = link.get("attempt")
+        base_receipt_id = link.get("base_receipt_id")
+        token_id = link.get("token_id")
+        key = link.get("idempotency_key")
+        receipt_id = link.get("receipt_id")
+        if (
+            type(attempt) is not int
+            or attempt != expected_attempt
+            or not 2 <= attempt <= POOL_CHAIN_MAX_ATTEMPTS
+            or not isinstance(base_receipt_id, str)
+            or not re.fullmatch(r"vids_[a-f0-9]{64}", base_receipt_id)
+            or (base_key is not None and base_receipt_id != base_id)
+            or type(token_id) is not int
+            or token_id <= 0
+            or token_id == current_owner
+            or token_id in attempted
+            or not isinstance(key, str)
+            or len(key) > 200
+            or key != self._successor_key(base_receipt_id, attempt)
+            or not isinstance(receipt_id, str)
+            or receipt_id != self._receipt_id(key)
+            or not self._can_failover(record)
+        ):
+            raise VidsDispatchError(409, "receipt_chain_invalid", "Vids receipt chain is invalid")
+        if base_key is None:
+            base_owner = self._owner_or_error(base_receipt_id)
+            self._receipt_record(base_owner, base_receipt_id)
+        return link
+
+    def _chain_state(
+        self, identifier, *, base_key, base_owner=None, base_record=None, base_id=None
+    ):
+        current_owner = base_owner if base_owner is not None else self._owner_or_error(identifier)
+        current_key = base_key
+        current_attempt = 1
+        current_record = base_record or self._receipt_record(current_owner, identifier)
+        if base_key is None:
+            hint = current_record.get(POOL_SUCCESSOR_FIELD)
+            if isinstance(hint, dict) and type(hint.get("attempt")) is int:
+                current_attempt = max(1, hint["attempt"] - 1)
+        attempted = {current_owner}
+        seen = {identifier}
+        chain_base = base_id if base_key is not None else None
+        while True:
+            link = self._successor(
+                current_record,
+                chain_base or identifier,
+                base_key if chain_base is not None else None,
+                current_owner,
+                attempted,
+                current_attempt + 1,
+            )
+            if link is None:
+                return {
+                    "terminal_owner": current_owner,
+                    "terminal_record": current_record,
+                    "terminal_key": current_key,
+                    "resume": None,
+                    "attempted": attempted,
+                    "attempt": current_attempt,
+                }
+            next_id = link["receipt_id"]
+            next_owner = link["token_id"]
+            chain_base = link["base_receipt_id"]
+            if base_key is None and chain_base not in seen:
+                base_owner = self._owner_or_error(chain_base)
+                self._receipt_record(base_owner, chain_base)
+                attempted.add(base_owner)
+                seen.add(chain_base)
+            if next_id in seen:
+                raise VidsDispatchError(
+                    409, "receipt_chain_invalid", "Vids receipt chain contains a cycle"
+                )
+            owners = self.dispatcher._receipt_owners(next_id)
+            if len(set(owners)) > 1:
+                raise VidsDispatchError(
+                    409, "account_affinity_conflict", "Receipt belongs to multiple accounts"
+                )
+            if not owners:
+                return {
+                    "terminal_owner": current_owner,
+                    "terminal_record": current_record,
+                    "terminal_key": current_key,
+                    "resume": link,
+                    "attempted": attempted,
+                    "attempt": current_attempt,
+                }
+            if owners[0] != next_owner:
+                raise VidsDispatchError(
+                    409, "receipt_chain_invalid", "Vids receipt successor owner changed"
+                )
+            seen.add(next_id)
+            current_owner = owners[0]
+            current_key = link["idempotency_key"]
+            current_attempt = link["attempt"]
+            current_record = self._receipt_record(current_owner, next_id)
+            attempted.add(current_owner)
+
+    async def _eligible(self, kind, exclude=None):
+        excluded = exclude or set()
         busy = False
         exhausted = False
         protected = False
@@ -601,6 +778,8 @@ class VidsPoolDispatcher:
             identifier for identifier in candidates if identifier <= last
         ]
         for token_id in candidates:
+            if token_id in excluded:
+                continue
             try:
                 account = self.dispatcher._account(token_id)
             except VidsDispatchError as error:
@@ -668,17 +847,129 @@ class VidsPoolDispatcher:
             )
         raise VidsDispatchError(503, "session_unavailable", "No Vids account is available")
 
-    async def generate(self, _token_id, body, idempotency_key):
-        if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 200:
-            # Preserve the explicit dispatcher error before any account lookup.
-            raise VidsDispatchError(
-                400, "idempotency_required", "Idempotency-Key must contain 1 to 200 characters"
+    async def _reserve_new(self, kind, body, identifier, exclude):
+        async with self.dispatcher._pool_selection_lock:
+            owner = self._claimed_owner(identifier)
+            if owner is not None:
+                raise VidsDispatchError(
+                    409, "account_affinity_conflict", "Generation belongs to another Vids account"
+                )
+            selected = await self._eligible(kind, exclude=exclude)
+            self.dispatcher._account(selected).gateway.normalize(body)
+            self.dispatcher._claim_receipt(selected, identifier)
+            self.dispatcher._pool_last_selected[kind] = selected
+            self.dispatcher._pool_pending.add(selected)
+            return selected
+
+    async def _reserve_fixed(self, kind, owner, identifier):
+        async with self.dispatcher._pool_selection_lock:
+            claimed = self._claimed_owner(identifier)
+            if claimed is not None and claimed != owner:
+                raise VidsDispatchError(
+                    409, "account_affinity_conflict", "Generation belongs to another Vids account"
+                )
+            self.dispatcher._claim_receipt(owner, identifier)
+            self.dispatcher._pool_pending.add(owner)
+            self.dispatcher._pool_last_selected[kind] = owner
+
+    async def _run_reserved(self, owner, body, idempotency_key):
+        try:
+            return await self.dispatcher.generate(owner, body, idempotency_key)
+        finally:
+            self.dispatcher._pool_pending.discard(owner)
+
+    def _write_successor(self, owner, parent_id, link):
+        record = self._receipt_record(owner, parent_id)
+        if not self._can_failover(record):
+            raise VidsDispatchError(409, "receipt_chain_invalid", "Vids receipt chain is invalid")
+        existing = record.get(POOL_SUCCESSOR_FIELD)
+        if existing is not None:
+            if existing != link:
+                raise VidsDispatchError(
+                    409, "receipt_chain_invalid", "Vids receipt successor already differs"
+                )
+            return
+        account = self.dispatcher._accounts.get(owner)
+        if account is None:
+            raise VidsDispatchError(503, "session_unavailable", "Vids session is unavailable")
+        record[POOL_SUCCESSOR_FIELD] = link
+        account.gateway._save(record)
+
+    async def _continue_failover(
+        self,
+        *,
+        body,
+        kind,
+        base_id,
+        current_owner,
+        current_id,
+        current_attempt,
+        attempted,
+        last_result,
+    ):
+        while current_attempt < self._max_attempts() and self._can_failover(last_result):
+            attempted.add(current_owner)
+            next_attempt = current_attempt + 1
+            next_key = self._successor_key(base_id, next_attempt)
+            next_id = self._receipt_id(next_key)
+            try:
+                next_owner = await self._reserve_new(kind, body, next_id, attempted)
+            except (GatewayError, VidsDispatchError):
+                return last_result
+            link = {
+                "attempt": next_attempt,
+                "base_receipt_id": base_id,
+                "token_id": next_owner,
+                "idempotency_key": next_key,
+                "receipt_id": next_id,
+            }
+            try:
+                self._write_successor(current_owner, current_id, link)
+            except Exception:
+                self.dispatcher._pool_pending.discard(next_owner)
+                self.dispatcher._claims.pop(next_id.removeprefix("vids_"), None)
+                return last_result
+            current_owner = next_owner
+            current_id = next_id
+            current_attempt = next_attempt
+            try:
+                last_result = await self._run_reserved(next_owner, body, next_key)
+            except (GatewayError, VidsDispatchError):
+                return last_result
+        return last_result
+
+    async def _replay_chain(self, owner, body, idempotency_key, generation_id, kind):
+        record = self._receipt_record(owner, generation_id)
+        self._validate_request_hash(owner, record, body)
+        state = self._chain_state(
+            generation_id,
+            base_key=idempotency_key,
+            base_owner=owner,
+            base_record=record,
+            base_id=generation_id,
+        )
+        if state["resume"] is None:
+            return await self.dispatcher.generate(
+                state["terminal_owner"], body, state["terminal_key"]
             )
-        kind = body.get("kind") if isinstance(body, dict) else None
-        if not isinstance(kind, str) or kind not in {"image", "video", "speech"}:
-            raise VidsDispatchError(400, "invalid_kind", "Unsupported Vids generation kind")
-        key_hash = hashlib.sha256(idempotency_key.encode()).hexdigest()
-        generation_id = "vids_" + key_hash
+        link = state["resume"]
+        try:
+            await self._reserve_fixed(kind, link["token_id"], link["receipt_id"])
+            result = await self._run_reserved(link["token_id"], body, link["idempotency_key"])
+        except (GatewayError, VidsDispatchError):
+            return VidsGateway.public(state["terminal_record"])
+        return await self._continue_failover(
+            body=body,
+            kind=kind,
+            base_id=generation_id,
+            current_owner=link["token_id"],
+            current_id=link["receipt_id"],
+            current_attempt=link["attempt"],
+            attempted=state["attempted"],
+            last_result=result,
+        )
+
+    async def _generate_locked(self, body, idempotency_key, kind, generation_id):
         owner = self._claimed_owner(generation_id)
         if kind == "image" and isinstance(body, dict):
             if "shape_id" in body:
@@ -707,26 +998,65 @@ class VidsPoolDispatcher:
                     409, "account_affinity_conflict", "Source belongs to another Vids account"
                 )
             owner = source_owner
-        reserved = False
-        if owner is None:
-            async with self.dispatcher._pool_selection_lock:
-                owner = self._claimed_owner(generation_id)
-                if owner is None:
-                    selected = await self._eligible(kind)
-                    # Explicit account routes may claim this key during the DB read.
-                    owner = self._claimed_owner(generation_id)
-                    if owner is None:
-                        self.dispatcher._account(selected).gateway.normalize(body)
-                        self.dispatcher._claim_receipt(selected, generation_id)
-                        owner = selected
-                        self.dispatcher._pool_last_selected[kind] = owner
-                        self.dispatcher._pool_pending.add(owner)
-                        reserved = True
-        try:
+
+        if owner is not None:
+            if self._owners(generation_id) is not None:
+                return await self._replay_chain(owner, body, idempotency_key, generation_id, kind)
             return await self.dispatcher.generate(owner, body, idempotency_key)
-        finally:
-            if reserved:
-                self.dispatcher._pool_pending.discard(owner)
+
+        fixed_unbound = (
+            kind == "video"
+            and isinstance(body, dict)
+            and body.get("mode")
+            in {
+                "edit",
+                "extend",
+                "upscale",
+            }
+        )
+        current_owner = await self._reserve_new(kind, body, generation_id, set())
+        last_result = await self._run_reserved(current_owner, body, idempotency_key)
+        if fixed_unbound:
+            return last_result
+        return await self._continue_failover(
+            body=body,
+            kind=kind,
+            base_id=generation_id,
+            current_owner=current_owner,
+            current_id=generation_id,
+            current_attempt=1,
+            attempted=set(),
+            last_result=last_result,
+        )
+
+    async def generate(self, _token_id, body, idempotency_key):
+        if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 200:
+            # Preserve the explicit dispatcher error before any account lookup.
+            raise VidsDispatchError(
+                400, "idempotency_required", "Idempotency-Key must contain 1 to 200 characters"
+            )
+        kind = body.get("kind") if isinstance(body, dict) else None
+        if not isinstance(kind, str) or kind not in {"image", "video", "speech"}:
+            raise VidsDispatchError(400, "invalid_kind", "Unsupported Vids generation kind")
+        key_hash = hashlib.sha256(idempotency_key.encode()).hexdigest()
+        generation_id = "vids_" + key_hash
+        lock = self.dispatcher._pool_key_locks.setdefault(key_hash, asyncio.Lock())
+        async with lock:
+            return await self._generate_locked(body, idempotency_key, kind, generation_id)
+
+    def latest_receipt(self, generation_id):
+        """Read the last real receipt in a recorded successor chain.
+
+        Read-only: validates account, ordinal, deterministic child id and link
+        shape; never creates a receipt, follows a new attempt or calls upstream.
+        A link whose child was never sent resolves to its last sent parent.
+        """
+        owner = self._owner_or_error(generation_id)
+        record = self._receipt_record(owner, generation_id)
+        state = self._chain_state(
+            generation_id, base_key=None, base_owner=owner, base_record=record
+        )
+        return state["terminal_record"]
 
     async def document_images(self, _token_id, scenes=False):
         data = []

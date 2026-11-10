@@ -96,6 +96,12 @@ const history = {
             stage: 'submit',
             started_at: '2026-11-09T01:00:03Z',
             duration_ms: 4500,
+            captcha_ms: 1200,
+            captcha_to_submit_ms: 230,
+            submit_ms: 700,
+            submission_count: 1,
+            http_status: 200,
+            rpc_code: 8,
             error_code: 'PUBLIC_ERROR_USER_QUOTA_REACHED',
             error: 'Synthetic upstream quota failure',
             rule_keyword: 'PUBLIC_ERROR_USER_QUOTA_REACHED',
@@ -210,6 +216,11 @@ try {
     assert.match(await second.innerText(), /LIMIT/)
     assert.match(await second.innerText(), /账号冷却 24 小时/)
     assert.match(await second.innerText(), /切换账号/)
+    assert.match(await second.innerText(), /取码.*1\.20 s/s)
+    assert.match(await second.innerText(), /取码→提交.*0\.23 s/s)
+    assert.match(await second.innerText(), /提交响应.*0\.70 s/s)
+    assert.match(await second.innerText(), /HTTP 200.*RPC 8/s)
+    assert.doesNotMatch(await first.innerText(), /取码→提交|提交响应|HTTP 200|RPC 8/)
     assert.match(await attempts.locator('.attempt-item').nth(2).innerText(), /second@example.test/)
     await attempts.scrollIntoViewIfNeeded()
     await page.screenshot({ path: resolve(output, 'desktop-attempts.png'), fullPage: true })

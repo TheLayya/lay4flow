@@ -31,7 +31,7 @@ except ImportError:
 
 from src.api.vids import create_vids_app
 from src.services.vids.client import VidsTransportError
-from src.services.vids.gateway import VidsGateway
+from src.services.vids.gateway import CROSS_PRODUCT_HINT, SPEECH_LANGUAGE_HINT, VidsGateway
 
 BODY = {"model": "vids-video", "prompt": "\n A blue boat moves slowly. \t"}
 MP4 = mp4(3)
@@ -636,6 +636,34 @@ class VidsVideosAPITests(unittest.IsolatedAsyncioTestCase):
         response = await self.http.get(f"/v1/videos/{secret_error}")
         self.assertNotIn("private", response.text)
         self.assertEqual(response.json()["error"]["code"], "generation_failed")
+        self.assert_no_submission()
+
+    async def test_known_upstream_reason_is_explained_without_raw_provider_content(self):
+        video_id = self.save(
+            "reason-video",
+            status="failed",
+            error="upstream_http_403",
+            upstream_error={
+                "status": "PERMISSION_DENIED",
+                "reason": "CROSS_PRODUCT_SHARING_DISABLED",
+                "message": "private provider body token=secret",
+            },
+        )
+        response = await self.http.get(f"/v1/videos/{video_id}")
+        result = response.json()
+        self.assertEqual(result["error"]["code"], "upstream_http_403")
+        self.assertIn("CROSS_PRODUCT_SHARING_DISABLED", result["error"]["message"])
+        self.assertIn(CROSS_PRODUCT_HINT, result["error"]["message"])
+        self.assertNotIn("private", response.text)
+        language_id = self.save(
+            "reason-video-language",
+            status="failed",
+            error="upstream_http_400",
+            upstream_error={"status": "INVALID_ARGUMENT", "reason": "LANGUAGE_NOT_SUPPORTED"},
+        )
+        language = (await self.http.get(f"/v1/videos/{language_id}")).json()
+        self.assertIn("LANGUAGE_NOT_SUPPORTED", language["error"]["message"])
+        self.assertNotIn(SPEECH_LANGUAGE_HINT, language["error"]["message"])
         self.assert_no_submission()
 
     async def test_other_media_insert_operations_and_unsafe_ids_are_not_videos(self):

@@ -68,6 +68,29 @@ class VidsOutcomeStorageTests(unittest.IsolatedAsyncioTestCase):
             (flow.image_count, flow.error_count, flow.consecutive_error_count), (0, 0, 0)
         )
 
+    async def test_safe_upstream_reason_is_logged_without_raw_provider_content(self):
+        record = self.receipt(
+            "safe-reason",
+            status="failed",
+            error="upstream_http_400",
+            error_operation="generate",
+            upstream_error={
+                "status": "INVALID_ARGUMENT",
+                "reason": "LANGUAGE_NOT_SUPPORTED",
+                "message": "private prompt https://private.invalid token=secret",
+                "metadata": {"cookie": "private-cookie"},
+            },
+        )
+        await self.repository.record_receipt(self.token_id, record, outcome="failure")
+        log = (await self.db.get_logs(include_payload=True))[0]
+        payload = json.loads(log["response_body"])
+        self.assertEqual(payload["error"], {"code": "upstream_http_400"})
+        self.assertEqual(
+            payload["upstream_error"],
+            {"status": "INVALID_ARGUMENT", "reason": "LANGUAGE_NOT_SUPPORTED"},
+        )
+        self.assertNotIn("private", log["response_body"])
+
     async def test_pending_and_download_recovery_updates_same_log_without_strikes(self):
         for status in ("generating", "received", "download_failed"):
             result = await self.repository.record_receipt(

@@ -14,7 +14,7 @@ from ...core.models import ChatCompletionRequest
 from ...services.studio_jobs import StudioGenerationJobs, StudioJobError
 from ...services.studio_media import StudioMediaArchive, StudioMediaError
 from ...services.vids.dispatcher import VidsPoolDispatcher
-from ...services.vids.gateway import GatewayError, VidsGateway
+from ...services.vids.gateway import GatewayError, VidsGateway, upstream_failure_text
 from .. import routes
 from ..admin_schemas import ArchiveMediaRequest
 from ..openai_common import APIError, read_json_body, safe_error
@@ -93,10 +93,10 @@ def create_studio_router(verify_token: Callable, get_vids=None):
             raise StudioJobError("Vids 服务尚未就绪", 503)
         return VidsPoolDispatcher(get_vids())
 
-    def vids_receipt(pool, identifier):
-        result = VidsGateway.public(pool.get(0, identifier))
+    def vids_receipt(record):
+        result = VidsGateway.public(record)
         prefix = "/api/admin/vids"
-        result["receipt_url"] = prefix + "/v1/vids/generations/" + identifier
+        result["receipt_url"] = prefix + "/v1/vids/generations/" + result["id"]
         result["retry_download_url"] = (
             result["receipt_url"] + "/download"
             if result["status"] in {"received", "download_failed"} or result.get("media_expired")
@@ -111,17 +111,24 @@ def create_studio_router(verify_token: Callable, get_vids=None):
 
     def refreshed_receipt(item):
         try:
-            receipt = vids_receipt(vids_pool(), item["receipt"])
+            receipt = vids_receipt(vids_pool().latest_receipt(item["receipt"]))
         except (GatewayError, StudioJobError):
             return None
-        return {
-            "status": receipt["status"],
-            "vids_receipt": receipt,
-            "message": "成品缓存已过期，可恢复原下载"
+        message = (
+            "成品缓存已过期，可恢复原下载"
             if receipt.get("media_expired")
             else "作品已生成"
             if receipt["status"] == "completed"
-            else receipt["error"] or receipt["status"],
+            else receipt["error"] or receipt["status"]
+        )
+        detail = upstream_failure_text(receipt)
+        if detail and receipt["status"] != "completed":
+            message = f"{message}；上游原因：{detail}"
+        return {
+            "status": receipt["status"],
+            "receipt": receipt["id"],
+            "vids_receipt": receipt,
+            "message": message,
         }
 
     async def execute(provider, body, key, base_url):
@@ -138,14 +145,20 @@ def create_studio_router(verify_token: Callable, get_vids=None):
                         raise StudioJobError(safe_error(str(error))) from None
                     yield {"message": "账号正在执行其他任务，等待可用额度槽位"}
                     await asyncio.sleep(2)
-            receipt = vids_receipt(pool, result["id"])
+            receipt = vids_receipt(pool.get(0, result["id"]))
+            message = (
+                "作品已生成"
+                if receipt["status"] == "completed"
+                else receipt["error"] or receipt["status"]
+            )
+            detail = upstream_failure_text(receipt)
+            if detail and receipt["status"] != "completed":
+                message = f"{message}；上游原因：{detail}"
             yield {
                 "status": receipt["status"],
                 "vids_receipt": receipt,
                 "receipt": receipt["id"],
-                "message": "作品已生成"
-                if receipt["status"] == "completed"
-                else receipt["error"] or receipt["status"],
+                "message": message,
             }
             return
         try:

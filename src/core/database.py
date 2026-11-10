@@ -200,6 +200,12 @@ class Database:
         """Update token fields"""
         return await self._accounts.update_token(token_id, **kwargs)
 
+    async def update_submission_proxy_modes(
+        self, token_ids: List[int], mode: str
+    ) -> List[Dict[str, Any]]:
+        """Apply one strategy-only transaction to explicit account IDs."""
+        return await self._accounts.update_submission_proxy_modes(token_ids, mode)
+
     async def update_token_if_credentials_match(
         self,
         token_id: int,

@@ -2,6 +2,7 @@
 
 import json
 import re
+import secrets
 import time
 from typing import Any
 from urllib.parse import urljoin, urlsplit
@@ -252,6 +253,8 @@ def _check_response(response: Any, step: str) -> None:
         error.submission_rejected = status in {403, 429} and step in {
             "flow_generate_image",
             "flow_generate_video",
+            "flow_upload_image",
+            "flow_upsample_image",
         }
         raise error
 
@@ -279,6 +282,13 @@ def _bootstrap(html: str) -> dict[str, Any]:
     authuser = data.get("QrtxK", "")
     if not isinstance(authuser, str) or (authuser and not authuser.isdecimal()):
         raise FlowRPCError("account_probe_error", "flow_bootstrap")
+    # Match the locale of the page that supplied the session/build metadata.
+    # Never infer it from account identity or reuse a solver's environment.
+    language = re.search(
+        r"<html\b[^>]*\blang\s*=\s*['\"]([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)['\"]", html, re.I
+    )
+    if language:
+        data["_page_locale"] = language[1]
     return data
 
 
@@ -337,7 +347,7 @@ def _rpc_payload(text: str, rpcid: str, step: str) -> Any:
                         errors.append(FlowRPCError("account_probe_error", step))
                     else:
                         raise ValueError
-        if xsrf and not matches:
+        if xsrf and not has_payload and not matches:
             auth_error = next((error for error in errors if error.reason == "login_required"), None)
             if auth_error is not None:
                 raise auth_error
@@ -376,6 +386,7 @@ async def _rpc(
     step: str,
     timeout_ms: int = 20000,
     source_path: str = "/",
+    submit_observer: Any = None,
 ):
     source_path = _source_path(source_path)
     form = {
@@ -385,27 +396,44 @@ async def _rpc(
             separators=(",", ":"),
         ),
     }
+    # Match the frontend's per-page sequence; an XSRF replay retains this ID.
+    previous_id = bootstrap.get("_request_counter")
+    request_counter = (
+        previous_id + 100_000 if type(previous_id) is int else secrets.randbelow(90_000) + 10_000
+    )
+    bootstrap["_request_counter"] = request_counter
+    request_id = str(request_counter)
+    locale = bootstrap.get("_page_locale") or "en"
     try:
         for attempt in range(2):
-            response = await request.post(
-                FLOW_ORIGIN + bootstrap["eptZe"] + "data/batchexecute",
-                params={
-                    "rpcids": rpcid,
-                    "source-path": source_path,
-                    "f.sid": bootstrap["FdrFJe"],
-                    "bl": bootstrap["cfb2h"],
-                    "authuser": bootstrap.get("QrtxK") or "0",
-                    "rt": "c",
-                },
-                form=dict(form),
-                headers={
-                    "Origin": FLOW_ORIGIN,
-                    "Referer": FLOW_ORIGIN + source_path,
-                    "X-Same-Domain": "1",
-                },
-                timeout=timeout_ms,
-                max_redirects=0,
-            )
+            _observe_submit(submit_observer, "started")
+            response = None
+            try:
+                response = await request.post(
+                    FLOW_ORIGIN + bootstrap["eptZe"] + "data/batchexecute",
+                    params={
+                        "rpcids": rpcid,
+                        "source-path": source_path,
+                        "f.sid": bootstrap["FdrFJe"],
+                        "bl": bootstrap["cfb2h"],
+                        "authuser": bootstrap.get("QrtxK") or "0",
+                        "hl": locale,
+                        "_reqid": request_id,
+                        "rt": "c",
+                    },
+                    form=dict(form),
+                    headers={
+                        "Origin": FLOW_ORIGIN,
+                        "Referer": FLOW_ORIGIN + source_path,
+                        "X-Same-Domain": "1",
+                        "Accept": "*/*",
+                        "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+                    },
+                    timeout=timeout_ms,
+                    max_redirects=0,
+                )
+            finally:
+                _observe_submit(submit_observer, "finished", getattr(response, "status", None))
             _check_response(response, step)
             try:
                 return _rpc_payload(await response.text(), rpcid, step)
@@ -418,6 +446,15 @@ async def _rpc(
         raise
     except Exception:
         raise FlowRPCError("transient_error", step) from None
+
+
+def _observe_submit(observer, event, http_status=None):
+    """Trusted request-local timing only; diagnostics cannot change a write result."""
+    if observer is not None:
+        try:
+            observer(event, time.monotonic(), http_status)
+        except Exception:
+            pass
 
 
 async def read_flow_session(context: Any) -> dict[str, Any]:
@@ -439,6 +476,16 @@ async def read_flow_session(context: Any) -> dict[str, Any]:
     if not isinstance(payload, list) or not payload:
         raise FlowRPCError("credits_invalid", "flow_credits")
     credits = payload[0]
+    # Proto numeric field1 is omitted/null for zero. The current frontend's
+    # GetCredits getter returns0 for [null, tier, sku, serviceTier, ...].
+    # Retain rejection of an otherwise unstructured [null] response.
+    if (
+        credits is None
+        and len(payload) > 1
+        and type(payload[1]) is int
+        and payload[1] in _PAYGATE_TIERS
+    ):
+        credits = 0
     if isinstance(credits, bool) or not isinstance(credits, int) or credits < 0:
         raise FlowRPCError("credits_invalid", "flow_credits")
     tier = payload[1] if len(payload) > 1 else None
@@ -458,6 +505,7 @@ async def flow_rpc(
     timeout_ms: int = 20000,
     source_path: str = "/",
     expected_email: str | None = None,
+    submit_observer: Any = None,
 ) -> Any:
     """Call one current Flow RPC using the browser context's Cookie/proxy jar."""
     if not isinstance(network_step, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", network_step):
@@ -467,6 +515,32 @@ async def flow_rpc(
     source_path = _source_path(source_path)
     if type(timeout_ms) is not int or timeout_ms <= 0:
         raise FlowRPCError("account_probe_error", network_step)
+    bootstrap = await prepare_flow_rpc(
+        context, source_path=source_path, expected_email=expected_email
+    )
+    cache = getattr(context, "flow_bootstrap_cache", None)
+    try:
+        return await _rpc(
+            context.request,
+            bootstrap,
+            rpcid,
+            payload,
+            network_step,
+            timeout_ms,
+            source_path,
+            submit_observer=submit_observer,
+        )
+    except FlowRPCError:
+        if isinstance(cache, dict):
+            cache.pop(source_path, None)
+        raise
+
+
+async def prepare_flow_rpc(
+    context: Any, *, source_path: str = "/", expected_email: str | None = None
+) -> dict[str, Any]:
+    """Prepare a verified project bootstrap before acquiring a short-lived solve."""
+    source_path = _source_path(source_path)
     cache = getattr(context, "flow_bootstrap_cache", None)
     cached = cache.get(source_path) if isinstance(cache, dict) else None
     if cached and time.monotonic() - cached[0] < 60:
@@ -486,11 +560,4 @@ async def flow_rpc(
             cache[source_path] = (time.monotonic(), bootstrap)
     if expected_email is not None and not same_google_identity(bootstrap["oPEP7c"], expected_email):
         raise FlowRPCError("identity_mismatch", "flow_bootstrap")
-    try:
-        return await _rpc(
-            context.request, bootstrap, rpcid, payload, network_step, timeout_ms, source_path
-        )
-    except FlowRPCError:
-        if isinstance(cache, dict):
-            cache.pop(source_path, None)
-        raise
+    return bootstrap

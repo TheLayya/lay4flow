@@ -15,12 +15,86 @@ from ..flow.angular_images import (
     parse_image_response,
     resolve_image_usage,
 )
-from ..flow.flow_rpc import FlowRPCError, flow_rpc
+from ..flow.flow_rpc import FlowRPCError, flow_rpc, prepare_flow_rpc
 from ..flow.remote_captcha import RemoteCaptchaError
 from ..generation_attempts import CURRENT_ATTEMPTS, is_confirmed_flow_rejection
 from ..project_pool import flow_session_binding
 from .flow_session import account_http_session
 from .token_account_probe import TokenManagerAccountProbe
+
+
+def _milliseconds(seconds):
+    return max(0, min(86_400_000, int(seconds * 1000)))
+
+
+class _SubmissionDiagnostics:
+    """Numeric per-attempt evidence; never retain a token, cookie or session ID."""
+
+    def __init__(self, record=None, *, attach_budget=True):
+        budget = CURRENT_ATTEMPTS.get()
+        self.targets = [record] if record is not None else []
+        if attach_budget and budget is not None and budget.history:
+            self.targets.append(budget.history[-1])
+        self.solved_at = None
+        self.post_started = None
+        self.submit_seconds = 0
+        self.count = 0
+        self.state = "not_submitted"
+        self.set(submission_count=0, submission_state=self.state)
+
+    def set(self, **values):
+        for target in self.targets:
+            target.update(values)
+
+    def captcha_finished(self, started, valid):
+        now = time.monotonic()
+        self.set(captcha_ms=_milliseconds(now - started))
+        if valid:
+            self.solved_at = now
+
+    def observe(self, event, now, http_status=None):
+        if event == "started":
+            if self.count == 0 and self.solved_at is not None:
+                self.set(captcha_to_submit_ms=_milliseconds(now - self.solved_at))
+            self.count += 1
+            self.post_started = now
+            self.state = "unknown"
+            self.set(submission_count=self.count, submission_state=self.state)
+        elif event == "finished" and self.post_started is not None:
+            self.submit_seconds += max(0, now - self.post_started)
+            self.post_started = None
+            self.set(submit_ms=_milliseconds(self.submit_seconds))
+            if type(http_status) is int and 100 <= http_status <= 599:
+                self.set(http_status=http_status)
+
+    def accepted(self):
+        self.state = "accepted"
+        self.set(submission_state=self.state)
+
+    def failed(self, error):
+        if is_confirmed_flow_rejection(error) or (
+            isinstance(error, FlowRPCError)
+            and error.submission_rejected
+            and error.network_step in {"flow_upload_image", "flow_upsample_image"}
+        ):
+            self.state = "rejected"
+        self.set(submission_state=self.state)
+        public = error.public_error if isinstance(error, FlowRPCError) else None
+        if public:
+            self.set(public_error=public)
+        if isinstance(error, FlowRPCError) and error.rpc_code is not None:
+            self.set(rpc_code=error.rpc_code)
+
+    async def release(self, client, lease):
+        if not lease:
+            return
+        if self.state == "accepted":
+            await client._notify_browser_captcha_request_finished(lease)
+        else:
+            reason = {"rejected": "upstream_rejected", "unknown": "submission_unknown"}.get(
+                self.state, "not_submitted"
+            )
+            await client._notify_browser_captcha_error(lease, error_reason=reason)
 
 
 class FlowProfileGeneration:
@@ -44,8 +118,8 @@ class FlowProfileGeneration:
         self._required_video_stages = [dict(stage) for stage in stages]
 
     @asynccontextmanager
-    async def session(self):
-        async with self._context() as current:
+    async def session(self, *, proxy_url=None):
+        async with self._context(proxy_url=proxy_url) as current:
             self._request_context = current
             try:
                 yield self
@@ -88,7 +162,7 @@ class FlowProfileGeneration:
                 raise error
 
     @asynccontextmanager
-    async def _context(self, *, read_only=False):
+    async def _context(self, *, read_only=False, proxy_url=None):
         proxy = await self.tokens.resolve_account_proxy(self.token) or ""
         await self._check_binding(proxy, read_only=read_only)
         if self._request_context is not None:
@@ -103,7 +177,9 @@ class FlowProfileGeneration:
         ) != flow_session_binding(self.token, read_only=read_only):
             raise FlowRPCError("account_changed", "flow_generation")
         self.token.google_cookies = current.google_cookies
-        async with account_http_session(self.tokens, self.token, proxy) as context:
+        # Guards keep the saved login binding; only this task's transport changes exit.
+        request_proxy = proxy if proxy_url is None else proxy_url
+        async with account_http_session(self.tokens, self.token, request_proxy) as context:
             yield context, proxy
 
     async def _verified(self, context):
@@ -162,12 +238,22 @@ class FlowProfileGeneration:
                 browser_id = None
                 record = {"attempt": attempt + 1, "recaptcha_ok": False}
                 trace["generation_attempts"].append(record)
+                diagnostic = _SubmissionDiagnostics(record)
                 try:
+                    await prepare_flow_rpc(
+                        context,
+                        source_path=f"/project/{project_id}",
+                        expected_email=self.token.email,
+                    )
                     if progress:
                         await progress("solving_image_captcha", 38)
-                    captcha, browser_id = await self.client._get_recaptcha_token(
-                        project_id, action="IMAGE_GENERATION", token_id=self.token.id
-                    )
+                    captcha_started = time.monotonic()
+                    try:
+                        captcha, browser_id = await self.client._get_recaptcha_token(
+                            project_id, action="IMAGE_GENERATION", token_id=self.token.id
+                        )
+                    finally:
+                        diagnostic.captcha_finished(captcha_started, browser_id is not None)
                     record["recaptcha_ok"] = bool(captcha)
                     if not captcha:
                         raise FlowRPCError("captcha_failed", "flow_captcha")
@@ -195,14 +281,17 @@ class FlowProfileGeneration:
                         network_step="flow_generate_image",
                         timeout_ms=max(20000, int(config.flow_image_request_timeout * 1000)),
                         source_path=f"/project/{project_id}",
+                        submit_observer=diagnostic.observe,
                     )
                     result = parse_image_response(response)
+                    diagnostic.accepted()
                     record["success"] = True
                     if budget is not None:
                         budget.finish("success", next_action="completed")
                     trace["final_success_attempt"] = attempt + 1
                     return result, batch_id, trace
                 except Exception as error:
+                    diagnostic.failed(error)
                     if budget is not None:
                         budget.finish("failed", error, next_action="stop")
                     record.update(success=False, error=str(error)[:240])
@@ -227,67 +316,107 @@ class FlowProfileGeneration:
                         await asyncio.sleep(min(attempt + 1, 3))
                 finally:
                     record["duration_ms"] = int((time.monotonic() - started) * 1000)
-                    if browser_id:
-                        await self.client._notify_browser_captcha_request_finished(browser_id)
+                    await diagnostic.release(self.client, browser_id)
 
     async def upload_image(self, project_id, image_bytes):
         from ..flow.angular_image_assets import (
             UPLOAD_IMAGE_RPC,
             build_upload_image_request,
             parse_upload_image_response,
+            validate_upload_image_inputs,
         )
 
         async with self._context() as (context, proxy):
             await self._verified(context)
-            # Flow's UploadImage RPC accepts the project context directly and
-            # does not use reCAPTCHA. Only generation/upsample requests need a
-            # remote solve. Uploading a frame must not consume a separate solve.
-            payload = build_upload_image_request(
-                project_id,
-                image_bytes,
-                self.client._detect_image_mime_type(image_bytes),
-                "lay4flow-upload-" + uuid.uuid4().hex,
+            mime_type = self.client._detect_image_mime_type(image_bytes)
+            filename = "lay4flow-upload-" + uuid.uuid4().hex
+            validate_upload_image_inputs(project_id, image_bytes, mime_type, filename)
+            await prepare_flow_rpc(
+                context,
+                source_path=f"/project/{project_id}",
+                expected_email=self.token.email,
             )
-            await self._check_binding(proxy)
-            return parse_upload_image_response(
-                await self._call(
+            # The current official UploadImage caller acquires its own action
+            # token before sending the same project context as generation.
+            diagnostic = _SubmissionDiagnostics(attach_budget=False)
+            browser_id = None
+            try:
+                captcha_started = time.monotonic()
+                try:
+                    captcha, browser_id = await self.client._get_recaptcha_token(
+                        project_id, action="UPLOAD_IMAGE", token_id=self.token.id
+                    )
+                finally:
+                    diagnostic.captcha_finished(captcha_started, browser_id is not None)
+                if not captcha:
+                    raise FlowRPCError("captcha_failed", "flow_captcha")
+                await self._check_binding(proxy)
+                payload = build_upload_image_request(
+                    project_id, image_bytes, mime_type, filename, captcha
+                )
+                response = await self._call(
                     context,
                     UPLOAD_IMAGE_RPC,
                     payload,
                     network_step="flow_upload_image",
                     timeout_ms=max(90000, int(config.flow_image_request_timeout * 1000)),
                     source_path=f"/project/{project_id}",
+                    submit_observer=diagnostic.observe,
                 )
-            )
+                result = parse_upload_image_response(response)
+                diagnostic.accepted()
+                return result
+            except BaseException as error:
+                diagnostic.failed(error)
+                raise
+            finally:
+                await diagnostic.release(self.client, browser_id)
 
     async def upsample_image(self, project_id, media_id, resolution):
         from ..flow.angular_image_assets import (
             UPSAMPLE_IMAGE_RPC,
             build_upsample_image_request,
             parse_upsample_image_response,
+            validate_upsample_image_inputs,
         )
 
         async with self._context() as (context, proxy):
             await self._verified(context)
-            captcha, browser_id = await self._captcha(project_id, "IMAGE_GENERATION")
+            validate_upsample_image_inputs(project_id, media_id, resolution)
+            await prepare_flow_rpc(
+                context,
+                source_path=f"/project/{project_id}",
+                expected_email=self.token.email,
+            )
+            diagnostic = _SubmissionDiagnostics(attach_budget=False)
+            browser_id = None
             try:
+                captcha_started = time.monotonic()
+                try:
+                    captcha, browser_id = await self._captcha(project_id, "IMAGE_GENERATION")
+                finally:
+                    diagnostic.captcha_finished(captcha_started, browser_id is not None)
                 if not captcha:
                     raise FlowRPCError("captcha_failed", "flow_captcha")
                 await self._check_binding(proxy)
                 payload = build_upsample_image_request(project_id, media_id, resolution, captcha)
-                return parse_upsample_image_response(
-                    await self._call(
-                        context,
-                        UPSAMPLE_IMAGE_RPC,
-                        payload,
-                        network_step="flow_upsample_image",
-                        timeout_ms=max(20000, int(config.upsample_timeout * 1000)),
-                        source_path=f"/project/{project_id}",
-                    )
+                response = await self._call(
+                    context,
+                    UPSAMPLE_IMAGE_RPC,
+                    payload,
+                    network_step="flow_upsample_image",
+                    timeout_ms=max(20000, int(config.upsample_timeout * 1000)),
+                    source_path=f"/project/{project_id}",
+                    submit_observer=diagnostic.observe,
                 )
+                result = parse_upsample_image_response(response)
+                diagnostic.accepted()
+                return result
+            except BaseException as error:
+                diagnostic.failed(error)
+                raise
             finally:
-                if browser_id:
-                    await self.client._notify_browser_captcha_request_finished(browser_id)
+                await diagnostic.release(self.client, browser_id)
 
     async def generate_video_text(self, project_id, prompt, model_name, aspect_ratio):
         return await self.generate_video("text", project_id, prompt, model_name, aspect_ratio)
@@ -323,17 +452,30 @@ class FlowProfileGeneration:
             for name in ("batch_id", "media_id", "workflow_id"):
                 kwargs[name] = kwargs.get(name) or str(uuid.uuid4())
             max_attempts = max(1, config.flow_max_retries)
+            trace = {"max_retries": max_attempts, "generation_attempts": []}
             for attempt in range(max_attempts):
                 budget = CURRENT_ATTEMPTS.get()
                 if budget is not None:
                     budget.take()
                 browser_id = None
-                rejection_reason = None
+                record = {"attempt": attempt + 1, "recaptcha_ok": False}
+                trace["generation_attempts"].append(record)
+                diagnostic = _SubmissionDiagnostics(record)
                 delay = min(attempt + 1, 3)
                 try:
-                    captcha, browser_id = await self.client._get_recaptcha_token(
-                        project_id, action="VIDEO_GENERATION", token_id=self.token.id
+                    await prepare_flow_rpc(
+                        context,
+                        source_path=f"/project/{project_id}",
+                        expected_email=self.token.email,
                     )
+                    captcha_started = time.monotonic()
+                    try:
+                        captcha, browser_id = await self.client._get_recaptcha_token(
+                            project_id, action="VIDEO_GENERATION", token_id=self.token.id
+                        )
+                    finally:
+                        diagnostic.captcha_finished(captcha_started, browser_id is not None)
+                    record["recaptcha_ok"] = bool(captcha)
                     if not captcha:
                         raise RemoteCaptchaError("MISSING_TOKEN_OR_SESSION")
                     await self._check_binding(proxy)
@@ -348,22 +490,26 @@ class FlowProfileGeneration:
                     )
                     if budget is not None:
                         budget.stage("submit")
-                    result = parse_video_response(
-                        await self._call(
-                            context,
-                            VIDEO_RPCS[mode],
-                            payload,
-                            network_step="flow_generate_video",
-                            timeout_ms=max(90000, self.client._get_video_submit_timeout() * 1000),
-                            source_path=f"/project/{project_id}",
-                        ),
-                        project_id,
+                    response = await self._call(
+                        context,
+                        VIDEO_RPCS[mode],
+                        payload,
+                        network_step="flow_generate_video",
+                        timeout_ms=max(90000, self.client._get_video_submit_timeout() * 1000),
+                        source_path=f"/project/{project_id}",
+                        submit_observer=diagnostic.observe,
                     )
+                    result = parse_video_response(response, project_id)
+                    diagnostic.accepted()
+                    record["success"] = True
                     if budget is not None:
                         budget.stage("polling")
                         budget.finish("accepted", next_action="polling")
                     return result
-                except (RemoteCaptchaError, FlowRPCError) as error:
+                except Exception as error:
+                    diagnostic.failed(error)
+                    record.update(success=False)
+                    error.flow_retry_trace = trace
                     if budget is not None:
                         budget.finish("failed", error, next_action="stop")
                     # A typed RPC rejection without a success payload is known
@@ -371,15 +517,6 @@ class FlowProfileGeneration:
                     # mixed/unknown outcomes must never submit another video.
                     confirmed = is_confirmed_flow_rejection(error)
                     if confirmed:
-                        rejection_reason = (
-                            "recaptcha_rejected"
-                            if error.public_error
-                            in {
-                                "PUBLIC_ERROR_UNUSUAL_ACTIVITY",
-                                "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC",
-                            }
-                            else "upstream_rejected"
-                        )
                         delay = min(2 ** (attempt + 1), 10) + random.uniform(0, 1)
                     # Every confirmed rejection belongs to the outer policy,
                     # even when no custom keyword matches: each failure must
@@ -387,10 +524,14 @@ class FlowProfileGeneration:
                     policy = getattr(self.tokens, "generation_error_policy", None)
                     if confirmed and policy is not None:
                         raise
-                    retryable = error.retryable and (
-                        isinstance(error, RemoteCaptchaError)
-                        or confirmed
-                        and error.reason == "transient_error"
+                    retryable = (
+                        isinstance(error, (RemoteCaptchaError, FlowRPCError))
+                        and error.retryable
+                        and (
+                            isinstance(error, RemoteCaptchaError)
+                            or confirmed
+                            and error.reason == "transient_error"
+                        )
                     )
                     if (
                         not retryable
@@ -406,13 +547,7 @@ class FlowProfileGeneration:
                         budget.history[-1]["next_action"] = "retry_same_account"
                         budget.history[-1]["delay_seconds"] = round(delay, 2)
                 finally:
-                    if browser_id:
-                        if rejection_reason:
-                            await self.client._notify_browser_captcha_error(
-                                browser_id, error_reason=rejection_reason
-                            )
-                        else:
-                            await self.client._notify_browser_captcha_request_finished(browser_id)
+                    await diagnostic.release(self.client, browser_id)
                 await asyncio.sleep(delay)
 
     async def get_media(self, media_name):
@@ -476,6 +611,7 @@ class FlowProfileGeneration:
                     VIDEO_POLL_RPC,
                     build_video_poll_request(operations),
                     network_step="flow_poll_video",
+                    source_path=f"/project/{project_id}" if project_id else "/",
                 ),
                 project_id,
                 poll=True,

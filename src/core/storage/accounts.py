@@ -240,6 +240,47 @@ class AccountRepository:
                 await db.execute(query, params)
                 await db.commit()
 
+    async def update_submission_proxy_modes(
+        self, token_ids: List[int], mode: str
+    ) -> List[Dict[str, Any]]:
+        """Save only generation egress, without touching login or Profile state."""
+        if mode not in {"fixed", "pool_random"}:
+            raise ValueError("submission_proxy_mode must be fixed or pool_random")
+        ids = list(dict.fromkeys(token_ids))
+        if not ids:
+            return []
+        async with self._database._connect(write=True) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT id, submission_proxy_mode FROM tokens WHERE id IN ("
+                + ",".join("?" for _ in ids)
+                + ")",
+                ids,
+            )
+            existing = dict(await cursor.fetchall())
+            changed = [
+                token_id for token_id in ids if token_id in existing and existing[token_id] != mode
+            ]
+            if changed:
+                await db.execute(
+                    "UPDATE tokens SET submission_proxy_mode = ? WHERE id IN ("
+                    + ",".join("?" for _ in changed)
+                    + ")",
+                    [mode, *changed],
+                )
+            await db.commit()
+        return [
+            {
+                "id": token_id,
+                "success": True,
+                "status": "unchanged" if existing[token_id] == mode else "updated",
+                "submission_proxy_mode": mode,
+            }
+            if token_id in existing
+            else {"id": token_id, "success": False, "status": "failed", "message": "账号不存在"}
+            for token_id in ids
+        ]
+
     async def update_token_if_credentials_match(
         self,
         token_id: int,

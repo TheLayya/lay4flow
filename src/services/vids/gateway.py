@@ -65,6 +65,39 @@ class GatewayError(Exception):
         super().__init__(message)
 
 
+SPEECH_LANGUAGE_HINT = "Vids 语音上游当前仅支持英文输入"
+CROSS_PRODUCT_HINT = "该账号当前缺少跨产品共享权限，具体限制需在账号侧核查"
+
+
+def safe_upstream_error(record):
+    """Keep only bounded reason/status strings; never expose raw provider messages."""
+    upstream = record.get("upstream_error") if isinstance(record, dict) else None
+    if not isinstance(upstream, dict):
+        return None
+    result = {}
+    for key in ("status", "reason"):
+        value = upstream.get(key)
+        if isinstance(value, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", value):
+            result[key] = value
+    return result or None
+
+
+def upstream_failure_text(record):
+    """Return a safe reason plus a local explanation for verified refusal classes."""
+    upstream = safe_upstream_error(record)
+    reason = upstream.get("reason") if upstream else None
+    if reason is None:
+        return None
+    kind = record.get("kind") if isinstance(record, dict) else None
+    if reason == "LANGUAGE_NOT_SUPPORTED" and kind == "speech":
+        hint = SPEECH_LANGUAGE_HINT
+    elif reason == "CROSS_PRODUCT_SHARING_DISABLED":
+        hint = CROSS_PRODUCT_HINT
+    else:
+        hint = None
+    return f"{reason}（{hint}）" if hint else reason
+
+
 def image_input(encoded):
     """Validate a single original image before claiming or uploading a request."""
     try:
@@ -378,12 +411,9 @@ class VidsGateway:
             "getSettings",
         }:
             result["error_operation"] = record["error_operation"]
-        if isinstance(record.get("upstream_error"), dict):
-            result["upstream_error"] = {
-                key: record["upstream_error"][key]
-                for key in ("status", "reason")
-                if isinstance(record["upstream_error"].get(key), str)
-            }
+        upstream = safe_upstream_error(record)
+        if upstream:
+            result["upstream_error"] = upstream
         if "outputs" in record:
             result["outputs"] = [
                 {

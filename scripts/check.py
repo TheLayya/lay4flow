@@ -48,6 +48,7 @@ COMPONENTS = [
     "src/services/factory.py",
     "src/services/studio_jobs.py",
     "tests/test_studio_jobs.py",
+    "tests/test_studio_vids_pool.py",
     "src/services/flow",
     "src/services/vids",
     "src/services/browser",

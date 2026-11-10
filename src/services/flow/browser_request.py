@@ -1,4 +1,4 @@
-"""HTTP requests from a Profile snapshot on its validated fixed exit."""
+"""HTTP requests from a verified Profile snapshot on a caller-selected exit."""
 
 import asyncio
 import json

@@ -145,6 +145,32 @@ test('explicit detail history wins over response fallback and malformed history 
     assert.equal(s.classify({ status_code: 429, status_text: 'retrying_account' }), 'processing')
 })
 
+test('attempt diagnostics distinguish missing evidence from recorded zero and validate transport codes', () => {
+    const s = logsView()
+    assert.deepEqual(plain(s.attemptTimings({})), [])
+    assert.equal(s.attemptTransport({}), '')
+    assert.equal(s.submissionCount({}), null)
+    assert.equal(s.submissionState({}), '')
+    assert.equal(s.submissionState({ submission_state: 'rejected' }), '上游明确拒绝')
+    assert.equal(s.submissionState({ submission_state: 'unknown' }), '受理情况未知')
+    assert.equal(s.submissionState({ submission_state: 'accepted' }), '上游已受理')
+    assert.equal(s.submissionState({ submission_state: 'private-session' }), '')
+    for (const submission_state of ['__proto__', 'toString', [], {}, true])
+        assert.equal(s.submissionState({ submission_state }), '')
+    assert.deepEqual(plain(s.attemptTimings({ captcha_ms: 3125, captcha_to_submit_ms: 0, submit_ms: 250 })), [
+        { label: '取码', value: '3.13 s' }, { label: '取码→提交', value: '0.00 s' }, { label: '提交响应', value: '0.25 s' },
+    ])
+    assert.equal(s.attemptTransport({ http_status: 200, rpc_code: 8 }), 'HTTP 200 · RPC 8')
+    assert.equal(s.attemptTransport({ http_status: 503, rpc_code: 0 }), 'HTTP 503 · RPC 0')
+    assert.equal(s.submissionCount({ submission_count: 0 }), 0)
+    for (const invalid of [true, '12', -1, NaN, Infinity, 604800001])
+        assert.deepEqual(plain(s.attemptTimings({ captcha_ms: invalid, captcha_to_submit_ms: invalid, submit_ms: invalid })), [])
+    for (const invalid of [true, '200', -1, 200.5, 600])
+        assert.equal(s.attemptTransport({ http_status: invalid, rpc_code: invalid }), '')
+    for (const invalid of [true, '1', -1, 1.5, 101])
+        assert.equal(s.submissionCount({ submission_count: invalid }), null)
+})
+
 test('Vids logs label generation kinds and distinguish unresolved receipts from processing and failure', () => {
     const s = logsView()
     for (const [kind, text] of [['image', '图片'], ['video', '视频'], ['speech', '语音']])

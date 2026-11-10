@@ -255,6 +255,22 @@ const attemptDuration = (item) =>
     typeof item.duration_ms === 'number' && Number.isFinite(item.duration_ms) && item.duration_ms >= 0
         ? duration(item.duration_ms / 1000)
         : '耗时未记录'
+const attemptTimings = (item) =>
+    [['captcha_ms', '取码'], ['captcha_to_submit_ms', '取码→提交'], ['submit_ms', '提交响应']]
+        .filter(([key]) => typeof item[key] === 'number' && Number.isFinite(item[key]) && item[key] >= 0 && item[key] <= 604800000)
+        .map(([key, label]) => ({ label, value: duration(item[key] / 1000) }))
+const attemptTransport = (item) =>
+    [['http_status', 'HTTP', 100], ['rpc_code', 'RPC', 0]]
+        .filter(([key, , min]) => Number.isInteger(item[key]) && item[key] >= min && item[key] <= 599)
+        .map(([key, label]) => `${label} ${item[key]}`).join(' · ')
+const submissionCount = (item) =>
+    Number.isInteger(item.submission_count) && item.submission_count >= 0 && item.submission_count <= 100
+        ? item.submission_count
+        : null
+const submissionState = (item) => {
+    const labels = { not_submitted: '未提交', unknown: '受理情况未知', rejected: '上游明确拒绝', accepted: '上游已受理' }
+    return typeof item.submission_state === 'string' && Object.hasOwn(labels, item.submission_state) ? labels[item.submission_state] : ''
+}
 const requestPrompt = computed(
     () =>
         request.value?.prompt ||
@@ -716,10 +732,11 @@ onUnmounted(() => {
                                     <td class="attempt-number">第 {{ item.attempt || index + 1 }} 次尝试</td>
                                     <td><span class="attempt-account-label">{{ item.account_email || (item.account_id ? '成员 #' + item.account_id : '未分配账号') }}</span><small v-if="item.account_email && item.account_id">成员 #{{ item.account_id }}</small></td>
                                     <td>{{ attemptStage(item) }}</td>
-                                    <td><el-tag :type="attemptType(item)" effect="light" size="small">{{ attemptStatus(item) }}</el-tag></td>
-                                    <td class="attempt-time">{{ attemptDuration(item) }}</td>
+                                    <td><el-tag :type="attemptType(item)" effect="light" size="small">{{ attemptStatus(item) }}</el-tag><small v-if="submissionState(item)">{{ submissionState(item) }}</small></td>
+                                    <td class="attempt-time">{{ attemptDuration(item) }}<small v-for="timing in attemptTimings(item)" :key="timing.label" class="attempt-timing">{{ timing.label }} {{ timing.value }}</small><small v-if="submissionCount(item) !== null" class="attempt-timing">实际提交 {{ submissionCount(item) }} 次</small></td>
                                     <td class="attempt-evidence">
                                         <code v-if="item.error_code">{{ item.error_code }}</code>
+                                        <small v-if="attemptTransport(item)" class="attempt-transport">{{ attemptTransport(item) }}</small>
                                         <p v-if="item.error">{{ item.error }}</p>
                                         <div v-if="item.rule_action || item.rule_keyword" class="attempt-rule-evidence">
                                             命中规则 <code v-if="item.rule_keyword">{{ item.rule_keyword }}</code>
@@ -1672,7 +1689,7 @@ html.dark .metric-icon.amber {
 .attempt-table th:nth-child(2) { width: 190px; }
 .attempt-table th:nth-child(3) { width: 100px; }
 .attempt-table th:nth-child(4) { width: 70px; }
-.attempt-table th:nth-child(5) { width: 75px; }
+.attempt-table th:nth-child(5) { width: 145px; }
 .attempt-table th:nth-child(6) { width: 280px; }
 .attempt-table th:nth-child(7) { width: 150px; }
 .attempt-table th:nth-child(8) { width: 130px; }
@@ -1701,6 +1718,10 @@ html.dark .metric-icon.amber {
 }
 .attempt-time {
     font-variant-numeric: tabular-nums;
+}
+.attempt-timing,
+.attempt-transport {
+    white-space: nowrap;
 }
 .log-detail-drawer .log-detail-heading {
     gap: 10px;

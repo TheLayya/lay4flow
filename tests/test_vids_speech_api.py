@@ -18,7 +18,7 @@ from src.services.vids.client import (
     VidsProtocolError,
     VidsTransportError,
 )
-from src.services.vids.gateway import VidsGateway
+from src.services.vids.gateway import CROSS_PRODUCT_HINT, SPEECH_LANGUAGE_HINT, VidsGateway
 from tests.test_vids_gateway import KEY, client as mock_client
 
 BODY = {"model": "vids-speech", "input": "Hello, Vids.", "voice": "Puck", "response_format": "wav"}
@@ -40,6 +40,8 @@ class VidsSpeechAPITests(unittest.IsolatedAsyncioTestCase):
         body = {**BODY, "voice": "Algenib"}
         first = await self.speech("safe-speech-error", body)
         self.assertEqual(first.status_code, 502)
+        self.assertIn("LANGUAGE_NOT_SUPPORTED", first.json()["error"]["message"])
+        self.assertIn(SPEECH_LANGUAGE_HINT, first.json()["error"]["message"])
         receipt = first.json()["vids_receipt"]
         self.assertEqual(receipt["error_operation"], "generate")
         self.assertEqual(
@@ -53,6 +55,26 @@ class VidsSpeechAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.speech("safe-speech-error", body)).json(), first.json())
         self.upstream.generate_speech.assert_awaited_once_with(BODY["input"], voice="Algenib")
         self.upstream.download_audio.assert_not_awaited()
+
+    async def test_cross_product_refusal_keeps_safe_reason_and_never_resubmits(self):
+        self.upstream.generate_speech.side_effect = VidsProtocolError(
+            "generate",
+            403,
+            upstream_status="PERMISSION_DENIED",
+            upstream_reason="CROSS_PRODUCT_SHARING_DISABLED",
+        )
+        body = {**BODY, "voice": "Puck"}
+        first = await self.speech("cross-product-speech", body)
+        self.assertEqual(first.status_code, 502)
+        self.assertIn("CROSS_PRODUCT_SHARING_DISABLED", first.json()["error"]["message"])
+        self.assertIn(CROSS_PRODUCT_HINT, first.json()["error"]["message"])
+        self.assertEqual(
+            first.json()["vids_receipt"]["upstream_error"],
+            {"status": "PERMISSION_DENIED", "reason": "CROSS_PRODUCT_SHARING_DISABLED"},
+        )
+        replay = await self.speech("cross-product-speech", body)
+        self.assertEqual(replay.json(), first.json())
+        self.upstream.generate_speech.assert_awaited_once_with(BODY["input"], voice="Puck")
 
     async def test_all_official_preset_voices_reach_upstream_and_keep_receipt_voice(self):
         for voice in PRESET_VOICES:

@@ -258,6 +258,7 @@ class UnifiedBudgetRealPipelineTests(unittest.IsolatedAsyncioTestCase):
             patch.object(FlowProfileGeneration, "_verified", AsyncMock()),
             patch.object(FlowProfileGeneration, "_check_binding", AsyncMock()),
             patch.object(FlowProfileGeneration, "_call", call),
+            patch("src.services.browser.flow_generation.prepare_flow_rpc", AsyncMock()),
             patch(
                 "src.services.flow.angular_video.resolve_video_usage", return_value="abra_t2v_8s"
             ),

@@ -177,6 +177,18 @@ class VidsOutcomeRepository:
         )
 
     @staticmethod
+    def _safe_upstream_error(value):
+        """Log only bounded RPC status/reason, never the raw provider message."""
+        if not isinstance(value, dict):
+            return None
+        result = {}
+        for key in ("status", "reason"):
+            item = value.get(key)
+            if isinstance(item, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", item):
+                result[key] = item
+        return result or None
+
+    @staticmethod
     def _decision(decision):
         if decision is None:
             return None
@@ -300,6 +312,9 @@ class VidsOutcomeRepository:
             error = self._safe_error(record.get("error"))
             if error:
                 response["error"] = {"code": error}
+            upstream = self._safe_upstream_error(record.get("upstream_error"))
+            if upstream:
+                response["upstream_error"] = upstream
             response = json.dumps(response)
             protocol_status = (
                 int(error.removeprefix("upstream_http_"))
